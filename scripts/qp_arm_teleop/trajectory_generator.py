@@ -60,10 +60,15 @@ except Exception:  # pragma: no cover - ament always present under ROS 2
 
 # Optional keyboard E-stop ('0' to freeze). Headless robots may lack pynput /
 # an X server, so the import is best-effort and the node runs fine without it.
-try:
-    from pynput import keyboard as _kb
-except Exception:  # pragma: no cover
-    _kb = None
+_kb = None
+if os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY'):
+    try:
+        from pynput import keyboard as _kb
+    except Exception:  # pragma: no cover
+        pass
+else:
+    # No display server -> pynput will hang on import. Skip it entirely.
+    pass
 
 
 def euler_to_quaternion(roll, pitch, yaw):
