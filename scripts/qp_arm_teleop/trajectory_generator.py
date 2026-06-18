@@ -63,7 +63,7 @@ except Exception:  # pragma: no cover - ament always present under ROS 2
 
 
 def euler_to_quaternion(roll, pitch, yaw):
-    """Fixed-axis RPY -> quaternion [x, y, z, w] (for the RViz pose marker)."""
+    """Fixed-axis RPY -> quaternion [x, y, z, w]."""
     cr, sr = np.cos(roll / 2.0), np.sin(roll / 2.0)
     cp, sp = np.cos(pitch / 2.0), np.sin(pitch / 2.0)
     cy, sy = np.cos(yaw / 2.0), np.sin(yaw / 2.0)
@@ -71,7 +71,88 @@ def euler_to_quaternion(roll, pitch, yaw):
     qy = cr * sp * cy + sr * cp * sy
     qz = cr * cp * sy - sr * sp * cy
     qw = cr * cp * cy + sr * sp * sy
-    return [qx, qy, qz, qw]
+    return np.array([qx, qy, qz, qw])
+
+
+def quaternion_to_rpy(q):
+    """Quaternion [x, y, z, w] -> RPY [roll, pitch, yaw]."""
+    x, y, z, w = q
+    # Roll (x-axis rotation)
+    sinr_cosp = 2.0 * (w * x + y * z)
+    cosr_cosp = 1.0 - 2.0 * (x * x + y * y)
+    roll = np.arctan2(sinr_cosp, cosr_cosp)
+    # Pitch (y-axis rotation)
+    sinp = 2.0 * (w * y - z * x)
+    if abs(sinp) >= 1.0:
+        pitch = np.copysign(np.pi / 2.0, sinp)
+    else:
+        pitch = np.arcsin(sinp)
+    # Yaw (z-axis rotation)
+    siny_cosp = 2.0 * (w * z + x * y)
+    cosy_cosp = 1.0 - 2.0 * (y * y + z * z)
+    yaw = np.arctan2(siny_cosp, cosy_cosp)
+    return np.array([roll, pitch, yaw])
+
+
+def slerp(q0, q1, t):
+    """Spherical linear interpolation between quaternions q0 and q1 at fraction t.
+    Both quaternions are [x, y, z, w]. Returns interpolated quaternion."""
+    q0 = q0 / np.linalg.norm(q0)
+    q1 = q1 / np.linalg.norm(q1)
+    dot = np.dot(q0, q1)
+    # Ensure shortest path
+    if dot < 0.0:
+        q1 = -q1
+        dot = -dot
+    # If very close, use linear interpolation to avoid division by zero
+    if dot > 0.9995:
+        result = q0 + t * (q1 - q0)
+        return result / np.linalg.norm(result)
+    theta_0 = np.arccos(np.clip(dot, -1.0, 1.0))
+    theta = theta_0 * t
+    sin_theta = np.sin(theta)
+    sin_theta_0 = np.sin(theta_0)
+    s0 = np.cos(theta) - dot * sin_theta / sin_theta_0
+    s1 = sin_theta / sin_theta_0
+    result = s0 * q0 + s1 * q1
+    return result / np.linalg.norm(result)
+
+
+def angular_velocity_from_slerp(q0, q1, s_dot_sigma, duration):
+    """Approximate angular velocity [wx, wy, wz] for the SLERP interpolation.
+    Uses the axis-angle between q0 and q1 scaled by s_dot * sigma."""
+    q0 = q0 / np.linalg.norm(q0)
+    q1 = q1 / np.linalg.norm(q1)
+    dot = np.dot(q0, q1)
+    if dot < 0.0:
+        q1 = -q1
+        dot = -dot
+    if dot > 0.9995:
+        return np.zeros(3)
+    # Relative quaternion: q_rel = q1 * q0_inv
+    # q0_inv for unit quaternion = [-x, -y, -z, w]
+    q0_inv = np.array([-q0[0], -q0[1], -q0[2], q0[3]])
+    # q_rel = q1 * q0_inv (Hamilton product)
+    q_rel = _quat_mult(q1, q0_inv)
+    # Convert to axis-angle
+    angle = 2.0 * np.arccos(np.clip(q_rel[3], -1.0, 1.0))
+    if abs(angle) < 1e-10:
+        return np.zeros(3)
+    axis = q_rel[:3] / np.sin(angle / 2.0)
+    # Angular velocity = axis * angle * s_dot * sigma (chain rule)
+    return axis * angle * s_dot_sigma
+
+
+def _quat_mult(q1, q2):
+    """Hamilton product of two quaternions [x, y, z, w]."""
+    x1, y1, z1, w1 = q1
+    x2, y2, z2, w2 = q2
+    return np.array([
+        w1*x2 + x1*w2 + y1*z2 - z1*y2,
+        w1*y2 - x1*z2 + y1*w2 + z1*x2,
+        w1*z2 + x1*y2 - y1*x2 + z1*w2,
+        w1*w2 - x1*x2 - y1*y2 - z1*z2,
+    ])
 
 
 def _default_config_path():
@@ -172,7 +253,13 @@ class TrajectoryGenerator(Node):
         self.rpy_r = np.zeros(3); self.rpy_l = np.zeros(3)
         self.start_right = np.zeros(3); self.start_left = np.zeros(3)
         self.end_right = np.zeros(3); self.end_left = np.zeros(3)
-        self.hold_rpy_r = np.zeros(3); self.hold_rpy_l = np.zeros(3)
+        self.start_rpy_r = np.zeros(3); self.start_rpy_l = np.zeros(3)
+        self.end_rpy_r = np.zeros(3); self.end_rpy_l = np.zeros(3)
+        # Quaternion caches for SLERP (computed once at target generation)
+        self.q_start_r = np.array([0, 0, 0, 1.0])
+        self.q_start_l = np.array([0, 0, 0, 1.0])
+        self.q_end_r = np.array([0, 0, 0, 1.0])
+        self.q_end_l = np.array([0, 0, 0, 1.0])
 
         # --- Diagnostics counters -----------------------------------------
         self.ee_msg_count = 0       # how many /qp_debug/ee_real msgs arrived
@@ -328,24 +415,36 @@ class TrajectoryGenerator(Node):
         if t_total < self.delay_start:
             self.start_right = self.pos_r.copy()
             self.start_left = self.pos_l.copy()
-            self.hold_rpy_r = self.rpy_r.copy()
-            self.hold_rpy_l = self.rpy_l.copy()
+            self.start_rpy_r = self.rpy_r.copy()
+            self.start_rpy_l = self.rpy_l.copy()
             self.virtual_time = 0.0
             self.publish_references(self.start_right, np.zeros(3),
-                                    self.start_left, np.zeros(3))
+                                    self.start_rpy_r, np.zeros(3),
+                                    self.start_left, np.zeros(3),
+                                    self.start_rpy_l, np.zeros(3))
             self.update_phase('S', "PHASE: WAITING", 1.0, 0.8, 0.0)
             return
 
         # --- TRANSITION: generate the targets once -----------------------
         if not self.targets_generated:
             self.end_right, self.end_left = self._compute_targets()
+            self.end_rpy_r, self.end_rpy_l = self._compute_orientation_targets()
+            # Pre-compute quaternions for SLERP
+            self.q_start_r = euler_to_quaternion(*self.start_rpy_r)
+            self.q_start_l = euler_to_quaternion(*self.start_rpy_l)
+            self.q_end_r = euler_to_quaternion(*self.end_rpy_r)
+            self.q_end_l = euler_to_quaternion(*self.end_rpy_l)
             self.targets_generated = True
             print(f"[STATE] Targets generated (preset '{self.preset_name}', "
                   f"mode '{self.mode}')", flush=True)
-            print(f"  Right: start {self.start_right.round(3)} "
-                  f"-> end {self.end_right.round(3)}", flush=True)
-            print(f"  Left : start {self.start_left.round(3)} "
-                  f"-> end {self.end_left.round(3)}", flush=True)
+            print(f"  Right: pos {self.start_right.round(3)} "
+                  f"-> {self.end_right.round(3)}", flush=True)
+            print(f"         rpy {np.degrees(self.start_rpy_r).round(1)} "
+                  f"-> {np.degrees(self.end_rpy_r).round(1)} deg", flush=True)
+            print(f"  Left : pos {self.start_left.round(3)} "
+                  f"-> {self.end_left.round(3)}", flush=True)
+            print(f"         rpy {np.degrees(self.start_rpy_l).round(1)} "
+                  f"-> {np.degrees(self.end_rpy_l).round(1)} deg", flush=True)
 
         # --- 1. TIME SCALING ---------------------------------------------
         if self.dynamic_trajectory:
@@ -370,6 +469,10 @@ class TrajectoryGenerator(Node):
             # --- REGULATION ---
             x_ref_r, xdot_ref_r = self.end_right, np.zeros(3)
             x_ref_l, xdot_ref_l = self.end_left, np.zeros(3)
+            rpy_ref_r = self.end_rpy_r
+            rpy_ref_l = self.end_rpy_l
+            w_ref_r = np.zeros(3)
+            w_ref_l = np.zeros(3)
             if current_time - self.last_print_time > 1.0:
                 print(f"[HOLDING] dist R: "
                       f"{np.linalg.norm(x_ref_r - self.pos_r):.3f}m | "
@@ -382,10 +485,24 @@ class TrajectoryGenerator(Node):
             tau = self.virtual_time / self.duration
             s = 10 * tau**3 - 15 * tau**4 + 6 * tau**5
             s_dot = (30 * tau**2 - 60 * tau**3 + 30 * tau**4) / self.duration
+
+            # Position interpolation
             x_ref_r = self.start_right + s * (self.end_right - self.start_right)
             xdot_ref_r = (s_dot * sigma) * (self.end_right - self.start_right)
             x_ref_l = self.start_left + s * (self.end_left - self.start_left)
             xdot_ref_l = (s_dot * sigma) * (self.end_left - self.start_left)
+
+            # Orientation interpolation (SLERP with same quintic scalar)
+            q_r = slerp(self.q_start_r, self.q_end_r, s)
+            q_l = slerp(self.q_start_l, self.q_end_l, s)
+            rpy_ref_r = quaternion_to_rpy(q_r)
+            rpy_ref_l = quaternion_to_rpy(q_l)
+            # Angular velocity feed-forward
+            w_ref_r = angular_velocity_from_slerp(
+                self.q_start_r, self.q_end_r, s_dot * sigma, self.duration)
+            w_ref_l = angular_velocity_from_slerp(
+                self.q_start_l, self.q_end_l, s_dot * sigma, self.duration)
+
             if current_time - self.last_print_time > 0.5:
                 print(f"[TRACKING] v-time: {self.virtual_time:.1f}s | "
                       f"speed: {sigma * 100:.0f}% | "
@@ -395,7 +512,8 @@ class TrajectoryGenerator(Node):
                 self.last_print_time = current_time
             self.update_phase('T', "PHASE: TRACKING", 0.0, 1.0, 0.0)
 
-        self.publish_references(x_ref_r, xdot_ref_r, x_ref_l, xdot_ref_l)
+        self.publish_references(x_ref_r, xdot_ref_r, rpy_ref_r, w_ref_r,
+                                x_ref_l, xdot_ref_l, rpy_ref_l, w_ref_l)
         self.publish_dashboard(x_ref_r, xdot_ref_r, x_ref_l, xdot_ref_l)
 
     # =====================================================================
@@ -421,20 +539,43 @@ class TrajectoryGenerator(Node):
             end_r = self.start_right.copy()
         return end_r, end_l
 
+    def _compute_orientation_targets(self):
+        """Resolve per-hand target RPY from the active preset.
+        If rpy_right/rpy_left is specified in the YAML, use it.
+        Otherwise, hold the sampled start orientation (no rotation)."""
+        if 'rpy_right' in self.preset:
+            end_rpy_r = np.array(self.preset['rpy_right'], dtype=float)
+        else:
+            end_rpy_r = self.start_rpy_r.copy()
+
+        if 'rpy_left' in self.preset:
+            end_rpy_l = np.array(self.preset['rpy_left'], dtype=float)
+        else:
+            end_rpy_l = self.start_rpy_l.copy()
+
+        # Inactive arm holds its start orientation.
+        if self.arms == 'right':
+            end_rpy_l = self.start_rpy_l.copy()
+        elif self.arms == 'left':
+            end_rpy_r = self.start_rpy_r.copy()
+
+        return end_rpy_r, end_rpy_l
+
     # =====================================================================
     # PUBLISH HELPERS
     # =====================================================================
-    def publish_references(self, x_r, xdot_r, x_l, xdot_l):
+    def publish_references(self, x_r, xdot_r, rpy_r, w_r,
+                               x_l, xdot_l, rpy_l, w_l):
         """Pack and send the cartesian reference on the standard QP contract."""
         msg_r = Float64MultiArray()
         msg_l = Float64MultiArray()
         if self.control_orientation:
-            # 6-DOF: position + held start orientation + lin vel + zero ang vel.
-            msg_r.data = (x_r.tolist() + self.hold_rpy_r.tolist() +
-                          xdot_r.tolist() + [0.0, 0.0, 0.0] +
+            # 6-DOF: [x,y,z, r,p,y, xdot,ydot,zdot, wx,wy,wz, task_dim]
+            msg_r.data = (x_r.tolist() + rpy_r.tolist() +
+                          xdot_r.tolist() + w_r.tolist() +
                           [float(self.task_dimension)])
-            msg_l.data = (x_l.tolist() + self.hold_rpy_l.tolist() +
-                          xdot_l.tolist() + [0.0, 0.0, 0.0] +
+            msg_l.data = (x_l.tolist() + rpy_l.tolist() +
+                          xdot_l.tolist() + w_l.tolist() +
                           [float(self.task_dimension)])
         else:
             # Position-only fallback (6-float branch in the controller).
