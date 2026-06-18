@@ -42,7 +42,7 @@
 # =============================================================================
 
 # --- WHICH TEST TO RUN -------------------------------------------------------
-active_preset: "home"
+active_preset: "crossing_swap"
 
 # --- GLOBAL BEHAVIOUR FLAGS --------------------------------------------------
 # Lambda-driven time scaling (dynamic_trajectory / DYNAMIC_TRAJECTORY flag).
@@ -66,7 +66,7 @@ task_dimension: 6.0
 ref_frame: "base_footprint"
 
 # --- TRAJECTORY SHAPE / TIMING ----------------------------------------------
-duration: 15.0       # [s] virtual time to complete the quintic motion
+duration: 10.0       # [s] virtual time to complete the quintic motion
 delay_start: 1.0     # [s] settle window used to sample the real start pose
 cube_size: 0.1       # [m] edge of the random perturbation cube (swap_perturbed)
 
@@ -110,8 +110,8 @@ presets:
     description: "Both hands to symmetric home pose. Grippers forward, palms down."
     arms: both
     mode: absolute
-    right: [0.5, -0.5, 0.8]
-    left:  [0.5,  0.5, 0.8]
+    right: [0.6, -0.5, 0.8]
+    left:  [0.6,  0.5, 0.8]
     rpy_right: [3.1416, 0.0, 0.0]       # forward-down
     rpy_left:  [3.1416, 0.0, 0.0]       # forward-down
 

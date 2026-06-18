@@ -54,11 +54,11 @@ W_CENTER = 0.01                # Posture centering weight in the QP cost
 # 3. DYNAMIC SCALING BOUNDARIES
 # =============================================================================
 # --- Decoupled dynamic slack weighting ---
-BASE_WEIGHT_SLACK = 5.0        # Standard slack weight (active against an obstacle)
+BASE_WEIGHT_SLACK = 15.0        # Standard slack weight (active against an obstacle)
 MAX_WEIGHT_SLACK = 50.0        # Maximum slack weight (in free space)
 BETA = 1.0                     # How fast slack weights return to baseline as lambda grows
 # --- Dynamic gamma (CLF) scheduling ---
-GAMMA_CLF_DEFAULT = 1.0        # Static / initial CLF convergence rate (Vdot <= -gamma*V)
+GAMMA_CLF_DEFAULT = 1.5        # Static / initial CLF convergence rate (Vdot <= -gamma*V)
 GAMMA_MIN = 0.5                # Lower bound of the scheduled CLF gamma
 GAMMA_MAX = 1.0                # Upper bound of the scheduled CLF gamma
 BETA_GAMMA = 5.0               # How quickly gamma drops as the collision lambda grows

@@ -9,6 +9,7 @@ Panels:
         - /RobotModel1
         - /QP_Debug_Markers1
         - /TF1
+        - /TF1/Frames1
         - /Marker1
         - /QP_Debug_Markers2
         - /Camera1/Topic1
@@ -19,7 +20,7 @@ Panels:
         - /QP_Debug_Markers3/Namespaces1
         - /Marker4
       Splitter Ratio: 0.4910941421985626
-    Tree Height: 365
+    Tree Height: 742
   - Class: rviz_common/Views
     Expanded:
       - /Current View1
@@ -548,14 +549,6 @@ Visualization Manager:
           Value: true
         base_rear_laser_link:
           Value: false
-        goal_Blue_Side:
-          Value: true
-        goal_Blue_Top:
-          Value: true
-        goal_Red_Side:
-          Value: true
-        goal_Red_Top:
-          Value: true
         gripper_head_camera_link:
           Value: false
         gripper_head_camera_rgbd_bottom_screw_frame:
@@ -577,7 +570,7 @@ Visualization Manager:
         gripper_left_fingertip_right_link:
           Value: false
         gripper_left_grasping_link:
-          Value: false
+          Value: true
         gripper_left_inner_finger_left_link:
           Value: false
         gripper_left_inner_finger_right_link:
@@ -782,14 +775,6 @@ Visualization Manager:
                   {}
             virtual_base_laser_link:
               {}
-          goal_Blue_Side:
-            {}
-          goal_Blue_Top:
-            {}
-          goal_Red_Side:
-            {}
-          goal_Red_Top:
-            {}
       Update Interval: 0
       Value: true
     - Class: rviz_default_plugins/Marker
@@ -811,7 +796,6 @@ Visualization Manager:
       Namespaces:
         environment: true
         qp_debug: true
-        qp_debug_gripper: true
         task_environment: true
       Topic:
         Depth: 5
@@ -921,9 +905,7 @@ Visualization Manager:
       Enabled: true
       Name: QP_Debug_Markers
       Namespaces:
-        local_policy_arrows: true
-        policy_grippers: true
-        v_geo_direction: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -965,16 +947,16 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 0.5544506311416626
+      Distance: 1.9734605550765991
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 0.671572208404541
-        Y: -0.31600770354270935
-        Z: 0.772361695766449
+        X: 0.5188421010971069
+        Y: -0.30993691086769104
+        Z: 0.7733913064002991
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
@@ -1070,12 +1052,12 @@ Window Geometry:
     collapsed: false
   Displays:
     collapsed: true
-  Height: 547
+  Height: 1131
   Hide Left Dock: true
   Hide Right Dock: false
   Image:
     collapsed: false
-  QMainWindow State: 000000ff00000000fd00000001000000000000018b00000415fc0200000004fb000000100044006900730070006c006100790073000000003b00000359000000c700fffffffb0000000a00560069006500770073000000039a000000b6000000a000fffffffb0000000a0049006d006100670065030000069300000043000000e8000000bcfb0000000c00430061006d00650072006100000003c30000008d0000002800ffffff0000039f000001cd00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd00000001000000000000018b00000415fc0200000004fb000000100044006900730070006c006100790073000000003b0000036f000000c700fffffffb0000000a0056006900650077007300000003b0000000a0000000a000fffffffb0000000a0049006d006100670065030000069300000043000000e8000000bcfb0000000c00430061006d00650072006100000003c30000008d0000002800ffffff0000039f0000041500000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Views:
     collapsed: true
   Width: 927
