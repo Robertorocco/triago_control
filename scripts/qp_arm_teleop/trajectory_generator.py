@@ -226,29 +226,37 @@ class TrajectoryGenerator(Node):
         return presets[name]
 
     def _print_banner(self):
-        log = self.get_logger()
-        log.info("=" * 60)
-        log.info("TRAJECTORY GENERATOR starting")
-        log.info(f"  config        : {self.config_path}")
-        log.info(f"  preset        : {self.preset_name} "
-                 f"[{self.preset.get('category', 'n/a')}]")
-        log.info(f"  description   : {self.preset.get('description', '').strip()}")
-        log.info(f"  arms          : {self.arms}   mode: {self.mode}")
-        log.info(f"  duration      : {self.duration:.1f}s   delay: {self.delay_start:.1f}s")
-        log.info(f"  dynamic_traj  : {self.dynamic_trajectory}")
-        log.info(f"  orientation   : {self.control_orientation} "
-                 f"(task_dim={self.task_dimension})")
-        log.info("=" * 60)
-        log.info(f"[INIT] Waiting for /qp_debug/ee_real to sample the start pose. "
-                 f"The arms will NOT move until that topic is received.")
+        # Force the node logger to show INFO (in case ros2 run suppresses it).
+        try:
+            from rclpy.logging import LoggingSeverity
+            self.get_logger().set_level(LoggingSeverity.INFO)
+        except Exception:
+            pass  # Older distros may not have this; print() below always works.
+
+        # Use print(flush=True) so output appears IMMEDIATELY in all terminals.
+        print("=" * 60, flush=True)
+        print(" TRAJECTORY GENERATOR", flush=True)
+        print("=" * 60, flush=True)
+        print(f"  config        : {self.config_path}", flush=True)
+        print(f"  preset        : {self.preset_name} "
+              f"[{self.preset.get('category', 'n/a')}]", flush=True)
+        print(f"  description   : {self.preset.get('description', '').strip()}",
+              flush=True)
+        print(f"  arms          : {self.arms}   mode: {self.mode}", flush=True)
+        print(f"  duration      : {self.duration:.1f}s   "
+              f"delay: {self.delay_start:.1f}s", flush=True)
+        print(f"  dynamic_traj  : {self.dynamic_trajectory}", flush=True)
+        print(f"  orientation   : {self.control_orientation} "
+              f"(task_dim={self.task_dimension})", flush=True)
+        print("=" * 60, flush=True)
+        print(f"[INIT] Waiting for /qp_debug/ee_real to sample start pose. "
+              f"Arms will NOT move until that topic arrives.", flush=True)
 
     # =====================================================================
     # DIAGNOSTICS WATCHDOG (1 Hz)
     # =====================================================================
     def _diagnostics_callback(self):
-        """Explain, out loud, why the trajectory may not be running yet."""
-        log = self.get_logger()
-
+        """Print (flushed) exactly why the trajectory may not be running."""
         n_pub_ee = self.count_publishers('/qp_debug/ee_real')
         n_pub_lambda = self.count_publishers('/qp_debug/lambda_cbf')
         n_sub_r = self.count_subscribers('/arm_right/cartesian_reference')
@@ -257,37 +265,30 @@ class TrajectoryGenerator(Node):
         # 1) Not moving because we never sampled a start pose.
         if not self.data_received:
             if self.ee_msg_count == 0:
-                log.warn(
-                    f"WAITING: no message on /qp_debug/ee_real yet "
-                    f"({n_pub_ee} publisher(s) detected). "
-                    f"Is main_qp_controller.py running and past its init? "
-                    f"Check: ros2 topic echo /qp_debug/ee_real")
+                print(f"[WARN] WAITING: no /qp_debug/ee_real received yet "
+                      f"({n_pub_ee} publisher(s) detected). "
+                      f"Is main_qp_controller.py running?", flush=True)
             else:
-                log.warn(
-                    f"RECEIVING /qp_debug/ee_real but length={self.ee_last_len} "
-                    f"(<9 floats): cannot sample EE positions. Expected >=9 "
-                    f"([p_r(3), v_r(3), p_l(3), ...]).")
+                print(f"[WARN] RECEIVING /qp_debug/ee_real but "
+                      f"length={self.ee_last_len} (<9 floats). "
+                      f"Cannot sample start position.", flush=True)
             return
 
-        # 2) Data is flowing -> report health once per second while active.
+        # 2) Data is flowing -> report status.
         if self.dynamic_trajectory and self.lambda_msg_count == 0:
-            log.warn(
-                f"dynamic_trajectory=ON but no /qp_debug/lambda_cbf received "
-                f"({n_pub_lambda} publisher(s)). Time scaling stays at 100% "
-                f"(sigma=1.0) until lambda arrives.")
+            print(f"[WARN] dynamic_trajectory=ON but no /qp_debug/lambda_cbf "
+                  f"({n_pub_lambda} pub). sigma stays 1.0.", flush=True)
 
         if self.ref_pub_count > 0 and (n_sub_r == 0 and n_sub_l == 0):
-            log.warn(
-                "Publishing references but NOBODY is subscribed to "
-                "/arm_{right,left}/cartesian_reference. Is the controller "
-                "listening on these exact topic names?")
+            print("[WARN] Publishing refs but NOBODY subscribed to "
+                  "/arm_{{right,left}}/cartesian_reference!", flush=True)
 
-        log.info(
-            f"[STATUS] phase={self.current_phase or '-'} "
-            f"v_time={self.virtual_time:.2f}/{self.duration:.0f}s "
-            f"sigma={self.current_sigma:.2f} lambda={self.lambda_cbf:.2f} "
-            f"| ee_msgs={self.ee_msg_count}(len={self.ee_last_len}) "
-            f"refs_pub={self.ref_pub_count} subs(R/L)={n_sub_r}/{n_sub_l}")
+        print(f"[STATUS] phase={self.current_phase or '-'} "
+              f"v_time={self.virtual_time:.2f}/{self.duration:.0f}s "
+              f"sigma={self.current_sigma:.2f} lambda={self.lambda_cbf:.2f} "
+              f"| ee_msgs={self.ee_msg_count}(len={self.ee_last_len}) "
+              f"refs_pub={self.ref_pub_count} subs(R/L)={n_sub_r}/{n_sub_l}",
+              flush=True)
 
     # =====================================================================
     # SUBSCRIBER CALLBACKS
@@ -304,16 +305,14 @@ class TrajectoryGenerator(Node):
 
         if not self.first_ee_logged:
             self.first_ee_logged = True
-            self.get_logger().info(
-                f"[OK] First /qp_debug/ee_real received (length={self.ee_last_len}).")
+            print(f"[OK] First /qp_debug/ee_real received "
+                  f"(length={self.ee_last_len}).", flush=True)
             if self.ee_last_len < 18 and self.control_orientation \
                     and not self.orientation_warned:
                 self.orientation_warned = True
-                self.get_logger().warn(
-                    f"control_orientation=True but ee_real has only "
-                    f"{self.ee_last_len} floats (<18): no RPY available, "
-                    f"holding orientation at zero RPY. Set control_orientation: "
-                    f"false in the YAML if this is unintended.")
+                print(f"[WARN] control_orientation=True but ee_real has only "
+                      f"{self.ee_last_len} floats (<18): no RPY available. "
+                      f"Holding orientation at zero RPY.", flush=True)
 
         if len(msg.data) >= 9:
             self.pos_r = np.array(msg.data[0:3])
@@ -351,15 +350,12 @@ class TrajectoryGenerator(Node):
         if not self.targets_generated:
             self.end_right, self.end_left = self._compute_targets()
             self.targets_generated = True
-            self.get_logger().info(
-                f"[STATE] Targets generated (preset '{self.preset_name}', "
-                f"mode '{self.mode}')")
-            self.get_logger().info(
-                f"  Right: start {self.start_right.round(3)} "
-                f"-> end {self.end_right.round(3)}")
-            self.get_logger().info(
-                f"  Left : start {self.start_left.round(3)} "
-                f"-> end {self.end_left.round(3)}")
+            print(f"[STATE] Targets generated (preset '{self.preset_name}', "
+                  f"mode '{self.mode}')", flush=True)
+            print(f"  Right: start {self.start_right.round(3)} "
+                  f"-> end {self.end_right.round(3)}", flush=True)
+            print(f"  Left : start {self.start_left.round(3)} "
+                  f"-> end {self.end_left.round(3)}", flush=True)
 
         # --- 1. TIME SCALING ---------------------------------------------
         if self.dynamic_trajectory:
@@ -385,11 +381,10 @@ class TrajectoryGenerator(Node):
             x_ref_r, xdot_ref_r = self.end_right, np.zeros(3)
             x_ref_l, xdot_ref_l = self.end_left, np.zeros(3)
             if current_time - self.last_print_time > 1.0:
-                self.get_logger().info(
-                    f"[HOLDING] dist R: "
-                    f"{np.linalg.norm(x_ref_r - self.pos_r):.3f}m | "
-                    f"dist L: {np.linalg.norm(x_ref_l - self.pos_l):.3f}m | "
-                    f"lambda: {self.lambda_cbf:.2f}")
+                print(f"[HOLDING] dist R: "
+                      f"{np.linalg.norm(x_ref_r - self.pos_r):.3f}m | "
+                      f"dist L: {np.linalg.norm(x_ref_l - self.pos_l):.3f}m | "
+                      f"lambda: {self.lambda_cbf:.2f}", flush=True)
                 self.last_print_time = current_time
             self.update_phase('R', "PHASE: REGULATION", 0.0, 0.5, 1.0)
         else:
@@ -402,11 +397,11 @@ class TrajectoryGenerator(Node):
             x_ref_l = self.start_left + s * (self.end_left - self.start_left)
             xdot_ref_l = (s_dot * sigma) * (self.end_left - self.start_left)
             if current_time - self.last_print_time > 0.5:
-                self.get_logger().info(
-                    f"[TRACKING] v-time: {self.virtual_time:.1f}s | "
-                    f"speed: {sigma * 100:.0f}% | "
-                    f"lambda: {self.lambda_cbf:.2f} | "
-                    f"err R: {np.linalg.norm(x_ref_r - self.pos_r):.3f}m")
+                print(f"[TRACKING] v-time: {self.virtual_time:.1f}s | "
+                      f"speed: {sigma * 100:.0f}% | "
+                      f"lambda: {self.lambda_cbf:.2f} | "
+                      f"err R: {np.linalg.norm(x_ref_r - self.pos_r):.3f}m",
+                      flush=True)
                 self.last_print_time = current_time
             self.update_phase('T', "PHASE: TRACKING", 0.0, 1.0, 0.0)
 
@@ -470,7 +465,7 @@ class TrajectoryGenerator(Node):
             self.current_phase = phase_char
             self.pub_phase.publish(String(data=phase_char))
             self.publish_rviz_marker(text, r, g, b)
-            self.get_logger().info(f"[PHASE] Switched to {text}")
+            print(f"[PHASE] Switched to {text}", flush=True)
 
     def publish_rviz_marker(self, text, r, g, b):
         marker = Marker()
