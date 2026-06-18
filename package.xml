@@ -1,0 +1,37 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>triago_control</name>
+  <version>0.0.1</version>
+  <description>Motion Control for TRIAGo</description>
+  <maintainer email="roberto.rocco@irisa.fr">Roberto Rocco</maintainer>
+  <license>BSD-3-Clause</license>
+
+  <buildtool_depend>ament_cmake</buildtool_depend>
+  <buildtool_depend>ament_cmake_python</buildtool_depend>
+
+  <depend>rclcpp</depend>
+  <depend>rclpy</depend>
+  
+  <depend>pinocchio</depend>
+  <depend>python3-numpy</depend>
+  <depend>python3-scipy</depend>
+  <depend>python3-matplotlib</depend>
+  <depend>python3-quadprog</depend>
+  
+  <depend>std_msgs</depend>
+  <depend>geometry_msgs</depend>
+  <depend>sensor_msgs</depend>
+  <depend>nav_msgs</depend>
+  <depend>control_msgs</depend>
+  <depend>trajectory_msgs</depend>
+  <depend>visualization_msgs</depend>
+  <depend>controller_manager_msgs</depend>
+  <depend>rcl_interfaces</depend>
+  <depend>tf2_ros</depend>
+  <depend>urdf_parser_py</depend>
+
+  <export>
+    <build_type>ament_cmake</build_type>
+  </export>
+</package>
