@@ -24,6 +24,7 @@ install(PROGRAMS
   scripts/qp_arm_teleop/main_shared_autonomy.py
   scripts/qp_arm_teleop/main_qp_controller.py
   scripts/qp_arm_teleop/trajectory_generator.py
+  scripts/qp_arm_teleop/sa_coupling_debugger.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
