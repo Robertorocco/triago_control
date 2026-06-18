@@ -11,7 +11,7 @@ geometry are expressed in this frame.
 | **Y** | Left |
 | **Z** | Up |
 
-**Origin**: center of TIAGo's torso.
+**Origin**: center of TIAGo's mobile base (ground plane).
 
 ## gripper_right_grasping_link / gripper_left_grasping_link
 

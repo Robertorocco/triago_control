@@ -61,6 +61,8 @@ control_orientation: true
 task_dimension: 6.0
 
 # Frame the targets and the RViz phase marker are expressed in.
+# Origin is at the center of TIAGo's mobile base (ground plane).
+# Axes: X=forward, Y=left, Z=up. Positive Y = left robot side.
 ref_frame: "base_footprint"
 
 # --- TRAJECTORY SHAPE / TIMING ----------------------------------------------
