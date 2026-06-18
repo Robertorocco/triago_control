@@ -23,6 +23,7 @@ install(PROGRAMS
   scripts/qp_arm_teleop/keyboard_teleop.py
   scripts/qp_arm_teleop/main_shared_autonomy.py
   scripts/qp_arm_teleop/main_qp_controller.py
+  scripts/qp_arm_teleop/trajectory_generator.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

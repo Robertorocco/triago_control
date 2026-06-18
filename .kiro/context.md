@@ -1,7 +1,7 @@
 # AI Agent Context — triago_control
 
 > **This file is maintained by the AI agent. Do not edit manually.**
-> Last updated: 2026-06-18
+> Last updated: 2026-06-18 (added trajectory_generator.py + trajectory_endpoints.yaml)
 
 ---
 
@@ -48,13 +48,15 @@ triago_control/
 │   └── context.md                   ← THIS FILE
 ├── config/
 │   ├── qp_debug.rviz               (RViz layout for live telemetry)
-│   └── Recording_Rviz.rviz
+│   ├── Recording_Rviz.rviz
+│   └── trajectory_endpoints.yaml   (endpoint presets + flags for trajectory_generator.py)
 ├── launch/
 │   └── visualize.launch.py
 ├── scripts/                         ← EXECUTABLE ENTRY POINTS (ros2 run targets)
 │   ├── qp_arm_teleop/
 │   │   ├── main_qp_controller.py       ★ primary: QP-CLF-CBF safety loop
 │   │   ├── main_shared_autonomy.py     ★ primary: intent prediction + blending
+│   │   ├── trajectory_generator.py     ★ open-loop quintic reference source (robustness tests)
 │   │   ├── base_controller.py          mobile base velocity teleop
 │   │   ├── keyboard_teleop.py          keyboard cartesian jog
 │   │   ├── plotter.py                  live matplotlib dashboard
@@ -101,6 +103,17 @@ main_shared_autonomy.py
            triago_control.shared_autonomy.plot_manager.PlotManager
   publishes to: /arm_right/cartesian_reference, /arm_left/cartesian_reference
   subscribes to: /collision_constraints (from main_qp_controller)
+
+trajectory_generator.py
+  reads: config/trajectory_endpoints.yaml (endpoint presets + behaviour flags;
+         overridable at runtime via the `config_file` ROS parameter)
+  subscribes to: /qp_debug/ee_real (sample start pose), /qp_debug/lambda_cbf (time scaling)
+  publishes to: /arm_right/cartesian_reference, /arm_left/cartesian_reference
+                (13-float 6-DOF refs: [xyz, rpy, xdot, w, task_dim]),
+                /trajectory/phase, /trajectory/phase_marker,
+                /trajectory/reference_state, /trajectory/time_scale
+  NOTE: does NOT import or modify main_qp_controller — it is just another source
+        on the existing cartesian-reference contract (like keyboard_teleop).
 ```
 
 ---
@@ -178,6 +191,7 @@ The `main_shared_autonomy.py` node implements:
 | Meshcat visualization | ✅ Working | Thread-safe, auto-reloads on grasp coloring |
 | Digital twin mode | ✅ Working | `SIMULATE_IDEAL_KINEMATICS` flag in config |
 | Dynamic CBF pair removal | ⚠️ Experimental | `DYNAMIC_CBF` flag, used during grasp sequences |
+| Open-loop trajectory testing | ✅ Working | `trajectory_generator.py` + `config/trajectory_endpoints.yaml`: YAML-selected quintic reference presets (free space → collision-risk → out-of-workspace) with optional λ-driven `dynamic_trajectory` time scaling |
 
 ---
 
@@ -194,6 +208,11 @@ ros2 run triago_control main_qp_controller.py
 
 # Run shared autonomy
 ros2 run triago_control main_shared_autonomy.py
+
+# Run an open-loop robustness trajectory (edit config/trajectory_endpoints.yaml first)
+ros2 run triago_control trajectory_generator.py
+#   override the endpoint file:
+ros2 run triago_control trajectory_generator.py --ros-args -p config_file:=/abs/path/trajectory_endpoints.yaml
 
 # Run plotter dashboard
 ros2 run triago_control plotter.py
