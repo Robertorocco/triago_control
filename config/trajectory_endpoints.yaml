@@ -1,0 +1,139 @@
+# =============================================================================
+# trajectory_endpoints.yaml
+# -----------------------------------------------------------------------------
+# Endpoint library + behaviour flags for `trajectory_generator.py`.
+#
+# This file is the SINGLE source of truth for the open-loop robustness tests
+# fed into `main_qp_controller.py`. The generator only ever publishes on the
+# standard cartesian-reference contract (see below), so the QP controller stays
+# completely untouched: it cannot tell whether the reference came from the
+# keyboard teleop, the shared-autonomy node, or this generator.
+#
+# Reference contract consumed by main_qp_controller (`ref_cb_right/left`):
+#     [x, y, z, roll, pitch, yaw, xdot, ydot, zdot, wx, wy, wz, (task_dim)]
+#   - 12 floats  -> full 6-DOF reference (position + orientation hold)
+#   - 13th float -> optional task dimension (6.0 = full 6D, 5.0 = align X only)
+#   - 6  floats  -> position-only fallback (used when control_orientation: false)
+#
+# How to run a test:
+#   1. edit `active_preset` below to point at one of the entries under `presets`
+#   2. (optional) flip `dynamic_trajectory` / tune `duration`
+#   3. colcon build --packages-select triago_control && source install/setup.bash
+#   4. ros2 run triago_control trajectory_generator.py
+#      (override this file at runtime with:
+#         ros2 run triago_control trajectory_generator.py --ros-args \
+#              -p config_file:=/absolute/path/to/trajectory_endpoints.yaml)
+# =============================================================================
+
+# --- WHICH TEST TO RUN -------------------------------------------------------
+# Must match a key under `presets`. Progression suggestion:
+#   free space (right only) -> free space (both) -> collision-risk -> out of WS.
+active_preset: "home"
+
+# --- GLOBAL BEHAVIOUR FLAGS --------------------------------------------------
+# Lambda-driven time scaling. When true the trajectory clock slows down as the
+# CBF shadow price (/qp_debug/lambda_cbf) grows, so the reference "waits" for the
+# safety filter instead of running away from it. When false the clock is rigid.
+dynamic_trajectory: true
+
+# Publish 6-DOF references (position + held start orientation). Recommended:
+#   true  -> 12/13-float refs, orientation is locked to the sampled start pose
+#            (also required for the live plotter, which ignores <12-float refs).
+#   false -> 6-float position-only refs (orientation left free to the QP).
+control_orientation: true
+
+# Task dimension appended as the 13th float when control_orientation is true:
+#   6.0 -> full position + orientation tracking
+#   5.0 -> position + X-axis alignment only (yaw about the tool axis is free)
+task_dimension: 6.0
+
+# Frame the targets and the RViz phase marker are expressed in. Must match
+# main_qp_controller's REF_FRAME (config.py -> REF_FRAME).
+ref_frame: "base_footprint"
+
+# --- TRAJECTORY SHAPE / TIMING ----------------------------------------------
+duration: 15.0       # [s] virtual time to complete the quintic motion
+delay_start: 1.0     # [s] settle window used to sample the real start pose
+cube_size: 0.1       # [m] edge of the random perturbation cube (swap_perturbed)
+
+# =============================================================================
+# ENDPOINT PRESETS
+# -----------------------------------------------------------------------------
+# Each preset defines, per hand, the cartesian target reached at the end of the
+# motion. Supported fields:
+#   category    : free_space | collision_risk | out_of_workspace  (label only)
+#   description : human-readable note
+#   arms        : right | left | both   (an inactive arm holds its sampled start)
+#   mode        : absolute        -> use the explicit `right`/`left` [x,y,z]
+#                 swap            -> right -> left start, left -> right start
+#                 swap_perturbed  -> swap + uniform noise within +/- cube_size/2
+#   right/left  : [x, y, z] absolute target (only used by mode: absolute)
+#
+# Targets are absolute positions in `ref_frame`. The orientation is always the
+# orientation sampled at start (held constant) when control_orientation: true.
+# =============================================================================
+presets:
+
+  # --- 1. FREE SPACE -- single arm (gentlest robustness check) ---------------
+  right_reach:
+    category: free_space
+    description: "Right hand only: slow forward reach. Left hand holds position."
+    arms: right
+    mode: absolute
+    right: [0.8, -0.5, 0.8]
+    left:  [0.5,  0.5, 0.8]   # ignored (left holds its sampled start)
+
+  # --- 2. FREE SPACE -- both arms, symmetric "home" pose ---------------------
+  home:
+    category: free_space
+    description: "Both hands to the symmetric home pose."
+    arms: both
+    mode: absolute
+    right: [0.5, -0.5, 0.8]
+    left:  [0.5,  0.5, 0.8]
+
+  # --- 3. FREE SPACE -- both arms lowered ------------------------------------
+  lowered:
+    category: free_space
+    description: "Both hands lowered (descend in Z)."
+    arms: both
+    mode: absolute
+    right: [0.5, -0.5, 0.3]
+    left:  [0.5,  0.5, 0.3]
+
+  # --- 4. FREE SPACE -- both arms slid forward -------------------------------
+  sliding:
+    category: free_space
+    description: "Both hands pushed forward in X (sliding reach)."
+    arms: both
+    mode: absolute
+    right: [0.8, -0.5, 0.8]
+    left:  [0.8,  0.5, 0.8]
+
+  # --- 5. COLLISION RISK -- perfect arm swap ---------------------------------
+  crossing_swap:
+    category: collision_risk
+    description: "Perfect swap: each hand drives to the other's start pose. The
+                  straight-line paths intersect, so without the CBF the arms
+                  would collide at mid-trajectory."
+    arms: both
+    mode: swap
+
+  # --- 6. COLLISION RISK -- swap with random perturbation --------------------
+  crossing_perturbed:
+    category: collision_risk
+    description: "Swap targets with uniform random perturbation inside a cube,
+                  so the crossing point shifts run-to-run (stress test)."
+    arms: both
+    mode: swap_perturbed
+
+  # --- 7. OUT OF WORKSPACE -- force an unreachable / cross-body target -------
+  out_of_ws:
+    category: out_of_workspace
+    description: "Right hand commanded across the body into the left workspace
+                  (0.7, 0.5, 0.3): unreachable / collision-forcing target used
+                  to probe slack behaviour and CBF braking under saturation."
+    arms: both
+    mode: absolute
+    right: [0.7, 0.5, 0.3]
+    left:  [0.5, 0.5, 0.3]
