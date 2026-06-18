@@ -58,17 +58,8 @@ try:
 except Exception:  # pragma: no cover - ament always present under ROS 2
     get_package_share_directory = None
 
-# Optional keyboard E-stop ('0' to freeze). Headless robots may lack pynput /
-# an X server, so the import is best-effort and the node runs fine without it.
-_kb = None
-if os.environ.get('DISPLAY') or os.environ.get('WAYLAND_DISPLAY'):
-    try:
-        from pynput import keyboard as _kb
-    except Exception:  # pragma: no cover
-        pass
-else:
-    # No display server -> pynput will hang on import. Skip it entirely.
-    pass
+# Optional keyboard E-stop removed — pynput hangs in headless environments.
+# Use Ctrl-C to stop the node instead.
 
 
 def euler_to_quaternion(roll, pitch, yaw):
@@ -191,14 +182,8 @@ class TrajectoryGenerator(Node):
         self.ref_pub_count = 0      # how many reference msgs we have published
         self.orientation_warned = False
 
-        # --- Optional keyboard E-stop ('0') -------------------------------
-        self.listener = None
-        if _kb is not None:
-            try:
-                self.listener = _kb.Listener(on_press=self.on_key_press)
-                self.listener.start()
-            except Exception as e:  # pragma: no cover
-                self.get_logger().warn(f"[INIT] Keyboard listener disabled: {e}")
+        # --- Optional keyboard E-stop removed (pynput hangs headless) ----
+        # Use Ctrl-C to stop the node.
 
         self.timer = self.create_timer(0.01, self.timer_callback)
         # Watchdog/diagnostics at 1 Hz: tells you *why* nothing is moving.
@@ -489,15 +474,7 @@ class TrajectoryGenerator(Node):
         marker.text = text
         self.pub_rviz_marker.publish(marker)
 
-    def on_key_press(self, key):
-        try:
-            if key.char == '0':
-                self.get_logger().warn("[STOP] '0' pressed - freezing motion.")
-                self.should_stop = True
-                self.publish_references(self.pos_r, np.zeros(3),
-                                        self.pos_l, np.zeros(3))
-        except AttributeError:
-            pass
+
 
 
 def main():
@@ -517,11 +494,6 @@ def main():
     except KeyboardInterrupt:
         pass
     finally:
-        if node.listener is not None:
-            try:
-                node.listener.stop()
-            except Exception:
-                pass
         node.destroy_node()
         rclpy.shutdown()
 
