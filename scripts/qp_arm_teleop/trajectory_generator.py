@@ -80,18 +80,35 @@ def euler_to_quaternion(roll, pitch, yaw):
 
 def _default_config_path():
     """Locate the installed trajectory_endpoints.yaml (share dir), else source."""
+    fname = 'trajectory_endpoints.yaml'
+
+    # 1. Ament share directory (the correct installed location).
     if get_package_share_directory is not None:
         try:
             share = get_package_share_directory('triago_control')
-            candidate = os.path.join(share, 'config', 'trajectory_endpoints.yaml')
+            candidate = os.path.join(share, 'config', fname)
             if os.path.exists(candidate):
                 return candidate
         except Exception:
             pass
-    # Fallback: walk up from this file to <pkg>/config/trajectory_endpoints.yaml
+
+    # 2. Fallback: relative to this script inside the *source* tree.
+    #    <pkg_root>/scripts/qp_arm_teleop/trajectory_generator.py
+    #    -> <pkg_root>/config/trajectory_endpoints.yaml
     here = os.path.dirname(os.path.abspath(__file__))
-    guess = os.path.normpath(os.path.join(here, '..', '..', 'config',
-                                          'trajectory_endpoints.yaml'))
+    guess = os.path.normpath(os.path.join(here, '..', '..', 'config', fname))
+    if os.path.exists(guess):
+        return guess
+
+    # 3. Last-ditch: check common colcon workspace layout.
+    #    Installed at: <ws>/install/<pkg>/lib/<pkg>/trajectory_generator.py
+    #    Config at:    <ws>/install/<pkg>/share/<pkg>/config/...
+    guess2 = os.path.normpath(os.path.join(here, '..', 'share',
+                                           'triago_control', 'config', fname))
+    if os.path.exists(guess2):
+        return guess2
+
+    # Return the ament-based guess anyway (will produce a clear error later).
     return guess
 
 
@@ -485,7 +502,15 @@ class TrajectoryGenerator(Node):
 
 def main():
     rclpy.init()
-    node = TrajectoryGenerator()
+    try:
+        node = TrajectoryGenerator()
+    except Exception as e:
+        # Print to stderr so it's never buffered / swallowed.
+        import sys
+        print(f"\n[FATAL] trajectory_generator failed to initialize:\n  {e}\n",
+              file=sys.stderr, flush=True)
+        rclpy.shutdown()
+        raise
     try:
         while rclpy.ok() and not node.should_stop:
             rclpy.spin_once(node, timeout_sec=0.1)
