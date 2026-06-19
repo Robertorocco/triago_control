@@ -28,7 +28,7 @@ DEBUG = False                   # Verbose timing / kinematics console tracing
 GRASP_DEBUG = True              # Verbose grasp / CBF-bypass interaction tracing
 DISABLE_CBF = False             # Mathematically delete the collision barrier
 DYNAMIC_CBF = False             # Dynamically remove pairs for interaction
-DYNAMIC_SLACK_WEIGHT = False    # Increase slack weights in free space, drop near obstacles
+DYNAMIC_SLACK_WEIGHT = True    # Increase slack weights in free space, drop near obstacles
 COMPARISON_CLF = True           # Use the normalized (unit-error) scalar CLF formulation
 DYNAMIC_GAMMA_CLF = False       # Vary CLF convergence rate with the safety margin
 SIMULATE_IDEAL_KINEMATICS = False  # True = pure math digital twin, False = real hardware

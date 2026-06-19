@@ -130,7 +130,7 @@ class SharedControlNode(Node):
 
         # --- Intent Inference (delegated to BeliefEstimator) ---
         # Weighting matrix (penalizes translation heavily, respects rotation)
-        self.W = np.diag([10.0, 10.0, 10.0, 2.0, 2.0, 2.0])
+        self.W = np.diag([10.0, 10.0, 10.0, 1.0, 1.0, 1.0])
         self.plot_lock = threading.Lock()
         self.belief_estimator = BeliefEstimator(
             target_keys=self.target_keys, W=self.W, beta=0.04, ema_alpha=0.995)
