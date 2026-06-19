@@ -328,10 +328,12 @@ class SharedControlNode(Node):
                        f"Fxyz=[{self.current_force_local[0]:6.2f},"
                        f"{self.current_force_local[1]:6.2f},{self.current_force_local[2]:6.2f}] N")
 
-            if self.grasp_sm.state in ("GRASP_APPROACH", "GRASP_CLOSE"):
-                self.get_logger().info(log_msg, throttle_duration_sec=0.25)
-            else:
-                self.get_logger().info(log_msg, throttle_duration_sec=2.0)
+            # Only print when meaningful force contact is detected (>1.5 N)
+            if self.current_force_mag > 1.5:
+                if self.grasp_sm.state in ("GRASP_APPROACH", "GRASP_CLOSE"):
+                    self.get_logger().info(log_msg, throttle_duration_sec=0.25)
+                else:
+                    self.get_logger().info(log_msg, throttle_duration_sec=2.0)
 
     def active_arm_callback(self, msg):
         """Switches the actively controlled arm (left/right) when the user presses the haption button."""
@@ -388,7 +390,8 @@ class SharedControlNode(Node):
         current_time = time.time()
         if (current_time - self._control_last_print) >= self.freq_window_s:
             fps = self._control_ticks / (current_time - self._control_last_print)
-            self.get_logger().info(f"[FREQ] Control Loop: {fps:.1f} Hz")
+            if fps < 50.0:
+                self.get_logger().warn(f"[FREQ] Control Loop DROPPED: {fps:.1f} Hz")
             self._control_ticks = 0
             self._control_last_print = current_time
 

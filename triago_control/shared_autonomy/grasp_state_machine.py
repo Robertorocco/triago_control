@@ -103,8 +103,8 @@ class GraspStateMachine:
     #   ^ Fix for Problem A: without this, a single noisy EMA dip below 0.90
     #     would kick the robot out of PRE_GRASP even while perfectly aligned.
 
-    GRASP_CBF_MARGIN = -0.025
-    GRASP_CONTACT_DEPTH = -0.001
+    GRASP_CBF_MARGIN = -0.055
+    GRASP_CONTACT_DEPTH = -0.015
     GRASP_FORCE_THRESHOLD = 2.0
     GRASP_CLOSE_HOLD_S = 2.0
     GRASP_APPROACH_TIMEOUT_S = 15.0
@@ -258,7 +258,7 @@ class GraspStateMachine:
             # target is now effectively zero from the moment it's created.
             r = self.cylinders[color]['radius']
             self.locked_grasp_pose = inp.get_dynamic_goal_pose(
-                inp.T_active_goal, inp.active_goal_key, approach_offset=-r)
+                inp.T_active_goal, inp.active_goal_key, approach_offset=-r - 0.03)
 
             self._transition("GRASP_APPROACH")
             self.grasp_timer = time.time()

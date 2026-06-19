@@ -177,7 +177,7 @@ class PlotManager:
         current_time = time.time()
         if self.logger is not None and (current_time - self._plot_last_print) >= self.freq_window_s:
             fps = self._plot_ticks / (current_time - self._plot_last_print)
-            self.logger.info(f"[FREQ] Plotting UI:  {fps:.1f} Hz")
+            # self.logger.info(f"[FREQ] Plotting UI:  {fps:.1f} Hz")  # Disabled: not useful
             self._plot_ticks = 0
             self._plot_last_print = current_time
 
