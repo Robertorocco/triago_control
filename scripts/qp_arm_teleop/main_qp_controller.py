@@ -111,6 +111,7 @@ class SafetyQPController(Node):
         self.pub_lambda_cbf = self.create_publisher(Float64, '/qp_debug/lambda_cbf', 10)
         self.pub_lambda_joints = self.create_publisher(Float64MultiArray, '/qp_debug/lambda_joints', 10)
         self.pub_dynamic_weights = self.create_publisher(Float64MultiArray, '/qp_debug/dynamic_weights', 10)
+        self.pub_d_safe_dynamic = self.create_publisher(Float64, '/qp_debug/d_safe_dynamic', 10)
         self.pub_qdot_cmd = self.create_publisher(Float64MultiArray, '/qp_debug/qdot_cmd', 10)
         self.pub_shared_col = self.create_publisher(Float64MultiArray, '/collision_constraints', 10)
 
@@ -427,6 +428,7 @@ class SafetyQPController(Node):
         # Min distance + dynamic weights
         self.pub_min_dist.publish(Float64(data=abs_min_distance))
         self.pub_dynamic_weights.publish(Float64MultiArray(data=[float(self.qp.weight_slack), float(self.qp.gamma_clf)]))
+        self.pub_d_safe_dynamic.publish(Float64(data=float(d_safe_dynamic)))
 
         # Tracking errors
         if qdot_err_14 is not None:

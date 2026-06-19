@@ -127,6 +127,11 @@ class TriagoDashboard(Node):
         self.create_subscription(Float64MultiArray, '/qp_debug/dynamic_weights', self.dyn_weights_callback, qos_profile)
         self.create_subscription(Float64, '/trajectory/time_scale', self.time_scale_callback, qos_profile)
 
+        # --- Dynamic CBF margin subscriber ---
+        self.d_safe_buffer = deque(maxlen=self.history_len)
+        self.d_safe_time = deque(maxlen=self.history_len)
+        self.create_subscription(Float64, '/qp_debug/d_safe_dynamic', self.d_safe_callback, qos_profile)
+
         # --- NEW: TRACKING ERROR SUBSCRIBERS ---
         self.sub_qdot_err = self.create_subscription(
             Float64MultiArray, '/qp_debug/qdot_err', self.qdot_err_callback, 10)
@@ -199,6 +204,11 @@ class TriagoDashboard(Node):
         t = self.get_time()
         self.time_scale_time.append(t)
         self.time_scale_buffer.append(msg.data)
+
+    def d_safe_callback(self, msg):
+        t = self.get_time()
+        self.d_safe_time.append(t)
+        self.d_safe_buffer.append(msg.data)
     
     def freq_callback(self, msg):
         t = self.get_time()
@@ -324,7 +334,7 @@ def ros_thread_entry(node):
     except Exception:
         pass
 
-def update_plot(frame, node, lines_map, ax_joints, ax_slacks, ax_error, ax_perf, ax_osc, figs):    
+def update_plot(frame, node, lines_map, ax_joints, ax_slacks, ax_error, ax_perf, ax_osc, ax_dyn, dyn_plots, figs):    
     t_now = node.get_time()
     artists = []
     
@@ -560,11 +570,46 @@ def update_plot(frame, node, lines_map, ax_joints, ax_slacks, ax_error, ax_perf,
                 ax_row.relim()
                 ax_row.autoscale_view(scalex=False, scaley=True)
 
+    # --- PART 6: DYNAMIC ADAPTATION WEIGHTS ---
+    if ax_dyn is not None and dyn_plots and node.dyn_weights_time:
+        t_dw = list(node.dyn_weights_time)
+        data_dw = list(node.dyn_weights_buffer)
+        t_ds = list(node.d_safe_time)
+        data_ds = list(node.d_safe_buffer)
+        window_dyn = 10.0
+
+        for idx, (key, ylabel, title) in enumerate(dyn_plots):
+            if key == 'weight_slack':
+                min_len = min(len(t_dw), len(data_dw))
+                if min_len > 0:
+                    y_data = [d[0] for d in data_dw[:min_len]]
+                    lines_map[f'dyn_{key}'].set_data(t_dw[:min_len], y_data)
+            elif key == 'gamma_clf':
+                min_len = min(len(t_dw), len(data_dw))
+                if min_len > 0:
+                    y_data = [d[1] for d in data_dw[:min_len]]
+                    lines_map[f'dyn_{key}'].set_data(t_dw[:min_len], y_data)
+            elif key == 'd_safe_dynamic':
+                min_len = min(len(t_ds), len(data_ds))
+                if min_len > 0:
+                    lines_map[f'dyn_{key}'].set_data(t_ds[:min_len], data_ds[:min_len])
+
+        # Window scaling
+        all_t = list(t_dw) + list(t_ds)
+        if all_t:
+            max_t = max(all_t)
+            for row in range(ax_dyn.shape[0]):
+                ax_dyn[row, 0].set_xlim(max(0, max_t - window_dyn), max_t + 0.1)
+                ax_dyn[row, 0].relim()
+                ax_dyn[row, 0].autoscale_view(scalex=False, scaley=True)
+
     # ✅ Manual redraws
-    figs[1].canvas.draw_idle()  # Was fig2 (Slacks)
-    figs[2].canvas.draw_idle()  # Was fig3 (Errors)
-    figs[3].canvas.draw_idle()  # Was fig4 (Performance)
-    figs[4].canvas.draw_idle()  # fig5 (Oscillation Detector)
+    figs[1].canvas.draw_idle()  # fig2 (Slacks)
+    figs[2].canvas.draw_idle()  # fig3 (Errors)
+    figs[3].canvas.draw_idle()  # fig4 (Performance)
+    figs[4].canvas.draw_idle()  # fig5 (Velocity)
+    if figs[5] is not None:
+        figs[5].canvas.draw_idle()  # fig6 (Dynamic weights)
 
     return artists
 
@@ -584,7 +629,6 @@ def main(args=None):
     TITLE_PAD = 80   # extra pixels for title bar + window border
     W_COL = 640      # uniform width for all windows
     X_LEFT = 0
-    X_RIGHT = W_COL + 10  # 10px gap between columns
 
     def place_window(fig, x, y, w, h):
         """Position a TkAgg figure window at (x,y) with size (w,h) in pixels."""
@@ -758,7 +802,32 @@ def main(args=None):
         lines_map[j + '_verr_r'] = l
     axs5[1, 1].legend(ncol=7, fontsize='xx-small', loc='upper right')
 
-    figs_array = [fig1, fig2, fig3, fig4, fig5]
+    # --- WINDOW 6: DYNAMIC ADAPTATION WEIGHTS ---
+    # Show subplots only for active dynamic flags (read from config)
+    import triago_control.qp_controller.config as cfg_plot
+    dyn_plots = []
+    if cfg_plot.DYNAMIC_CBF:
+        dyn_plots.append(('d_safe_dynamic', r'$d_{safe}^{dyn}$ [m]', 'Dynamic Safety Margin'))
+    if cfg_plot.DYNAMIC_GAMMA_CLF:
+        dyn_plots.append(('gamma_clf', r'$\gamma_{CLF}$', 'CLF Convergence Rate'))
+    if cfg_plot.DYNAMIC_SLACK_WEIGHT:
+        dyn_plots.append(('weight_slack', r'$w_{\delta}$', 'Slack Weight'))
+
+    fig6 = None
+    axs6 = None
+    if dyn_plots:
+        n_dyn = len(dyn_plots)
+        fig6, axs6 = plt.subplots(n_dyn, 1, figsize=(6, 4), sharex=True, squeeze=False)
+        fig6.suptitle('Dynamic Adaptation Weights')
+        for idx, (key, ylabel, title) in enumerate(dyn_plots):
+            axs6[idx, 0].set_title(title, fontsize='small')
+            axs6[idx, 0].set_ylabel(ylabel)
+            axs6[idx, 0].grid(True, alpha=0.3)
+            l, = axs6[idx, 0].plot([], [], 'm-', linewidth=1.2)
+            lines_map[f'dyn_{key}'] = l
+        axs6[-1, 0].set_xlabel('Time [s]')
+
+    figs_array = [fig1, fig2, fig3, fig4, fig5, fig6]
 
     # --- APPLY WINDOW POSITIONS ---
     # Left column: Fig1 (4 rows) on top, Fig5 (4 rows) below
@@ -767,15 +836,23 @@ def main(args=None):
     place_window(fig1, X_LEFT, 0, W_COL, h1)
     place_window(fig5, X_LEFT, h1 + 5, W_COL, h5)
 
-    # Right column: Fig2 (4 rows), Fig3 (2 rows), Fig4 (3 rows) stacked
+    # Center column: Fig2 (4 rows), Fig3 (2 rows), Fig4 (3 rows) stacked
     h2 = H_PER_ROW * 4 + TITLE_PAD
     h3 = H_PER_ROW * 2 + TITLE_PAD
     h4 = H_PER_ROW * 3 + TITLE_PAD
-    place_window(fig2, X_RIGHT, 0, W_COL, h2)
-    place_window(fig3, X_RIGHT, h2 + 5, W_COL, h3)
-    place_window(fig4, X_RIGHT, h2 + h3 + 10, W_COL, h4)
+    X_CENTER = W_COL + 10
+    place_window(fig2, X_CENTER, 0, W_COL, h2)
+    place_window(fig3, X_CENTER, h2 + 5, W_COL, h3)
+    place_window(fig4, X_CENTER, h2 + h3 + 10, W_COL, h4)
 
-    ani = FuncAnimation(fig1, update_plot, fargs=(node, lines_map, axs1, axs2, axs3, axs4, axs5, figs_array), interval=100) 
+    # Right column: Fig6 (dynamic weights, variable height)
+    if fig6 is not None:
+        n_dyn = len(dyn_plots)
+        h6 = H_PER_ROW * n_dyn + TITLE_PAD
+        X_RIGHT_COL = 2 * W_COL + 20
+        place_window(fig6, X_RIGHT_COL, 0, W_COL, h6)
+
+    ani = FuncAnimation(fig1, update_plot, fargs=(node, lines_map, axs1, axs2, axs3, axs4, axs5, axs6, dyn_plots, figs_array), interval=100) 
     plt.show()
     
     node.destroy_node()
