@@ -58,8 +58,9 @@ class PlotManager:
         self._latest_beliefs = {k: 1.0 / len(self.target_keys) for k in self.target_keys}
 
         # Force sensor history (scrolling RGB plot)
-        self._force_history = deque(maxlen=self.HISTORY_LEN)
-        self._force_time = deque(maxlen=self.HISTORY_LEN)
+        # Wrench arrives at ~100Hz, so 1000 samples = 10s of data
+        self._force_history = deque(maxlen=1000)
+        self._force_time = deque(maxlen=1000)
         self._force_start_time = None
 
         plt.ion()
