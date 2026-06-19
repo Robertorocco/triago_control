@@ -56,6 +56,7 @@ class TickInput:
     # Event / sensor inputs
     trigger_pulled: bool
     current_force_mag: float
+    current_force_local: np.ndarray     # [Fx, Fy, Fz] in wrist sensor frame
     grasp_contact: Dict[str, float]    # {'red': d, 'blue': d}
 
     # Compute helpers injected from the node (kept as callables so the state
@@ -109,6 +110,14 @@ class GraspStateMachine:
     GRASP_CLOSE_HOLD_S = 4.0
     GRASP_APPROACH_TIMEOUT_S = 20.0
 
+    # Force-controlled closure parameters
+    GRIP_CLOSE_VELOCITY = 0.02    # rad/s — how fast fingers close (slow = smooth)
+    GRIP_FORCE_TARGET = 4.0       # N — target grip force on Fy axis
+    GRIP_FORCE_CONTACT = 1.5      # N — threshold to detect first contact
+    GRIP_FORCE_MAX = 8.0          # N — safety limit (stop closing)
+    GRIP_K_FORCE = 0.005          # rad/s per N — force proportional gain
+    GRIP_CONFIRM_DURATION = 1.0   # s — hold force above threshold to confirm
+
     def __init__(self, cylinders, initial_state="SHARED_AUTONOMY", debug=False):
         """Initializes the state machine.
 
@@ -120,14 +129,20 @@ class GraspStateMachine:
             debug: if True, handlers populate verbose log_lines on every tick
                    (mirrors the original GRASP_DEBUG flag).
         """
-        self.cylinders = cylinders
-        self.debug = debug
         self._state = initial_state
-        self._last_state_logged = None
+        self.debug = debug
+        self.cylinders = cylinders
 
         # Scratch state carried across ticks within a grasp sequence.
         self.locked_grasp_pose = None
         self.grasp_timer = 0.0
+
+        # Force-controlled closure state
+        self.grip_position = 0.7   # Start fully open
+        self.grip_contact_detected = False
+        self.grip_force_stable_since = None
+
+        self._last_state_logged = None
 
         self._handlers = self._build_handlers()
 
@@ -310,19 +325,24 @@ class GraspStateMachine:
         if ang_ok and contact_ok:
             self._transition("GRASP_CLOSE")
             self.grasp_timer = time.time()
+            # Reset force-control state for the new closure attempt
+            self.grip_position = 0.04  # Start from near-cylinder (fingers already around it)
+            self.grip_contact_detected = False
+            self.grip_force_stable_since = None
             log_lines.append(
                 ("info", f"[GRASP] Controlled contact reached (contact_d={contact_d:.4f}m). "
-                         f"Freezing arm and closing gripper."))
+                         f"Freezing arm. Starting force-controlled finger closure."))
 
             cyl_radius = self.cylinders[color]['radius']
-            grip_position = max(0.0, cyl_radius - 0.010)
+            # No single-shot CLOSE here — force-controlled loop in _grasp_close handles it
+            self.grip_position = cyl_radius + 0.005  # Start just outside the cylinder
 
             return TickOutput(
                 target_twist=target_twist,
                 new_state=self._state,
                 ignore_cbf=f"+{self.cylinders[color]['cbf_name']}",
                 grasp_margin=self.GRASP_CBF_MARGIN,
-                gripper_cmd=f"CLOSE_{inp.active_arm.upper()}_{grip_position:.4f}",
+                gripper_cmd=None,  # Force loop will send incremental commands
                 log_lines=log_lines,
             )
 
@@ -349,7 +369,7 @@ class GraspStateMachine:
         )
 
     # ------------------------------------------------------------------
-    # PHASE 3: GRASP_CLOSE (arm frozen; wait for fingers, then confirm via force)
+    # PHASE 3: GRASP_CLOSE (force-controlled incremental finger closure)
     # ------------------------------------------------------------------
     def _grasp_close(self, inp: TickInput) -> TickOutput:
         self._transition("GRASP_CLOSE")
@@ -358,29 +378,70 @@ class GraspStateMachine:
 
         target_twist = np.zeros(6)  # Freeze arm completely
         elapsed = time.time() - self.grasp_timer
-        # Per-tick [GRASP-DBG] heartbeat removed (was unconditional under
-        # self.debug -> spammed at ~100 Hz). Only the confirm/low-force
-        # outcome below is logged, once, when the hold completes.
+        dt = 0.01  # 100 Hz tick
 
-        if elapsed > self.GRASP_CLOSE_HOLD_S:
-            if inp.current_force_mag >= self.GRASP_FORCE_THRESHOLD:
-                log_lines.append(
-                    ("info", f"[GRASP] Fingers closed. Grasp CONFIRMED by force "
-                             f"(|F|={inp.current_force_mag:.2f} N >= "
-                             f"{self.GRASP_FORCE_THRESHOLD:.2f} N). Attaching payload..."))
+        # Read grip force (use |Fy| as the squeeze axis — assumption, will verify)
+        grip_force = abs(inp.current_force_local[1]) if len(inp.current_force_local) >= 3 else 0.0
+
+        # --- Force-controlled closure logic ---
+        gripper_cmd = None
+
+        if grip_force >= self.GRIP_FORCE_MAX:
+            # Safety: stop immediately if force too high
+            pass  # Don't close further
+
+        elif not self.grip_contact_detected:
+            # PRE-CONTACT: close at constant velocity until first contact
+            if grip_force > self.GRIP_FORCE_CONTACT:
+                self.grip_contact_detected = True
+                log_lines.append(("info", f"[GRASP] Contact detected (Fy={grip_force:.2f} N). "
+                                          f"Switching to force regulation."))
             else:
-                log_lines.append(
-                    ("warn", f"[GRASP] Fingers closed but force is LOW "
-                             f"(|F|={inp.current_force_mag:.2f} N < "
-                             f"{self.GRASP_FORCE_THRESHOLD:.2f} N). "
-                             f"Object may not be held — attaching anyway (test mode)."))
+                # Close slowly
+                self.grip_position -= self.GRIP_CLOSE_VELOCITY * dt
+                self.grip_position = max(0.0, self.grip_position)
+                gripper_cmd = f"CLOSE_{inp.active_arm.upper()}_{self.grip_position:.4f}"
 
+        else:
+            # FORCE REGULATION: proportional control toward target force
+            force_error = self.GRIP_FORCE_TARGET - grip_force
+            closure_delta = self.GRIP_K_FORCE * force_error * dt
+            self.grip_position -= closure_delta  # Negative delta = close more
+            self.grip_position = max(0.0, min(0.7, self.grip_position))
+            gripper_cmd = f"CLOSE_{inp.active_arm.upper()}_{self.grip_position:.4f}"
+
+            # Check if force is stable above threshold for confirmation
+            if grip_force >= self.GRASP_FORCE_THRESHOLD:
+                if self.grip_force_stable_since is None:
+                    self.grip_force_stable_since = time.time()
+                elif time.time() - self.grip_force_stable_since >= self.GRIP_CONFIRM_DURATION:
+                    # GRASP CONFIRMED
+                    log_lines.append(
+                        ("info", f"[GRASP] Force stable at {grip_force:.2f} N for "
+                                 f"{self.GRIP_CONFIRM_DURATION:.1f}s. Grasp CONFIRMED."))
+                    self._transition("SHARED_AUTONOMY")
+                    return TickOutput(
+                        target_twist=target_twist,
+                        new_state=self._state,
+                        ignore_cbf="None",
+                        grasp_margin=CLEAR_MARGIN,
+                        gripper_cmd=f"ATTACH_{inp.active_arm.upper()}_{color.upper()}",
+                        log_lines=log_lines,
+                    )
+            else:
+                self.grip_force_stable_since = None  # Reset if force drops
+
+        # Timeout fallback (attach anyway in test mode)
+        if elapsed > self.GRASP_CLOSE_HOLD_S + 5.0:
+            log_lines.append(
+                ("warn", f"[GRASP] Force closure timeout ({elapsed:.1f}s). "
+                         f"grip_force={grip_force:.2f} N. Attaching anyway (test mode)."))
             self._transition("SHARED_AUTONOMY")
             return TickOutput(
                 target_twist=target_twist,
                 new_state=self._state,
-                ignore_cbf="None",         # original publishes "None" unconditionally every GRASP_CLOSE tick
-                grasp_margin=CLEAR_MARGIN, # then clears the margin on this ATTACH tick
+                ignore_cbf="None",
+                grasp_margin=CLEAR_MARGIN,
                 gripper_cmd=f"ATTACH_{inp.active_arm.upper()}_{color.upper()}",
                 log_lines=log_lines,
             )
@@ -390,5 +451,6 @@ class GraspStateMachine:
             new_state=self._state,
             ignore_cbf="None",
             grasp_margin=self.GRASP_CBF_MARGIN,
+            gripper_cmd=gripper_cmd,
             log_lines=log_lines,
         )

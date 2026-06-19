@@ -504,6 +504,7 @@ class SharedControlNode(Node):
             active_arm=self.active_arm,
             trigger_pulled=trigger_pulled,
             current_force_mag=self.current_force_mag,
+            current_force_local=self.current_force_local.copy(),
             grasp_contact=dict(self.grasp_contact),
             compute_v_geo=self.compute_v_geo,
             get_dynamic_goal_pose=self.goal_set.get_dynamic_goal_pose,
