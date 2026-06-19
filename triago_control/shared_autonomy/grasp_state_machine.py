@@ -106,8 +106,8 @@ class GraspStateMachine:
     GRASP_CBF_MARGIN = -0.08
     GRASP_CONTACT_DEPTH = -0.025
     GRASP_FORCE_THRESHOLD = 2.0
-    GRASP_CLOSE_HOLD_S = 2.0
-    GRASP_APPROACH_TIMEOUT_S = 15.0
+    GRASP_CLOSE_HOLD_S = 4.0
+    GRASP_APPROACH_TIMEOUT_S = 20.0
 
     def __init__(self, cylinders, initial_state="SHARED_AUTONOMY", debug=False):
         """Initializes the state machine.
@@ -315,7 +315,7 @@ class GraspStateMachine:
                          f"Freezing arm and closing gripper."))
 
             cyl_radius = self.cylinders[color]['radius']
-            grip_position = max(0.0, cyl_radius - 0.005)
+            grip_position = max(0.0, cyl_radius - 0.010)
 
             return TickOutput(
                 target_twist=target_twist,

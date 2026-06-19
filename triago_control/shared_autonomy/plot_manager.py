@@ -57,9 +57,15 @@ class PlotManager:
         self._twist_snapshot = None  # dict: {'v_h', 'pi_star', 'goal_key'}
         self._latest_beliefs = {k: 1.0 / len(self.target_keys) for k in self.target_keys}
 
+        # Force sensor history (scrolling RGB plot)
+        self._force_history = deque(maxlen=self.HISTORY_LEN)
+        self._force_time = deque(maxlen=self.HISTORY_LEN)
+        self._force_start_time = None
+
         plt.ion()
         self._build_belief_figure()
         self._build_twist_figure()
+        self._build_force_figure()
 
     # ------------------------------------------------------------------
     # Figure construction (run once)
@@ -147,6 +153,34 @@ class PlotManager:
 
         self.fig2.tight_layout(pad=2.0)
 
+    def _build_force_figure(self):
+        """Scrolling RGB force plot in the same dark style as the twist monitor."""
+        self.fig_force, self.ax_force = plt.subplots(1, 1, figsize=(7, 3))
+        self.fig_force.patch.set_facecolor('#0f0f1a')
+        self.fig_force.canvas.manager.set_window_title('Force Sensor (Wrist Local Frame)')
+        self.ax_force.set_facecolor('#0f0f1a')
+        self.ax_force.tick_params(colors='#aaa')
+        for spine in self.ax_force.spines.values():
+            spine.set_edgecolor('#334')
+        self.ax_force.set_xlabel('Time [s]', color='#aaa', fontsize=9)
+        self.ax_force.set_ylabel('Force [N]', color='#aaa', fontsize=9)
+        self.ax_force.set_title('F/T Sensor — Wrist Local Frame (gravity-compensated)',
+                                 color='white', fontsize=10)
+        self.ax_force.axhline(0, color='#445', linewidth=0.8)
+        self.ax_force.set_ylim(-5, 5)
+        self.ax_force.grid(True, color='#223', alpha=0.5, linewidth=0.5)
+
+        # RGB lines: Fx=Red, Fy=Green, Fz=Blue
+        self._force_line_x, = self.ax_force.plot([], [], lw=1.5, color='#ff4444', label='Fx')
+        self._force_line_y, = self.ax_force.plot([], [], lw=1.5, color='#44ff44', label='Fy')
+        self._force_line_z, = self.ax_force.plot([], [], lw=1.5, color='#4488ff', label='Fz')
+        # Magnitude line (white, dashed)
+        self._force_line_mag, = self.ax_force.plot([], [], lw=1.2, color='#ffffff',
+                                                    linestyle='--', alpha=0.6, label='|F|')
+        self.ax_force.legend(loc='upper right', fontsize=8, framealpha=0.3,
+                              labelcolor='white', facecolor='#1a1a2e')
+        self.fig_force.tight_layout()
+
     # ------------------------------------------------------------------
     # Producer-side API (called from the control loop thread)
     # ------------------------------------------------------------------
@@ -154,6 +188,15 @@ class PlotManager:
         """Thread-safe write of the latest belief distribution."""
         with self.plot_lock:
             self._latest_beliefs = dict(beliefs)
+
+    def push_force(self, force_xyz: np.ndarray):
+        """Thread-safe write of the latest F/T force vector [Fx, Fy, Fz]."""
+        with self.plot_lock:
+            if self._force_start_time is None:
+                self._force_start_time = time.time()
+            t = time.time() - self._force_start_time
+            self._force_time.append(t)
+            self._force_history.append(force_xyz.copy())
 
     def push_twist_snapshot(self, v_h, pi_star, goal_key):
         """Thread-safe write of the latest (v_h, pi*, goal_key) sample for the twist plot."""
@@ -190,6 +233,7 @@ class PlotManager:
         if snap is None:
             return
         self._update_twist_plot(snap)
+        self._update_force_plot()
 
     def _update_belief_bars(self, probs):
         max_idx = int(np.argmax(probs))
@@ -241,3 +285,29 @@ class PlotManager:
         self.ax_diff.set_xlim(t_axis[0], 0)
 
         self._diff_goal_text.set_text(f'pi* goal: {goal_key}')
+
+    def _update_force_plot(self):
+        """Update the scrolling force RGB plot."""
+        with self.plot_lock:
+            if len(self._force_time) < 2:
+                return
+            t = list(self._force_time)
+            forces = np.array(list(self._force_history))
+
+        n = len(t)
+        self._force_line_x.set_data(t, forces[:, 0])
+        self._force_line_y.set_data(t, forces[:, 1])
+        self._force_line_z.set_data(t, forces[:, 2])
+        mags = np.linalg.norm(forces, axis=1)
+        self._force_line_mag.set_data(t, mags)
+
+        # Scrolling window (last 15s)
+        t_max = t[-1]
+        window = 15.0
+        self.ax_force.set_xlim(max(0, t_max - window), t_max + 0.1)
+
+        # Auto-scale Y
+        y_max = max(np.max(np.abs(forces[-min(n, 150):])), np.max(mags[-min(n, 150):]), 1.0)
+        self.ax_force.set_ylim(-y_max * 1.1, y_max * 1.1)
+
+        self.fig_force.canvas.draw_idle()
