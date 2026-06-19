@@ -625,9 +625,12 @@ def main(args=None):
     # Left column: Fig1 (top), Fig5 (bottom)
     # Right column: Fig2, Fig3, Fig4 stacked
     # All windows same width. Height = constant * subplot_rows.
-    H_PER_ROW = 130  # pixels per subplot row
-    TITLE_PAD = 80   # extra pixels for title bar + window border
-    W_COL = 640      # uniform width for all windows
+    H_PER_ROW = 120  # pixels per subplot row
+    TITLE_PAD = 100  # extra pixels for title bar + window border + suptitle
+    GAP_H = 20       # horizontal gap between columns
+    GAP_V = 20       # vertical gap between stacked windows
+    W_COL = 600      # uniform width for all windows
+    MIN_WIN_H = 300  # minimum window height (prevents title overlap with 1 subplot)
     X_LEFT = 0
 
     def place_window(fig, x, y, w, h):
@@ -831,25 +834,25 @@ def main(args=None):
 
     # --- APPLY WINDOW POSITIONS ---
     # Left column: Fig1 (4 rows) on top, Fig5 (4 rows) below
-    h1 = H_PER_ROW * 4 + TITLE_PAD
-    h5 = H_PER_ROW * 4 + TITLE_PAD
+    h1 = max(MIN_WIN_H, H_PER_ROW * 4 + TITLE_PAD)
+    h5 = max(MIN_WIN_H, H_PER_ROW * 4 + TITLE_PAD)
     place_window(fig1, X_LEFT, 0, W_COL, h1)
-    place_window(fig5, X_LEFT, h1 + 5, W_COL, h5)
+    place_window(fig5, X_LEFT, h1 + GAP_V, W_COL, h5)
 
     # Center column: Fig2 (4 rows), Fig3 (2 rows), Fig4 (3 rows) stacked
-    h2 = H_PER_ROW * 4 + TITLE_PAD
-    h3 = H_PER_ROW * 2 + TITLE_PAD
-    h4 = H_PER_ROW * 3 + TITLE_PAD
-    X_CENTER = W_COL + 10
+    h2 = max(MIN_WIN_H, H_PER_ROW * 4 + TITLE_PAD)
+    h3 = max(MIN_WIN_H, H_PER_ROW * 2 + TITLE_PAD)
+    h4 = max(MIN_WIN_H, H_PER_ROW * 3 + TITLE_PAD)
+    X_CENTER = W_COL + GAP_H
     place_window(fig2, X_CENTER, 0, W_COL, h2)
-    place_window(fig3, X_CENTER, h2 + 5, W_COL, h3)
-    place_window(fig4, X_CENTER, h2 + h3 + 10, W_COL, h4)
+    place_window(fig3, X_CENTER, h2 + GAP_V, W_COL, h3)
+    place_window(fig4, X_CENTER, h2 + h3 + 2 * GAP_V, W_COL, h4)
 
     # Right column: Fig6 (dynamic weights, variable height)
     if fig6 is not None:
         n_dyn = len(dyn_plots)
-        h6 = H_PER_ROW * n_dyn + TITLE_PAD
-        X_RIGHT_COL = 2 * W_COL + 20
+        h6 = max(MIN_WIN_H, H_PER_ROW * n_dyn + TITLE_PAD)
+        X_RIGHT_COL = 2 * W_COL + 2 * GAP_H
         place_window(fig6, X_RIGHT_COL, 0, W_COL, h6)
 
     ani = FuncAnimation(fig1, update_plot, fargs=(node, lines_map, axs1, axs2, axs3, axs4, axs5, axs6, dyn_plots, figs_array), interval=100) 
