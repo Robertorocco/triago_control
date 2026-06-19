@@ -229,11 +229,11 @@ class PlotManager:
             probs = [self._latest_beliefs[k] for k in self.target_keys]
 
         self._update_belief_bars(probs)
+        self._update_force_plot()
 
         if snap is None:
             return
         self._update_twist_plot(snap)
-        self._update_force_plot()
 
     def _update_belief_bars(self, probs):
         max_idx = int(np.argmax(probs))
@@ -301,13 +301,19 @@ class PlotManager:
         mags = np.linalg.norm(forces, axis=1)
         self._force_line_mag.set_data(t, mags)
 
-        # Scrolling window (last 15s)
+        # Scrolling window (last 10s)
         t_max = t[-1]
-        window = 15.0
-        self.ax_force.set_xlim(max(0, t_max - window), t_max + 0.1)
+        window = 10.0
+        self.ax_force.set_xlim(t_max - window, t_max + 0.1)
 
-        # Auto-scale Y
-        y_max = max(np.max(np.abs(forces[-min(n, 150):])), np.max(mags[-min(n, 150):]), 1.0)
-        self.ax_force.set_ylim(-y_max * 1.1, y_max * 1.1)
+        # Auto-scale Y based on visible data
+        visible_start = max(0, t_max - window)
+        visible_mask = np.array(t) >= visible_start
+        if np.any(visible_mask):
+            visible_forces = forces[visible_mask]
+            visible_mags = mags[visible_mask]
+            y_max = max(np.max(np.abs(visible_forces)), np.max(visible_mags), 0.5)
+            self.ax_force.set_ylim(-y_max * 1.2, y_max * 1.2)
 
         self.fig_force.canvas.draw_idle()
+        self.fig_force.canvas.flush_events()
