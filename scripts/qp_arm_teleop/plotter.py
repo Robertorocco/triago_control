@@ -677,7 +677,7 @@ def main(args=None):
     l_sr_x, = axs2[0].plot([], [], 'r-', label=r'$\delta_{R,x}$', alpha=0.8)
     l_sr_y, = axs2[0].plot([], [], 'g-', label=r'$\delta_{R,y}$', alpha=0.8)
     l_sr_z, = axs2[0].plot([], [], 'b-', label=r'$\delta_{R,z}$', alpha=0.8)
-    axs2[0].set_ylabel('R Slack')
+    axs2[0].set_ylabel('R Slack', rotation=0, ha='left', labelpad=10)
     axs2[0].yaxis.set_label_position('right')
     lines_map['slack_right_scalar'] = l_sr_scalar
     lines_map['slack_right_x'] = l_sr_x
@@ -689,7 +689,7 @@ def main(args=None):
     l_sl_x, = axs2[1].plot([], [], 'r-', label=r'$\delta_{L,x}$', alpha=0.8)
     l_sl_y, = axs2[1].plot([], [], 'g-', label=r'$\delta_{L,y}$', alpha=0.8)
     l_sl_z, = axs2[1].plot([], [], 'b-', label=r'$\delta_{L,z}$', alpha=0.8)
-    axs2[1].set_ylabel('L Slack')
+    axs2[1].set_ylabel('L Slack', rotation=0, ha='left', labelpad=10)
     axs2[1].yaxis.set_label_position('right')
     lines_map['slack_left_scalar'] = l_sl_scalar
     lines_map['slack_left_x'] = l_sl_x
@@ -698,7 +698,7 @@ def main(args=None):
 
     # Row 2: CBF Lambda
     l_lc, = axs2[2].plot([], [], 'm-', label=r'$\lambda_{CBF}$')
-    axs2[2].set_ylabel('CBF Price')
+    axs2[2].set_ylabel('CBF Price', rotation=0, ha='left', labelpad=10)
     axs2[2].yaxis.set_label_position('right')
     axs2[2].legend(loc='upper left', fontsize='x-small')
     lines_map['lambda_cbf'] = l_lc
@@ -706,7 +706,7 @@ def main(args=None):
     # Row 3: Joint Lambdas (R and L on same plot)
     l_lj_r, = axs2[3].plot([], [], 'r-', label=r'$\lambda_{Joints}$ R')
     l_lj_l, = axs2[3].plot([], [], 'b-', label=r'$\lambda_{Joints}$ L')
-    axs2[3].set_ylabel('Joint Prices')
+    axs2[3].set_ylabel('Joint Prices', rotation=0, ha='left', labelpad=10)
     axs2[3].yaxis.set_label_position('right')
     axs2[3].legend(loc='upper left', fontsize='x-small')
     lines_map['lambda_joints_r'] = l_lj_r
@@ -715,7 +715,7 @@ def main(args=None):
 
     # Row 4: Loop Frequency
     l_freq, = axs2[4].plot([], [], 'g-', label='Loop Hz')
-    axs2[4].set_ylabel('Freq [Hz]')
+    axs2[4].set_ylabel('Freq [Hz]', rotation=0, ha='left', labelpad=10)
     axs2[4].yaxis.set_label_position('right')
     axs2[4].legend(loc='upper left', fontsize='x-small')
     lines_map['loop_freq'] = l_freq
@@ -723,7 +723,7 @@ def main(args=None):
     # Row 5: Safety Margin (with y=0 red dashed line)
     l_h, = axs2[5].plot([], [], 'm-', label='Softmin h')
     axs2[5].axhline(y=0, color='r', linestyle='--', linewidth=1)
-    axs2[5].set_ylabel('Margin [m]')
+    axs2[5].set_ylabel('Margin [m]', rotation=0, ha='left', labelpad=10)
     axs2[5].yaxis.set_label_position('right')
     axs2[5].legend(loc='upper left', fontsize='x-small')
     lines_map['margin_h'] = l_h
@@ -731,7 +731,7 @@ def main(args=None):
     # Row 6: Min Distance (with y=0 red dashed line)
     l_min_dist, = axs2[6].plot([], [], 'c-', label='Abs Min Dist')
     axs2[6].axhline(y=0, color='r', linestyle='--', linewidth=1)
-    axs2[6].set_ylabel('Dist [m]')
+    axs2[6].set_ylabel('Dist [m]', rotation=0, ha='left', labelpad=10)
     axs2[6].yaxis.set_label_position('right')
     axs2[6].legend(loc='upper left', fontsize='x-small')
     lines_map['min_dist'] = l_min_dist
@@ -763,18 +763,20 @@ def main(args=None):
     # Row 0: Position error (R and L)
     l_epr, = axs3[0].plot([], [], 'r-', label='Pos Err R')
     l_epl, = axs3[0].plot([], [], 'b-', label='Pos Err L')
-    axs3[0].set_ylabel('Error [m]')
+    axs3[0].set_ylabel('Error [m]', rotation=0, ha='left', labelpad=10)
+    axs3[0].yaxis.set_label_position('right')
     axs3[0].grid(True, alpha=0.3)
-    axs3[0].legend(loc='upper right', fontsize='x-small')
+    axs3[0].legend(loc='upper left', fontsize='x-small')
     lines_map['err_pos_r'] = l_epr
     lines_map['err_pos_l'] = l_epl
 
     # Row 1: Velocity error (R and L)
     l_evr, = axs3[1].plot([], [], 'r-', label='Vel Err R')
     l_evl, = axs3[1].plot([], [], 'b-', label='Vel Err L')
-    axs3[1].set_ylabel('Error [m/s]')
+    axs3[1].set_ylabel('Error [m/s]', rotation=0, ha='left', labelpad=10)
+    axs3[1].yaxis.set_label_position('right')
     axs3[1].grid(True, alpha=0.3)
-    axs3[1].legend(loc='upper right', fontsize='x-small')
+    axs3[1].legend(loc='upper left', fontsize='x-small')
     lines_map['err_vel_r'] = l_evr
     lines_map['err_vel_l'] = l_evl
 
@@ -782,7 +784,8 @@ def main(args=None):
     for idx, (key, ylabel, title) in enumerate(dyn_plots):
         ax = axs3[2 + idx]
         ax.set_title(title, fontsize='small')
-        ax.set_ylabel(ylabel)
+        ax.set_ylabel(ylabel, rotation=0, ha='left', labelpad=10)
+        ax.yaxis.set_label_position('right')
         ax.grid(True, alpha=0.3)
         l, = ax.plot([], [], 'm-', linewidth=1.2)
         lines_map[f'dyn_{key}'] = l
@@ -796,9 +799,9 @@ def main(args=None):
     # ===================================================================
     figs = [fig1, fig2, fig3]
 
-    place_window(fig1, 86, 126, 832, 1131)    # Left: Joint Data
-    place_window(fig2, 924, 118, 541, 1126)   # Center: QP Data
-    place_window(fig3, 1471, 126, 499, 1131)  # Right: Task Error
+    place_window(fig1, 86, 126, 851, 1131)    # Left: Joint Data
+    place_window(fig2, 893, 118, 542, 1131)   # Center: QP Data
+    place_window(fig3, 1436, 118, 498, 1131)  # Right: Task Error
 
     # ===================================================================
     # ANIMATION
