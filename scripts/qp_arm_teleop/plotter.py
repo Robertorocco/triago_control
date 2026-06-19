@@ -324,7 +324,7 @@ def ros_thread_entry(node):
     except Exception:
         pass
 
-def update_plot(frame, node, lines_map, ax_joints, ax_slacks, ax_error, ax_perf, figs):    
+def update_plot(frame, node, lines_map, ax_joints, ax_slacks, ax_error, ax_perf, ax_osc, figs):    
     t_now = node.get_time()
     artists = []
     
@@ -508,10 +508,39 @@ def update_plot(frame, node, lines_map, ax_joints, ax_slacks, ax_error, ax_perf,
                 ax.relim()
                 ax.autoscale_view(scalex=False, scaley=True)
 
+    # --- PART 5: JOINT POSITION OSCILLATION DETECTOR ---
+    if node.time_buffer and len(node.time_buffer) > 2:
+        t = list(node.time_buffer)
+        window_osc = 3.0  # Show a tight 3s window to see micro-oscillation
+
+        for joint_list, col_idx in [(node.right_joints, 0), (node.left_joints, 1)]:
+            for j in joint_list:
+                q_data = list(node.q_buffers[j])
+                min_len = min(len(t), len(q_data))
+                if min_len > 1:
+                    # Top row: raw positions
+                    lines_map[j + '_pos_osc'].set_data(t[:min_len], q_data[:min_len])
+
+                    # Bottom row: raw numerical derivative (unfiltered Δq/Δt)
+                    t_arr = np.array(t[:min_len])
+                    q_arr = np.array(q_data[:min_len])
+                    dt_arr = np.diff(t_arr)
+                    dt_arr[dt_arr < 1e-6] = 1e-6  # guard
+                    dq_raw = np.diff(q_arr) / dt_arr
+                    lines_map[j + '_dq_raw'].set_data(t_arr[1:], dq_raw)
+
+        # Window scaling
+        max_t = t[-1]
+        for ax_row in ax_osc.flatten():
+            ax_row.set_xlim(max(0, max_t - window_osc), max_t + 0.05)
+            ax_row.relim()
+            ax_row.autoscale_view(scalex=False, scaley=True)
+
     # ✅ Manual redraws
     figs[1].canvas.draw_idle()  # Was fig2 (Slacks)
     figs[2].canvas.draw_idle()  # Was fig3 (Errors)
     figs[3].canvas.draw_idle()  # Was fig4 (Performance)
+    figs[4].canvas.draw_idle()  # fig5 (Oscillation Detector)
 
     return artists
 
@@ -641,8 +670,53 @@ def main(args=None):
     # --- ANIMATION ---
     # We drive the animation from fig1, but update both
 # --- ANIMATION ---
-    figs_array = [fig1, fig2, fig3, fig4]
-    ani = FuncAnimation(fig1, update_plot, fargs=(node, lines_map, axs1, axs2, axs3, axs4, figs_array), interval=100) 
+    # --- WINDOW 5: JOINT POSITION OSCILLATION DETECTOR ---
+    fig5, axs5 = plt.subplots(2, 2, figsize=(10, 7), sharex=True)
+    fig5.suptitle('Joint Position Oscillation Detector (raw sensor)')
+
+    # Top row: raw joint positions (zoomed — shows micro-oscillation)
+    # Bottom row: numerical position derivative (Δq/Δt) — unfiltered, reveals true jitter
+
+    # Right arm positions (top-left)
+    axs5[0, 0].set_title('Right Arm — q [rad]')
+    axs5[0, 0].set_ylabel('Position [rad]')
+    axs5[0, 0].grid(True, alpha=0.3)
+    for i, j in enumerate(node.right_joints):
+        l, = axs5[0, 0].plot([], [], color=colors[i], linewidth=0.8,
+                              label=j.replace('arm_right_', 'J').replace('_joint', ''))
+        lines_map[j + '_pos_osc'] = l
+    axs5[0, 0].legend(ncol=4, fontsize='xx-small', loc='upper right')
+
+    # Left arm positions (top-right)
+    axs5[0, 1].set_title('Left Arm — q [rad]')
+    axs5[0, 1].set_ylabel('Position [rad]')
+    axs5[0, 1].grid(True, alpha=0.3)
+    for i, j in enumerate(node.left_joints):
+        l, = axs5[0, 1].plot([], [], color=colors[i], linewidth=0.8,
+                              label=j.replace('arm_left_', 'J').replace('_joint', ''))
+        lines_map[j + '_pos_osc'] = l
+    axs5[0, 1].legend(ncol=4, fontsize='xx-small', loc='upper right')
+
+    # Right arm Δq (bottom-left) — numerical derivative of raw position
+    axs5[1, 0].set_title('Right Arm — Δq/Δt (raw, unfiltered)')
+    axs5[1, 0].set_ylabel('Δq/Δt [rad/s]')
+    axs5[1, 0].set_xlabel('Time [s]')
+    axs5[1, 0].grid(True, alpha=0.3)
+    for i, j in enumerate(node.right_joints):
+        l, = axs5[1, 0].plot([], [], color=colors[i], linewidth=0.6, alpha=0.8)
+        lines_map[j + '_dq_raw'] = l
+
+    # Left arm Δq (bottom-right)
+    axs5[1, 1].set_title('Left Arm — Δq/Δt (raw, unfiltered)')
+    axs5[1, 1].set_ylabel('Δq/Δt [rad/s]')
+    axs5[1, 1].set_xlabel('Time [s]')
+    axs5[1, 1].grid(True, alpha=0.3)
+    for i, j in enumerate(node.left_joints):
+        l, = axs5[1, 1].plot([], [], color=colors[i], linewidth=0.6, alpha=0.8)
+        lines_map[j + '_dq_raw'] = l
+
+    figs_array = [fig1, fig2, fig3, fig4, fig5]
+    ani = FuncAnimation(fig1, update_plot, fargs=(node, lines_map, axs1, axs2, axs3, axs4, axs5, figs_array), interval=100) 
     plt.show()
     
     node.destroy_node()

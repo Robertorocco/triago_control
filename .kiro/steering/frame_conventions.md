@@ -53,3 +53,27 @@ the SO(3) error as `pin.log3(R_des @ R_real.T)`.
 ```
 
 All expressed in `base_footprint`.
+
+
+
+# Console Output Preferences
+
+## Rules
+
+- **No spam**: never print continuous data streams to the console (e.g., per-tick values at 100+ Hz).
+- **Metrics only**: periodic summaries are acceptable at low frequency (≤ 0.2 Hz / every 5+ seconds).
+- **Warnings & errors**: always print immediately with `[WARN]` or `[ERROR]` prefix.
+- **Phase transitions**: print once per state change (e.g., `[PHASE] Switched to TRACKING`).
+- **Startup banners**: one compact banner at node init showing configuration is fine.
+
+## Preferred debugging approach
+
+1. **Plots** (matplotlib / rqt_plot) for continuous data — superior for human interpretation.
+2. **ROS topics** for machine-readable diagnostics (e.g., `/debug/...` topics).
+3. **Console** only for rare events, compact summaries, and errors.
+
+## Anti-patterns (do NOT do)
+
+- Printing every loop iteration
+- Printing raw float arrays per tick
+- Flooding stdout with data that should be a topic or a plot
