@@ -577,14 +577,14 @@ def main(args=None):
     spinner.start()
 
     # --- WINDOW LAYOUT (1920x1200, TkAgg) ---
-    # Left column (1/3 = 640px wide): Fig1 top, Fig5 bottom
-    # Right column (2/3 = 1280px wide): Fig2, Fig3, Fig4 stacked
-    # Height = constant * number_of_subplot_rows
+    # Left column: Fig1 (top), Fig5 (bottom)
+    # Right column: Fig2, Fig3, Fig4 stacked
+    # All windows same width. Height = constant * subplot_rows.
     H_PER_ROW = 130  # pixels per subplot row
-    W_LEFT = 640
-    W_RIGHT = 1280
+    TITLE_PAD = 80   # extra pixels for title bar + window border
+    W_COL = 640      # uniform width for all windows
     X_LEFT = 0
-    X_RIGHT = W_LEFT
+    X_RIGHT = W_COL + 10  # 10px gap between columns
 
     def place_window(fig, x, y, w, h):
         """Position a TkAgg figure window at (x,y) with size (w,h) in pixels."""
@@ -762,18 +762,18 @@ def main(args=None):
 
     # --- APPLY WINDOW POSITIONS ---
     # Left column: Fig1 (4 rows) on top, Fig5 (4 rows) below
-    h1 = H_PER_ROW * 4 + 50  # +50 for title/padding
-    h5 = H_PER_ROW * 4 + 50
-    place_window(fig1, X_LEFT, 0, W_LEFT, h1)
-    place_window(fig5, X_LEFT, h1, W_LEFT, h5)
+    h1 = H_PER_ROW * 4 + TITLE_PAD
+    h5 = H_PER_ROW * 4 + TITLE_PAD
+    place_window(fig1, X_LEFT, 0, W_COL, h1)
+    place_window(fig5, X_LEFT, h1 + 5, W_COL, h5)
 
     # Right column: Fig2 (4 rows), Fig3 (2 rows), Fig4 (3 rows) stacked
-    h2 = H_PER_ROW * 4 + 50
-    h3 = H_PER_ROW * 2 + 50
-    h4 = H_PER_ROW * 3 + 50
-    place_window(fig2, X_RIGHT, 0, W_RIGHT, h2)
-    place_window(fig3, X_RIGHT, h2, W_RIGHT, h3)
-    place_window(fig4, X_RIGHT, h2 + h3, W_RIGHT, h4)
+    h2 = H_PER_ROW * 4 + TITLE_PAD
+    h3 = H_PER_ROW * 2 + TITLE_PAD
+    h4 = H_PER_ROW * 3 + TITLE_PAD
+    place_window(fig2, X_RIGHT, 0, W_COL, h2)
+    place_window(fig3, X_RIGHT, h2 + 5, W_COL, h3)
+    place_window(fig4, X_RIGHT, h2 + h3 + 10, W_COL, h4)
 
     ani = FuncAnimation(fig1, update_plot, fargs=(node, lines_map, axs1, axs2, axs3, axs4, axs5, figs_array), interval=100) 
     plt.show()
