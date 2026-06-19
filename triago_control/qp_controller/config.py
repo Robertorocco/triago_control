@@ -68,7 +68,7 @@ GAMMA_FILTER_TAU = 0.125       # Low-pass time constant for the gamma scheduler
 # 4. LOOP / TELEMETRY SETTINGS
 # =============================================================================
 CONTROL_FREQ_DEFAULT = 300.0   # Default control loop frequency [Hz] (was hard-coded 1/300)
-PUBLISH_EVERY_N = 10           # Publish 1 of every N iterations to the dashboard
+PUBLISH_EVERY_N = 2            # Publish 1 of every N iterations to the dashboard
 WATCHDOG_TIMEOUT = 0.5         # Seconds without a reference before motion is frozen
 DISTANCE_FILTER_THRESHOLD = 0.15  # Ignore collision pairs farther than this [m]
 K_MAX_PAIRS = 60               # Max number of closest pairs fed into the SoftMin
