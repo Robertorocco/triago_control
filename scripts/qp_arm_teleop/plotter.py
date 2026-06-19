@@ -582,15 +582,7 @@ def main(args=None):
     spinner.start()
 
     # --- LAYOUT CONSTANTS ---
-    H_PER_ROW = 110
-    TITLE_PAD = 80
-    GAP_H = 20
-    W_COL = 600
-    MIN_WIN_H = 300
-    X_LEFT = 0
-    X_CENTER = W_COL + GAP_H
-    X_RIGHT = 2 * W_COL + 2 * GAP_H
-
+    # Positions from wmctrl (slightly aligned borders)
     def place_window(fig, x, y, w, h):
         """Position a TkAgg figure window at (x,y) with size (w,h) in pixels."""
         fig.set_size_inches(w / fig.dpi, h / fig.dpi)
@@ -655,9 +647,10 @@ def main(args=None):
         l, = axs1[3, 1].plot([], [], color=colors[i], linewidth=0.8)
         lines_map[j + '_verr_r'] = l
 
-    # Legend in upper right of row 0 col 1 (J1-J7 colors), applies to all
+    # Legend below the title (centered, using figure-level legend)
     legend_handles = [Line2D([0], [0], color=colors[i], label=f'J{i+1}') for i in range(7)]
-    axs1[0, 1].legend(handles=legend_handles, loc='upper right', fontsize='xx-small', ncol=4)
+    fig1.legend(handles=legend_handles, loc='upper center', fontsize='x-small',
+                ncol=7, bbox_to_anchor=(0.5, 0.95))
 
     # Y-axis labels on every row left column only
     axs1[0, 0].set_ylabel('[rad]')
@@ -684,7 +677,8 @@ def main(args=None):
     l_sr_x, = axs2[0].plot([], [], 'r-', label=r'$\delta_{R,x}$', alpha=0.8)
     l_sr_y, = axs2[0].plot([], [], 'g-', label=r'$\delta_{R,y}$', alpha=0.8)
     l_sr_z, = axs2[0].plot([], [], 'b-', label=r'$\delta_{R,z}$', alpha=0.8)
-    axs2[0].set_ylabel('Right Slack')
+    axs2[0].set_ylabel('R Slack')
+    axs2[0].yaxis.set_label_position('right')
     lines_map['slack_right_scalar'] = l_sr_scalar
     lines_map['slack_right_x'] = l_sr_x
     lines_map['slack_right_y'] = l_sr_y
@@ -695,7 +689,8 @@ def main(args=None):
     l_sl_x, = axs2[1].plot([], [], 'r-', label=r'$\delta_{L,x}$', alpha=0.8)
     l_sl_y, = axs2[1].plot([], [], 'g-', label=r'$\delta_{L,y}$', alpha=0.8)
     l_sl_z, = axs2[1].plot([], [], 'b-', label=r'$\delta_{L,z}$', alpha=0.8)
-    axs2[1].set_ylabel('Left Slack')
+    axs2[1].set_ylabel('L Slack')
+    axs2[1].yaxis.set_label_position('right')
     lines_map['slack_left_scalar'] = l_sl_scalar
     lines_map['slack_left_x'] = l_sl_x
     lines_map['slack_left_y'] = l_sl_y
@@ -704,14 +699,16 @@ def main(args=None):
     # Row 2: CBF Lambda
     l_lc, = axs2[2].plot([], [], 'm-', label=r'$\lambda_{CBF}$')
     axs2[2].set_ylabel('CBF Price')
-    axs2[2].legend(loc='upper right', fontsize='x-small')
+    axs2[2].yaxis.set_label_position('right')
+    axs2[2].legend(loc='upper left', fontsize='x-small')
     lines_map['lambda_cbf'] = l_lc
 
     # Row 3: Joint Lambdas (R and L on same plot)
     l_lj_r, = axs2[3].plot([], [], 'r-', label=r'$\lambda_{Joints}$ R')
     l_lj_l, = axs2[3].plot([], [], 'b-', label=r'$\lambda_{Joints}$ L')
     axs2[3].set_ylabel('Joint Prices')
-    axs2[3].legend(loc='upper right', fontsize='x-small')
+    axs2[3].yaxis.set_label_position('right')
+    axs2[3].legend(loc='upper left', fontsize='x-small')
     lines_map['lambda_joints_r'] = l_lj_r
     lines_map['lambda_joints_l'] = l_lj_l
 
@@ -719,21 +716,24 @@ def main(args=None):
     # Row 4: Loop Frequency
     l_freq, = axs2[4].plot([], [], 'g-', label='Loop Hz')
     axs2[4].set_ylabel('Freq [Hz]')
-    axs2[4].legend(loc='upper right', fontsize='x-small')
+    axs2[4].yaxis.set_label_position('right')
+    axs2[4].legend(loc='upper left', fontsize='x-small')
     lines_map['loop_freq'] = l_freq
 
     # Row 5: Safety Margin (with y=0 red dashed line)
     l_h, = axs2[5].plot([], [], 'm-', label='Softmin h')
     axs2[5].axhline(y=0, color='r', linestyle='--', linewidth=1)
     axs2[5].set_ylabel('Margin [m]')
-    axs2[5].legend(loc='upper right', fontsize='x-small')
+    axs2[5].yaxis.set_label_position('right')
+    axs2[5].legend(loc='upper left', fontsize='x-small')
     lines_map['margin_h'] = l_h
 
     # Row 6: Min Distance (with y=0 red dashed line)
     l_min_dist, = axs2[6].plot([], [], 'c-', label='Abs Min Dist')
     axs2[6].axhline(y=0, color='r', linestyle='--', linewidth=1)
     axs2[6].set_ylabel('Dist [m]')
-    axs2[6].legend(loc='upper right', fontsize='x-small')
+    axs2[6].yaxis.set_label_position('right')
+    axs2[6].legend(loc='upper left', fontsize='x-small')
     lines_map['min_dist'] = l_min_dist
 
     # X-axis label only on bottom
@@ -792,21 +792,13 @@ def main(args=None):
 
 
     # ===================================================================
-    # WINDOW PLACEMENT
+    # WINDOW PLACEMENT (from wmctrl, slightly aligned)
     # ===================================================================
     figs = [fig1, fig2, fig3]
 
-    # Window 1: 4x2 = 4 rows
-    h1 = max(MIN_WIN_H, H_PER_ROW * 4 + TITLE_PAD)
-    place_window(fig1, X_LEFT, 0, W_COL, h1)
-
-    # Window 2: 7 rows
-    h2 = max(MIN_WIN_H, H_PER_ROW * 7 + TITLE_PAD)
-    place_window(fig2, X_CENTER, 0, W_COL, h2)
-
-    # Window 3: variable rows
-    h3 = max(MIN_WIN_H, H_PER_ROW * n_rows_3 + TITLE_PAD)
-    place_window(fig3, X_RIGHT, 0, W_COL, h3)
+    place_window(fig1, 86, 126, 832, 1131)    # Left: Joint Data
+    place_window(fig2, 924, 118, 541, 1126)   # Center: QP Data
+    place_window(fig3, 1471, 126, 499, 1131)  # Right: Task Error
 
     # ===================================================================
     # ANIMATION
