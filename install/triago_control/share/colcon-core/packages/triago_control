@@ -1,0 +1,1 @@
+control_msgs:controller_manager_msgs:geometry_msgs:nav_msgs:pinocchio:python3-matplotlib:python3-numpy:python3-quadprog:python3-scipy:rcl_interfaces:rclcpp:rclpy:sensor_msgs:std_msgs:tf2_ros:trajectory_msgs:urdf_parser_py:visualization_msgs

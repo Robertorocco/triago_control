@@ -1,0 +1,3 @@
+source;share/triago_control/environment/ament_prefix_path.sh
+source;share/triago_control/environment/path.sh
+source;share/triago_control/environment/pythonpath.sh

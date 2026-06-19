@@ -1,0 +1,11 @@
+/home/user/exchange/ros2-ws/src/triago_control/build/triago_control/CMakeFiles/uninstall.dir
+/home/user/exchange/ros2-ws/src/triago_control/build/triago_control/CMakeFiles/triago_control_uninstall.dir
+/home/user/exchange/ros2-ws/src/triago_control/build/triago_control/CMakeFiles/ament_cmake_python_copy_triago_control.dir
+/home/user/exchange/ros2-ws/src/triago_control/build/triago_control/CMakeFiles/ament_cmake_python_build_triago_control_egg.dir
+/home/user/exchange/ros2-ws/src/triago_control/build/triago_control/CMakeFiles/test.dir
+/home/user/exchange/ros2-ws/src/triago_control/build/triago_control/CMakeFiles/edit_cache.dir
+/home/user/exchange/ros2-ws/src/triago_control/build/triago_control/CMakeFiles/rebuild_cache.dir
+/home/user/exchange/ros2-ws/src/triago_control/build/triago_control/CMakeFiles/list_install_components.dir
+/home/user/exchange/ros2-ws/src/triago_control/build/triago_control/CMakeFiles/install.dir
+/home/user/exchange/ros2-ws/src/triago_control/build/triago_control/CMakeFiles/install/local.dir
+/home/user/exchange/ros2-ws/src/triago_control/build/triago_control/CMakeFiles/install/strip.dir

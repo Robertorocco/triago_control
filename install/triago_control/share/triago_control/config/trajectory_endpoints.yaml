@@ -1,0 +1,174 @@
+# =============================================================================
+# trajectory_endpoints.yaml
+# -----------------------------------------------------------------------------
+# Endpoint library + behaviour flags for `trajectory_generator.py`.
+#
+# This file is the SINGLE source of truth for the open-loop robustness tests
+# fed into `main_qp_controller.py`. The generator only ever publishes on the
+# standard cartesian-reference contract, so the QP controller stays untouched.
+#
+# Reference contract consumed by main_qp_controller (`ref_cb_right/left`):
+#     [x, y, z, roll, pitch, yaw, xdot, ydot, zdot, wx, wy, wz, (task_dim)]
+#   - 12 floats  -> full 6-DOF reference (position + orientation)
+#   - 13th float -> optional task dimension (6.0 = full 6D, 5.0 = align X only)
+#   - 6  floats  -> position-only fallback (used when control_orientation: false)
+#
+# Frame conventions (base_footprint):
+#     X = forward (in front of TIAGo)
+#     Y = left
+#     Z = up
+#     Origin: center of TIAGo torso
+#
+# Gripper frame (gripper_{right,left}_grasping_link):
+#     X = approach axis (points outward from gripper)
+#     Z = down (palm bottom direction)
+#     Y = right (finger-spread direction)
+#
+# Orientation is specified as RPY [roll, pitch, yaw] in radians expressing
+# the desired gripper frame orientation in base_footprint. Common values:
+#     forward-down   : [3.1416, 0, 0]       gripper forward, palm down
+#     top-grasp      : [0, 1.5708, 0]       gripper pointing down, palm forward
+#     approach-left  : [3.1416, 0, 1.5708]  gripper pointing left, palm down
+#     approach-right : [3.1416, 0, -1.5708] gripper pointing right, palm down
+#
+# How to run a test:
+#   1. edit `active_preset` below to point at one of the entries under `presets`
+#   2. (optional) flip `dynamic_trajectory` / tune `duration`
+#   3. colcon build --packages-select triago_control && source install/setup.bash
+#   4. ros2 run triago_control trajectory_generator.py
+#      (override this file at runtime with:
+#         ros2 run triago_control trajectory_generator.py --ros-args \
+#              -p config_file:=/absolute/path/to/trajectory_endpoints.yaml)
+# =============================================================================
+
+# --- WHICH TEST TO RUN -------------------------------------------------------
+active_preset: "crossing_swap"
+
+# --- GLOBAL BEHAVIOUR FLAGS --------------------------------------------------
+# Lambda-driven time scaling (dynamic_trajectory / DYNAMIC_TRAJECTORY flag).
+# When true: the trajectory virtual clock slows as the CBF shadow price grows.
+# When false: the clock is rigid (constant speed).
+dynamic_trajectory: true
+
+# Publish 6-DOF references (position + orientation).
+#   true  -> 12/13-float msgs; orientation is interpolated from start to target.
+#   false -> 6-float position-only msgs (orientation left free to the QP).
+control_orientation: true
+
+# Task dimension appended as the 13th float when control_orientation is true:
+#   6.0 -> full position + orientation tracking (SO(3) log error)
+#   5.0 -> position + X-axis alignment only (yaw about the tool axis is free)
+task_dimension: 6.0
+
+# Frame the targets and the RViz phase marker are expressed in.
+# Origin is at the center of TIAGo's mobile base (ground plane).
+# Axes: X=forward, Y=left, Z=up. Positive Y = left robot side.
+ref_frame: "base_footprint"
+
+# --- TRAJECTORY SHAPE / TIMING ----------------------------------------------
+duration: 10.0       # [s] virtual time to complete the quintic motion
+delay_start: 1.0     # [s] settle window used to sample the real start pose
+cube_size: 0.1       # [m] edge of the random perturbation cube (swap_perturbed)
+
+# =============================================================================
+# ENDPOINT PRESETS
+# -----------------------------------------------------------------------------
+# Each preset defines, per hand, the cartesian target (position + orientation).
+#
+# Fields:
+#   category    : free_space | collision_risk | out_of_workspace  (label only)
+#   description : human-readable note
+#   arms        : right | left | both  (inactive arm holds its sampled start)
+#   mode        : absolute        -> use explicit right/left xyz + rpy
+#                 swap            -> right -> left start, left -> right start
+#                 swap_perturbed  -> swap + uniform noise within +/- cube_size/2
+#   right/left  : [x, y, z] absolute target position in base_footprint
+#   rpy_right/rpy_left : [roll, pitch, yaw] target orientation in base_footprint
+#                        If omitted, the sampled start orientation is held.
+#
+# For swap/swap_perturbed modes:
+#   rpy_right/rpy_left define the target orientation at the swapped position.
+#   Omitting them holds the start orientation (each arm keeps its own).
+# =============================================================================
+presets:
+
+  # --- 1. FREE SPACE -- single arm (right only, gentlest test) ---------------
+  right_reach:
+    category: free_space
+    description: "Right hand forward reach. Left holds position.
+                  Gripper points forward with palm down (comfortable reach)."
+    arms: right
+    mode: absolute
+    right: [0.8, -0.5, 0.8]
+    left:  [0.5,  0.5, 0.8]
+    rpy_right: [3.1416, 0.0, 0.0]       # forward-down
+    rpy_left:  [3.1416, 0.0, 0.0]       # forward-down (held, arm inactive)
+
+  # --- 2. FREE SPACE -- both arms, symmetric "home" pose ---------------------
+  home:
+    category: free_space
+    description: "Both hands to symmetric home pose. Grippers forward, palms down."
+    arms: both
+    mode: absolute
+    right: [0.6, -0.5, 0.8]
+    left:  [0.6,  0.5, 0.8]
+    rpy_right: [3.1416, 0.0, 0.0]       # forward-down
+    rpy_left:  [3.1416, 0.0, 0.0]       # forward-down
+
+  # --- 3. FREE SPACE -- both arms lowered (top-grasp orientation) ------------
+  lowered:
+    category: free_space
+    description: "Both hands lowered (descend in Z). Grippers reorient to
+                  top-grasp pose (approach axis pointing down, palm forward)."
+    arms: both
+    mode: absolute
+    right: [0.5, -0.5, 0.3]
+    left:  [0.5,  0.5, 0.3]
+    rpy_right: [0.0, 1.5708, 0.0]       # top-grasp
+    rpy_left:  [0.0, 1.5708, 0.0]       # top-grasp
+
+  # --- 4. FREE SPACE -- both arms slid forward (keep forward-down) -----------
+  sliding:
+    category: free_space
+    description: "Both hands pushed forward in X. Grippers stay forward, palms down."
+    arms: both
+    mode: absolute
+    right: [0.8, -0.5, 0.8]
+    left:  [0.8,  0.5, 0.8]
+    rpy_right: [3.1416, 0.0, 0.0]       # forward-down
+    rpy_left:  [3.1416, 0.0, 0.0]       # forward-down
+
+  # --- 5. COLLISION RISK -- perfect arm swap with orientation ----------------
+  crossing_swap:
+    category: collision_risk
+    description: "Perfect swap: each hand drives to the other's start position.
+                  Right gripper orients to approach-left (pointing toward left
+                  workspace), left gripper orients to approach-right. This is the
+                  natural wrist orientation when crossing arms."
+    arms: both
+    mode: swap
+    rpy_right: [3.1416, 0.0, 1.5708]    # approach-left (right hand ends on left side)
+    rpy_left:  [3.1416, 0.0, -1.5708]   # approach-right (left hand ends on right side)
+
+  # --- 6. COLLISION RISK -- swap with random perturbation --------------------
+  crossing_perturbed:
+    category: collision_risk
+    description: "Swap targets with uniform random perturbation inside a cube.
+                  Orientation same as crossing_swap (approach toward opposite side)."
+    arms: both
+    mode: swap_perturbed
+    rpy_right: [3.1416, 0.0, 1.5708]    # approach-left
+    rpy_left:  [3.1416, 0.0, -1.5708]   # approach-right
+
+  # --- 7. OUT OF WORKSPACE -- cross-body target ------------------------------
+  out_of_ws:
+    category: out_of_workspace
+    description: "Right hand commanded across the body to the left workspace
+                  (0.7, 0.5, 0.3). Gripper points left (approach-left) since
+                  it is reaching into the left side. Probes CBF saturation."
+    arms: both
+    mode: absolute
+    right: [0.7, 0.5, 0.3]
+    left:  [0.5, 0.5, 0.3]
+    rpy_right: [3.1416, 0.0, 1.5708]    # approach-left (crossing to left side)
+    rpy_left:  [0.0, 1.5708, 0.0]       # top-grasp (lowered position)
