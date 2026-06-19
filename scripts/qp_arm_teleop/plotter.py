@@ -508,71 +508,53 @@ def update_plot(frame, node, lines_map, ax_joints, ax_slacks, ax_error, ax_perf,
                 ax.relim()
                 ax.autoscale_view(scalex=False, scaley=True)
 
-    # --- PART 5: QP COMMANDED vs MEASURED VELOCITY ---
-    if node.qdot_cmd_time and node.time_buffer:
-        t_cmd = list(node.qdot_cmd_time)
+    # --- PART 5: VELOCITY ANALYSIS ---
+    if node.time_buffer:
         t_meas = list(node.time_buffer)
         window_v = 5.0
 
-        # Left arm commanded (column 0)
-        if node.qdot_cmd_l_buffer:
-            cmd_l = np.array(list(node.qdot_cmd_l_buffer))
-            min_cmd = min(len(t_cmd), len(cmd_l))
-            if min_cmd > 0:
-                for i, j in enumerate(node.left_joints):
-                    lines_map[j + '_cmd_l'].set_data(t_cmd[:min_cmd], cmd_l[:min_cmd, i])
-
-        # Left arm measured (column 0)
+        # Top row: raw encoder velocity (from /joint_states)
         for i, j in enumerate(node.left_joints):
             dq_data = list(node.dq_buffers[j])
-            min_meas = min(len(t_meas), len(dq_data))
-            if min_meas > 0:
-                lines_map[j + '_meas_l'].set_data(t_meas[:min_meas], dq_data[:min_meas])
+            min_len = min(len(t_meas), len(dq_data))
+            if min_len > 0:
+                lines_map[j + '_raw_vel_l'].set_data(t_meas[:min_len], dq_data[:min_len])
 
-        # Right arm commanded (column 1)
-        if node.qdot_cmd_r_buffer:
-            cmd_r = np.array(list(node.qdot_cmd_r_buffer))
-            min_cmd = min(len(t_cmd), len(cmd_r))
-            if min_cmd > 0:
-                for i, j in enumerate(node.right_joints):
-                    lines_map[j + '_cmd_r'].set_data(t_cmd[:min_cmd], cmd_r[:min_cmd, i])
-
-        # Right arm measured (column 1)
         for i, j in enumerate(node.right_joints):
             dq_data = list(node.dq_buffers[j])
-            min_meas = min(len(t_meas), len(dq_data))
-            if min_meas > 0:
-                lines_map[j + '_meas_r'].set_data(t_meas[:min_meas], dq_data[:min_meas])
+            min_len = min(len(t_meas), len(dq_data))
+            if min_len > 0:
+                lines_map[j + '_raw_vel_r'].set_data(t_meas[:min_len], dq_data[:min_len])
 
-        # Bottom row: tracking error (cmd - measured), interpolated to cmd timestamps
-        if node.qdot_cmd_r_buffer and len(t_meas) > 1 and len(t_cmd) > 1:
-            cmd_r = np.array(list(node.qdot_cmd_r_buffer))
-            cmd_l = np.array(list(node.qdot_cmd_l_buffer)) if node.qdot_cmd_l_buffer else np.zeros((len(t_cmd), 7))
-            min_cmd = min(len(t_cmd), len(cmd_r))
-            min_cmd_l = min(len(t_cmd), len(cmd_l))
+        # Bottom row: QP command minus raw measured (interpolated to cmd timestamps)
+        if node.qdot_cmd_time and len(node.qdot_cmd_time) > 1 and len(t_meas) > 2:
+            t_cmd = list(node.qdot_cmd_time)
+            cmd_r = np.array(list(node.qdot_cmd_r_buffer)) if node.qdot_cmd_r_buffer else None
+            cmd_l = np.array(list(node.qdot_cmd_l_buffer)) if node.qdot_cmd_l_buffer else None
 
-            # Right arm error (column 1)
-            for i, j in enumerate(node.right_joints):
-                dq_data = list(node.dq_buffers[j])
-                min_meas = min(len(t_meas), len(dq_data))
-                if min_meas > 2 and min_cmd > 0:
-                    meas_interp = np.interp(t_cmd[:min_cmd], t_meas[:min_meas], dq_data[:min_meas])
-                    err = cmd_r[:min_cmd, i] - meas_interp
-                    lines_map[j + '_verr_r'].set_data(t_cmd[:min_cmd], err)
+            if cmd_r is not None:
+                min_cmd = min(len(t_cmd), len(cmd_r))
+                for i, j in enumerate(node.right_joints):
+                    dq_data = list(node.dq_buffers[j])
+                    min_meas = min(len(t_meas), len(dq_data))
+                    if min_meas > 2 and min_cmd > 0:
+                        meas_interp = np.interp(t_cmd[:min_cmd], t_meas[:min_meas], dq_data[:min_meas])
+                        err = cmd_r[:min_cmd, i] - meas_interp
+                        lines_map[j + '_verr_r'].set_data(t_cmd[:min_cmd], err)
 
-            # Left arm error (column 0)
-            for i, j in enumerate(node.left_joints):
-                dq_data = list(node.dq_buffers[j])
-                min_meas = min(len(t_meas), len(dq_data))
-                if min_meas > 2 and min_cmd_l > 0:
-                    meas_interp = np.interp(t_cmd[:min_cmd_l], t_meas[:min_meas], dq_data[:min_meas])
-                    err = cmd_l[:min_cmd_l, i] - meas_interp
-                    lines_map[j + '_verr_l'].set_data(t_cmd[:min_cmd_l], err)
+            if cmd_l is not None:
+                min_cmd_l = min(len(t_cmd), len(cmd_l))
+                for i, j in enumerate(node.left_joints):
+                    dq_data = list(node.dq_buffers[j])
+                    min_meas = min(len(t_meas), len(dq_data))
+                    if min_meas > 2 and min_cmd_l > 0:
+                        meas_interp = np.interp(t_cmd[:min_cmd_l], t_meas[:min_meas], dq_data[:min_meas])
+                        err = cmd_l[:min_cmd_l, i] - meas_interp
+                        lines_map[j + '_verr_l'].set_data(t_cmd[:min_cmd_l], err)
 
         # Window scaling
-        all_times = list(t_cmd) + list(t_meas)
-        if all_times:
-            max_t = max(all_times)
+        if t_meas:
+            max_t = t_meas[-1]
             for ax_row in ax_osc.flatten():
                 ax_row.set_xlim(max(0, max_t - window_v), max_t + 0.05)
                 ax_row.relim()
@@ -712,64 +694,52 @@ def main(args=None):
     # --- ANIMATION ---
     # We drive the animation from fig1, but update both
 # --- ANIMATION ---
-    # --- WINDOW 5: QP COMMANDED vs MEASURED VELOCITY ---
+    # --- WINDOW 5: VELOCITY ANALYSIS ---
     fig5, axs5 = plt.subplots(2, 2, figsize=(10, 7), sharex=True)
-    fig5.suptitle('Servo Tracking: QP Output vs Hardware Response')
+    fig5.suptitle('Velocity Analysis: Raw Encoder vs QP Command')
 
-    # Layout: Left column = Left arm, Right column = Right arm
-    # Top row: velocity overlay (solid=QP command, dashed=measured from encoders)
-    # Bottom row: tracking error (command minus measured)
-
-    # Top-left: Left arm velocity overlay
-    axs5[0, 0].set_title('Left Arm — Velocity')
+    # Top-left: Left arm raw velocity (from /joint_states, unfiltered)
+    axs5[0, 0].set_title('Left Arm — Raw Encoder Velocity')
     axs5[0, 0].set_ylabel('[rad/s]')
     axs5[0, 0].grid(True, alpha=0.3)
     for i, j in enumerate(node.left_joints):
-        l_cmd, = axs5[0, 0].plot([], [], color=colors[i], linewidth=1.2,
-                                  label=f'J{i+1} cmd')
-        lines_map[j + '_cmd_l'] = l_cmd
-        l_meas, = axs5[0, 0].plot([], [], color=colors[i], linewidth=1.2,
-                                   linestyle='--', alpha=0.6,
-                                   label=f'J{i+1} meas')
-        lines_map[j + '_meas_l'] = l_meas
-    axs5[0, 0].legend(ncol=4, fontsize='xx-small', loc='upper right')
+        l, = axs5[0, 0].plot([], [], color=colors[i], linewidth=0.9,
+                              label=f'J{i+1}')
+        lines_map[j + '_raw_vel_l'] = l
+    axs5[0, 0].legend(ncol=7, fontsize='xx-small', loc='upper right')
 
-    # Top-right: Right arm velocity overlay
-    axs5[0, 1].set_title('Right Arm — Velocity')
+    # Top-right: Right arm raw velocity
+    axs5[0, 1].set_title('Right Arm — Raw Encoder Velocity')
     axs5[0, 1].set_ylabel('[rad/s]')
     axs5[0, 1].grid(True, alpha=0.3)
     for i, j in enumerate(node.right_joints):
-        l_cmd, = axs5[0, 1].plot([], [], color=colors[i], linewidth=1.2,
-                                  label=f'J{i+1} cmd')
-        lines_map[j + '_cmd_r'] = l_cmd
-        l_meas, = axs5[0, 1].plot([], [], color=colors[i], linewidth=1.2,
-                                   linestyle='--', alpha=0.6,
-                                   label=f'J{i+1} meas')
-        lines_map[j + '_meas_r'] = l_meas
-    axs5[0, 1].legend(ncol=4, fontsize='xx-small', loc='upper right')
+        l, = axs5[0, 1].plot([], [], color=colors[i], linewidth=0.9,
+                              label=f'J{i+1}')
+        lines_map[j + '_raw_vel_r'] = l
+    axs5[0, 1].legend(ncol=7, fontsize='xx-small', loc='upper right')
 
-    # Bottom-left: Left arm tracking error
-    axs5[1, 0].set_title('Left Arm — Servo Error (cmd − meas)')
+    # Bottom-left: Left arm QP command minus raw velocity
+    axs5[1, 0].set_title('Left Arm — QP cmd − Raw meas')
     axs5[1, 0].set_ylabel('[rad/s]')
     axs5[1, 0].set_xlabel('Time [s]')
     axs5[1, 0].grid(True, alpha=0.3)
     axs5[1, 0].axhline(y=0, color='k', linewidth=0.5, alpha=0.5)
     for i, j in enumerate(node.left_joints):
-        l_err, = axs5[1, 0].plot([], [], color=colors[i], linewidth=0.8,
-                                  label=f'J{i+1}')
-        lines_map[j + '_verr_l'] = l_err
+        l, = axs5[1, 0].plot([], [], color=colors[i], linewidth=0.8,
+                              label=f'J{i+1}')
+        lines_map[j + '_verr_l'] = l
     axs5[1, 0].legend(ncol=7, fontsize='xx-small', loc='upper right')
 
-    # Bottom-right: Right arm tracking error
-    axs5[1, 1].set_title('Right Arm — Servo Error (cmd − meas)')
+    # Bottom-right: Right arm QP command minus raw velocity
+    axs5[1, 1].set_title('Right Arm — QP cmd − Raw meas')
     axs5[1, 1].set_ylabel('[rad/s]')
     axs5[1, 1].set_xlabel('Time [s]')
     axs5[1, 1].grid(True, alpha=0.3)
     axs5[1, 1].axhline(y=0, color='k', linewidth=0.5, alpha=0.5)
     for i, j in enumerate(node.right_joints):
-        l_err, = axs5[1, 1].plot([], [], color=colors[i], linewidth=0.8,
-                                  label=f'J{i+1}')
-        lines_map[j + '_verr_r'] = l_err
+        l, = axs5[1, 1].plot([], [], color=colors[i], linewidth=0.8,
+                              label=f'J{i+1}')
+        lines_map[j + '_verr_r'] = l
     axs5[1, 1].legend(ncol=7, fontsize='xx-small', loc='upper right')
 
     figs_array = [fig1, fig2, fig3, fig4, fig5]
