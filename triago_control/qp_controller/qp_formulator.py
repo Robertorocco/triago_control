@@ -120,8 +120,8 @@ class QPFormulator:
 
         # --- Adaptive scheduling from previous loop's shadow prices ---
         weight_slack_r, weight_slack_l = self._schedule_weights(dt)
-        # Representative slack weight for telemetry (matches the original publish)
-        self.weight_slack = cfg.BASE_WEIGHT_SLACK
+        # Representative slack weight for telemetry (average of both arms)
+        self.weight_slack = (weight_slack_r + weight_slack_l) / 2.0
 
         # =========================================================
         # A. COST FUNCTION (damping + posture spring + slack penalty)
