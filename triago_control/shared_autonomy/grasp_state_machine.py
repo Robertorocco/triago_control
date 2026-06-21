@@ -111,7 +111,8 @@ class GraspStateMachine:
     GRASP_APPROACH_TIMEOUT_S = 20.0
 
     # Force-controlled closure parameters
-    GRIP_CLOSE_VELOCITY = 0.01    # rad/s — how fast fingers close (slower = smoother)
+    GRIP_CLOSE_VELOCITY = 0.005   # rad/s — very slow closure (~10s to close fully)
+    GRIP_FINAL_POSITION = 0.005   # rad — target closed position (just past cylinder)
     GRIP_FORCE_TARGET = 4.0       # N — target grip force on Fx axis
     GRIP_FORCE_CONTACT = 1.5      # N — threshold to detect first contact
     GRIP_FORCE_MAX = 8.0          # N — safety limit (stop closing)
@@ -369,7 +370,7 @@ class GraspStateMachine:
         )
 
     # ------------------------------------------------------------------
-    # PHASE 3: GRASP_CLOSE (force-controlled incremental finger closure)
+    # PHASE 3: GRASP_CLOSE (slow constant-velocity closure, observe forces)
     # ------------------------------------------------------------------
     def _grasp_close(self, inp: TickInput) -> TickOutput:
         self._transition("GRASP_CLOSE")
@@ -380,62 +381,35 @@ class GraspStateMachine:
         elapsed = time.time() - self.grasp_timer
         dt = 0.01  # 100 Hz tick
 
-        # Read grip force (use |Fx| as the squeeze axis — confirmed from force plot)
-        grip_force = abs(inp.current_force_local[0]) if len(inp.current_force_local) >= 3 else 0.0
-
-        # --- Force-controlled closure logic ---
         gripper_cmd = None
 
-        if grip_force >= self.GRIP_FORCE_MAX:
-            # Safety: stop immediately if force too high
-            pass  # Don't close further
+        # Pure constant-velocity closure over ~10s, no force regulation
+        self.grip_position -= self.GRIP_CLOSE_VELOCITY * dt
+        self.grip_position = max(self.GRIP_FINAL_POSITION, self.grip_position)
+        gripper_cmd = f"CLOSE_{inp.active_arm.upper()}_{self.grip_position:.4f}"
 
-        elif not self.grip_contact_detected:
-            # PRE-CONTACT: close at constant velocity until first contact
-            if grip_force > self.GRIP_FORCE_CONTACT:
-                self.grip_contact_detected = True
-                log_lines.append(("info", f"[GRASP] Contact detected (Fy={grip_force:.2f} N). "
-                                          f"Switching to force regulation."))
-            else:
-                # Close slowly
-                self.grip_position -= self.GRIP_CLOSE_VELOCITY * dt
-                self.grip_position = max(0.0, self.grip_position)
-                gripper_cmd = f"CLOSE_{inp.active_arm.upper()}_{self.grip_position:.4f}"
+        # Done when we reach the final position — hold for 2s then attach
+        if self.grip_position <= self.GRIP_FINAL_POSITION:
+            if self.grip_force_stable_since is None:
+                self.grip_force_stable_since = time.time()
+                log_lines.append(("info", f"[GRASP] Fingers reached target "
+                                          f"({self.GRIP_FINAL_POSITION:.4f} rad). Holding..."))
+            elif time.time() - self.grip_force_stable_since >= 2.0:
+                log_lines.append(("info", f"[GRASP] Hold complete. Attaching."))
+                self._transition("SHARED_AUTONOMY")
+                return TickOutput(
+                    target_twist=target_twist,
+                    new_state=self._state,
+                    ignore_cbf="None",
+                    grasp_margin=CLEAR_MARGIN,
+                    gripper_cmd=f"ATTACH_{inp.active_arm.upper()}_{color.upper()}",
+                    log_lines=log_lines,
+                )
 
-        else:
-            # FORCE REGULATION: proportional control toward target force
-            force_error = self.GRIP_FORCE_TARGET - grip_force
-            closure_delta = self.GRIP_K_FORCE * force_error * dt
-            self.grip_position -= closure_delta  # Negative delta = close more
-            self.grip_position = max(0.0, min(0.7, self.grip_position))
-            gripper_cmd = f"CLOSE_{inp.active_arm.upper()}_{self.grip_position:.4f}"
-
-            # Check if force is stable above threshold for confirmation
-            if grip_force >= self.GRASP_FORCE_THRESHOLD:
-                if self.grip_force_stable_since is None:
-                    self.grip_force_stable_since = time.time()
-                elif time.time() - self.grip_force_stable_since >= self.GRIP_CONFIRM_DURATION:
-                    # GRASP CONFIRMED
-                    log_lines.append(
-                        ("info", f"[GRASP] Force stable at {grip_force:.2f} N for "
-                                 f"{self.GRIP_CONFIRM_DURATION:.1f}s. Grasp CONFIRMED."))
-                    self._transition("SHARED_AUTONOMY")
-                    return TickOutput(
-                        target_twist=target_twist,
-                        new_state=self._state,
-                        ignore_cbf="None",
-                        grasp_margin=CLEAR_MARGIN,
-                        gripper_cmd=f"ATTACH_{inp.active_arm.upper()}_{color.upper()}",
-                        log_lines=log_lines,
-                    )
-            else:
-                self.grip_force_stable_since = None  # Reset if force drops
-
-        # Timeout fallback (attach anyway in test mode)
-        if elapsed > self.GRASP_CLOSE_HOLD_S + 5.0:
+        # Timeout fallback
+        if elapsed > 15.0:
             log_lines.append(
-                ("warn", f"[GRASP] Force closure timeout ({elapsed:.1f}s). "
-                         f"grip_force={grip_force:.2f} N. Attaching anyway (test mode)."))
+                ("warn", f"[GRASP] Closure timeout ({elapsed:.1f}s). Attaching anyway."))
             self._transition("SHARED_AUTONOMY")
             return TickOutput(
                 target_twist=target_twist,
