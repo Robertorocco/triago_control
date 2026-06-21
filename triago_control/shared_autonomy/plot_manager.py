@@ -165,7 +165,7 @@ class PlotManager:
             spine.set_edgecolor('#334')
         self.ax_force.set_xlabel('Time [s]', color='#aaa', fontsize=9)
         self.ax_force.set_ylabel('Force [N]', color='#aaa', fontsize=9)
-        self.ax_force.set_title('F/T Sensor — Raw Wrist Data (matches ros2 topic echo)',
+        self.ax_force.set_title('F/T Sensor — Raw (filtered: 100ms moving avg)',
                                  color='white', fontsize=10)
         self.ax_force.axhline(0, color='#445', linewidth=0.8)
         self.ax_force.set_ylim(-5, 5)
@@ -288,32 +288,50 @@ class PlotManager:
         self._diff_goal_text.set_text(f'pi* goal: {goal_key}')
 
     def _update_force_plot(self):
-        """Update the scrolling force RGB plot."""
+        """Update the scrolling force RGB plot with moving-average filter."""
         with self.plot_lock:
-            if len(self._force_time) < 2:
+            if len(self._force_time) < 10:
                 return
             t = list(self._force_time)
             forces = np.array(list(self._force_history))
 
         n = len(t)
-        self._force_line_x.set_data(t, forces[:, 0])
-        self._force_line_y.set_data(t, forces[:, 1])
-        self._force_line_z.set_data(t, forces[:, 2])
-        mags = np.linalg.norm(forces, axis=1)
-        self._force_line_mag.set_data(t, mags)
+
+        # Moving average filter (window = 10 samples ≈ 100ms at 100Hz)
+        kernel_size = 10
+        if n >= kernel_size:
+            kernel = np.ones(kernel_size) / kernel_size
+            fx_smooth = np.convolve(forces[:, 0], kernel, mode='valid')
+            fy_smooth = np.convolve(forces[:, 1], kernel, mode='valid')
+            fz_smooth = np.convolve(forces[:, 2], kernel, mode='valid')
+            t_smooth = t[kernel_size - 1:]  # Align time with convolution output
+            mags_smooth = np.sqrt(fx_smooth**2 + fy_smooth**2 + fz_smooth**2)
+        else:
+            fx_smooth = forces[:, 0]
+            fy_smooth = forces[:, 1]
+            fz_smooth = forces[:, 2]
+            t_smooth = t
+            mags_smooth = np.linalg.norm(forces, axis=1)
+
+        self._force_line_x.set_data(t_smooth, fx_smooth)
+        self._force_line_y.set_data(t_smooth, fy_smooth)
+        self._force_line_z.set_data(t_smooth, fz_smooth)
+        self._force_line_mag.set_data(t_smooth, mags_smooth)
 
         # Scrolling window (last 10s)
-        t_max = t[-1]
+        t_max = t_smooth[-1] if len(t_smooth) > 0 else 0
         window = 10.0
         self.ax_force.set_xlim(t_max - window, t_max + 0.1)
 
         # Auto-scale Y based on visible data
         visible_start = max(0, t_max - window)
-        visible_mask = np.array(t) >= visible_start
+        t_arr = np.array(t_smooth)
+        visible_mask = t_arr >= visible_start
         if np.any(visible_mask):
-            visible_forces = forces[visible_mask]
-            visible_mags = mags[visible_mask]
-            y_max = max(np.max(np.abs(visible_forces)), np.max(visible_mags), 0.5)
+            all_visible = np.concatenate([fx_smooth[visible_mask],
+                                          fy_smooth[visible_mask],
+                                          fz_smooth[visible_mask]])
+            y_max = max(np.max(np.abs(all_visible)), 0.5)
             self.ax_force.set_ylim(-y_max * 1.2, y_max * 1.2)
 
         self.fig_force.canvas.draw_idle()

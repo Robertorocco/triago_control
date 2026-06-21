@@ -111,8 +111,8 @@ class GraspStateMachine:
     GRASP_APPROACH_TIMEOUT_S = 20.0
 
     # Force-controlled closure parameters
-    GRIP_CLOSE_VELOCITY = 0.005   # rad/s — very slow closure (~10s to close fully)
-    GRIP_FINAL_POSITION = 0.010   # rad — target closed position (slightly less tight)
+    GRIP_CLOSE_VELOCITY = 0.003   # rad/s — very slow closure (~13s to close)
+    GRIP_FINAL_POSITION = 0.015   # rad — target closed position (less tight)
     GRIP_FORCE_TARGET = 4.0       # N — target grip force on Fx axis
     GRIP_FORCE_CONTACT = 1.5      # N — threshold to detect first contact
     GRIP_FORCE_MAX = 8.0          # N — safety limit (stop closing)
