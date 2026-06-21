@@ -66,9 +66,9 @@ class GoalSet:
         if cylinders is None:
             cylinders = {
                 'Red':  {'pos': np.array([0.800, -0.20, 0.775]), 'height': 0.15,
-                         'radius': 0.035, 'cbf_name': 'red_cylinder'},
+                         'radius': 0.02, 'cbf_name': 'red_cylinder'},
                 'Blue': {'pos': np.array([0.800,  0.20, 0.775]), 'height': 0.15,
-                         'radius': 0.035, 'cbf_name': 'blue_cylinder'},
+                         'radius': 0.02, 'cbf_name': 'blue_cylinder'},
             }
         self.cylinders = cylinders
 
