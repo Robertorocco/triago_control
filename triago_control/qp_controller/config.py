@@ -111,7 +111,7 @@ REF_FRAME = 'base_footprint'
 # =============================================================================
 CAPSULE_RADIUS = 0.06                 # Radius of the arm collision capsules
 
-CYLINDER_SIZE = [0.02, 0.15]          # [Radius, Length] of the workspace cylinders
+CYLINDER_SIZE = [0.035, 0.15]         # [Radius, Length] of the workspace cylinders
 RED_CYLINDER_POS = [0.800, -0.20, 0.775]
 BLUE_CYLINDER_POS = [0.800, 0.20, 0.775]
 TABLE_POS = [1.0, 0.0, 0.35]
