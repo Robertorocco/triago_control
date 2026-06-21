@@ -165,7 +165,7 @@ class PlotManager:
             spine.set_edgecolor('#334')
         self.ax_force.set_xlabel('Time [s]', color='#aaa', fontsize=9)
         self.ax_force.set_ylabel('Force [N]', color='#aaa', fontsize=9)
-        self.ax_force.set_title('F/T Sensor — Wrist Local Frame (gravity-compensated)',
+        self.ax_force.set_title('F/T Sensor — Raw Wrist Data (matches ros2 topic echo)',
                                  color='white', fontsize=10)
         self.ax_force.axhline(0, color='#445', linewidth=0.8)
         self.ax_force.set_ylim(-5, 5)

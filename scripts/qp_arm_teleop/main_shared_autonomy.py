@@ -323,8 +323,8 @@ class SharedControlNode(Node):
         self.current_force_local = raw_force - self.baseline_force
         self.current_force_mag = float(np.linalg.norm(self.current_force_local))
 
-        # Push force data to the plot manager for live visualization
-        self.plot_manager.push_force(self.current_force_local)
+        # Push RAW force to the plot (matches ros2 topic echo, no baseline subtraction)
+        self.plot_manager.push_force(raw_force)
 
         if self.GRASP_DEBUG:
             log_msg = (f"[F/T] |F|={self.current_force_mag:5.2f} N  "
