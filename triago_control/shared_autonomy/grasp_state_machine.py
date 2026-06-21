@@ -274,7 +274,7 @@ class GraspStateMachine:
             # target is now effectively zero from the moment it's created.
             r = self.cylinders[color]['radius']
             self.locked_grasp_pose = inp.get_dynamic_goal_pose(
-                inp.T_active_goal, inp.active_goal_key, approach_offset=-r - 0.05)
+                inp.T_active_goal, inp.active_goal_key, approach_offset=-r - 0.06)
 
             self._transition("GRASP_APPROACH")
             self.grasp_timer = time.time()
