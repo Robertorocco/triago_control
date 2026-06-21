@@ -111,8 +111,8 @@ class GraspStateMachine:
     GRASP_APPROACH_TIMEOUT_S = 20.0
 
     # Force-controlled closure parameters
-    GRIP_CLOSE_VELOCITY = 0.02    # rad/s — how fast fingers close (slow = smooth)
-    GRIP_FORCE_TARGET = 4.0       # N — target grip force on Fy axis
+    GRIP_CLOSE_VELOCITY = 0.01    # rad/s — how fast fingers close (slower = smoother)
+    GRIP_FORCE_TARGET = 4.0       # N — target grip force on Fx axis
     GRIP_FORCE_CONTACT = 1.5      # N — threshold to detect first contact
     GRIP_FORCE_MAX = 8.0          # N — safety limit (stop closing)
     GRIP_K_FORCE = 0.005          # rad/s per N — force proportional gain
@@ -380,8 +380,8 @@ class GraspStateMachine:
         elapsed = time.time() - self.grasp_timer
         dt = 0.01  # 100 Hz tick
 
-        # Read grip force (use |Fy| as the squeeze axis — assumption, will verify)
-        grip_force = abs(inp.current_force_local[1]) if len(inp.current_force_local) >= 3 else 0.0
+        # Read grip force (use |Fx| as the squeeze axis — confirmed from force plot)
+        grip_force = abs(inp.current_force_local[0]) if len(inp.current_force_local) >= 3 else 0.0
 
         # --- Force-controlled closure logic ---
         gripper_cmd = None
