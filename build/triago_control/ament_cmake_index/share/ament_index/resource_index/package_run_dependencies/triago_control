@@ -1,1 +1,0 @@
-rclcpp;rclpy;pinocchio;python3-numpy;python3-scipy;python3-matplotlib;python3-quadprog;std_msgs;geometry_msgs;sensor_msgs;nav_msgs;control_msgs;trajectory_msgs;visualization_msgs;controller_manager_msgs;rcl_interfaces;tf2_ros;urdf_parser_py
