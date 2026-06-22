@@ -370,49 +370,70 @@ class GraspStateMachine:
         )
 
     # ------------------------------------------------------------------
-    # PHASE 3: GRASP_CLOSE (slow constant-velocity closure, observe forces)
+    # PHASE 3: GRASP_CLOSE (slow closure then vertical lift)
     # ------------------------------------------------------------------
+    LIFT_VELOCITY = 0.02  # m/s upward lift speed
+    LIFT_DURATION = 3.0   # seconds to lift before declaring success
+
     def _grasp_close(self, inp: TickInput) -> TickOutput:
         self._transition("GRASP_CLOSE")
         log_lines = []
         color = inp.active_goal_key.split('_')[0]
 
-        target_twist = np.zeros(6)  # Freeze arm completely
         elapsed = time.time() - self.grasp_timer
         dt = 0.01  # 100 Hz tick
 
-        gripper_cmd = None
+        # --- Phase A: Close fingers slowly until final position ---
+        if not self.grip_contact_detected:
+            self.grip_position -= self.GRIP_CLOSE_VELOCITY * dt
+            self.grip_position = max(self.GRIP_FINAL_POSITION, self.grip_position)
+            gripper_cmd = f"CLOSE_{inp.active_arm.upper()}_{self.grip_position:.4f}"
 
-        # Pure constant-velocity closure over ~10s, no force regulation
-        self.grip_position -= self.GRIP_CLOSE_VELOCITY * dt
-        self.grip_position = max(self.GRIP_FINAL_POSITION, self.grip_position)
-        gripper_cmd = f"CLOSE_{inp.active_arm.upper()}_{self.grip_position:.4f}"
+            # Fingers reached target → switch to lift phase
+            if self.grip_position <= self.GRIP_FINAL_POSITION:
+                self.grip_contact_detected = True  # Reuse flag as "closure done"
+                self.grip_force_stable_since = time.time()  # Reuse as lift start time
+                log_lines.append(("info", f"[GRASP] Fingers at target ({self.GRIP_FINAL_POSITION:.4f} rad). "
+                                          f"Holding grip. Starting vertical lift."))
 
-        # Done when we reach the final position — hold for 2s then attach
-        if self.grip_position <= self.GRIP_FINAL_POSITION:
-            if self.grip_force_stable_since is None:
-                self.grip_force_stable_since = time.time()
-                log_lines.append(("info", f"[GRASP] Fingers reached target "
-                                          f"({self.GRIP_FINAL_POSITION:.4f} rad). Holding..."))
-            elif time.time() - self.grip_force_stable_since >= 2.0:
-                log_lines.append(("info", f"[GRASP] Hold complete. Attaching."))
-                self._transition("SHARED_AUTONOMY")
-                return TickOutput(
-                    target_twist=target_twist,
-                    new_state=self._state,
-                    ignore_cbf="None",
-                    grasp_margin=CLEAR_MARGIN,
-                    gripper_cmd=f"ATTACH_{inp.active_arm.upper()}_{color.upper()}",
-                    log_lines=log_lines,
-                )
-
-        # Timeout fallback
-        if elapsed > 15.0:
-            log_lines.append(
-                ("warn", f"[GRASP] Closure timeout ({elapsed:.1f}s). Attaching anyway."))
-            self._transition("SHARED_AUTONOMY")
+            # Arm stays frozen during closure
+            target_twist = np.zeros(6)
             return TickOutput(
                 target_twist=target_twist,
+                new_state=self._state,
+                ignore_cbf="None",
+                grasp_margin=self.GRASP_CBF_MARGIN,
+                gripper_cmd=gripper_cmd,
+                log_lines=log_lines,
+            )
+
+        # --- Phase B: Lift vertically (grip held at GRIP_FINAL_POSITION) ---
+        lift_elapsed = time.time() - self.grip_force_stable_since
+
+        # Command a pure vertical twist (Z-up in base_footprint)
+        target_twist = np.array([0.0, 0.0, self.LIFT_VELOCITY, 0.0, 0.0, 0.0])
+
+        # Keep sending the same grip position to hold fingers in place
+        gripper_cmd = f"CLOSE_{inp.active_arm.upper()}_{self.GRIP_FINAL_POSITION:.4f}"
+
+        if lift_elapsed >= self.LIFT_DURATION:
+            log_lines.append(("info", f"[GRASP] Lift complete ({self.LIFT_DURATION:.1f}s). Attaching."))
+            self._transition("SHARED_AUTONOMY")
+            return TickOutput(
+                target_twist=np.zeros(6),
+                new_state=self._state,
+                ignore_cbf="None",
+                grasp_margin=CLEAR_MARGIN,
+                gripper_cmd=f"ATTACH_{inp.active_arm.upper()}_{color.upper()}",
+                log_lines=log_lines,
+            )
+
+        # Timeout fallback
+        if elapsed > 20.0:
+            log_lines.append(("warn", f"[GRASP] Timeout ({elapsed:.1f}s). Attaching anyway."))
+            self._transition("SHARED_AUTONOMY")
+            return TickOutput(
+                target_twist=np.zeros(6),
                 new_state=self._state,
                 ignore_cbf="None",
                 grasp_margin=CLEAR_MARGIN,

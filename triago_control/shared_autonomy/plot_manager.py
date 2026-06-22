@@ -165,7 +165,7 @@ class PlotManager:
             spine.set_edgecolor('#334')
         self.ax_force.set_xlabel('Time [s]', color='#aaa', fontsize=9)
         self.ax_force.set_ylabel('Force [N]', color='#aaa', fontsize=9)
-        self.ax_force.set_title('F/T Sensor — Raw (filtered: 100ms moving avg)',
+        self.ax_force.set_title('F/T Sensor — Raw (filtered: 50ms moving avg)',
                                  color='white', fontsize=10)
         self.ax_force.axhline(0, color='#445', linewidth=0.8)
         self.ax_force.set_ylim(-5, 5)
@@ -297,8 +297,8 @@ class PlotManager:
 
         n = len(t)
 
-        # Moving average filter (window = 10 samples ≈ 100ms at 100Hz)
-        kernel_size = 10
+        # Moving average filter (window = 5 samples ≈ 50ms at 100Hz)
+        kernel_size = 5
         if n >= kernel_size:
             kernel = np.ones(kernel_size) / kernel_size
             fx_smooth = np.convolve(forces[:, 0], kernel, mode='valid')
