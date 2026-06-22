@@ -57,6 +57,7 @@ class CollisionManager:
         self.body_geom_ids = []
         self.gripper_box_ids = {}          # {'right': id, 'left': id}
         self.workspace_obstacle_ids = []
+        self.top_active_pairs = []         # [(name1, name2, dist)] 3 closest enabled pairs (debug)
 
     def calculate_offsets(self, chain, tool_link_name):
         # Build per-link capsule placements by snapping each link to its dominant axis.
@@ -354,6 +355,7 @@ class CollisionManager:
         J_soft_sum = np.zeros(self.model.nv)
         active_interaction = False
         jacobian_cache = {}
+        enabled_pairs = []   # (raw_distance, geom_id_first, geom_id_second) actually contributing
 
         # Geometry set allowed to "touch" a cylinder during a grasp (boxes + wrist + fingers)
         allowed_grasp_ids = set(self.gripper_box_ids.values())
@@ -384,6 +386,9 @@ class CollisionManager:
                 skip_pair = True
             if skip_pair:
                 continue
+
+            # Record this pair as an ACTUALLY-ENABLED contributor (for debug plot)
+            enabled_pairs.append((d, first, second))
 
             # --- SHARED-AUTONOMY HOOK 3: per-pair negative grasp margin ---
             # The barrier stays ACTIVE; only this gripper<->cylinder pair's safe
@@ -450,6 +455,14 @@ class CollisionManager:
             sum_exp += weight
             J_soft_sum += weight * J_dist_k
             active_interaction = True
+
+        # --- Record the 3 closest ACTUALLY-ENABLED pairs for the debug plot ---
+        enabled_pairs.sort(key=lambda x: x[0])
+        self.top_active_pairs = []
+        for d_p, g1, g2 in enabled_pairs[:3]:
+            n1 = self.cmodel.geometryObjects[g1].name
+            n2 = self.cmodel.geometryObjects[g2].name
+            self.top_active_pairs.append((n1, n2, float(d_p)))
 
         # No active interaction -> barrier is silent (open space)
         if not active_interaction or sum_exp < 1e-6:

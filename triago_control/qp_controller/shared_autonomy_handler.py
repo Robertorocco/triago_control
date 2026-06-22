@@ -239,10 +239,12 @@ class SharedAutonomyHandler:
         self.pub_grasp_contact.publish(Float64MultiArray(data=[contact['red'], contact['blue']]))
 
         if cfg.GRASP_DEBUG and self.node.publish_counter % 200 == 0:
-            margin_view = {self.col.cmodel.geometryObjects[g].name: m
-                           for g, m in self.grasp_margin_targets.items()}
-            self.node.get_logger().info(
-                f"[GRASP-DBG/teleop] grasp_margin={margin_view} "
-                f"attached={sorted(self.attached_objects)} | "
-                f"gripper-cyl dist red={contact['red']:.4f} blue={contact['blue']:.4f} m "
-                f"(margin keeps barrier active; closes near the margin value)")
+            # Disabled: console spam. The /qp_debug/top_pairs plot supersedes this.
+            # margin_view = {self.col.cmodel.geometryObjects[g].name: m
+            #                for g, m in self.grasp_margin_targets.items()}
+            # self.node.get_logger().info(
+            #     f"[GRASP-DBG/teleop] grasp_margin={margin_view} "
+            #     f"attached={sorted(self.attached_objects)} | "
+            #     f"gripper-cyl dist red={contact['red']:.4f} blue={contact['blue']:.4f} m "
+            #     f"(margin keeps barrier active; closes near the margin value)")
+            pass

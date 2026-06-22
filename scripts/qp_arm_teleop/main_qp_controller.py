@@ -108,6 +108,7 @@ class SafetyQPController(Node):
         self.pub_debug_h = self.create_publisher(Float64, '/qp_debug/safety_margin', 10)
         self.pub_loop_freq = self.create_publisher(Float64, '/qp_debug/loop_freq', 10)
         self.pub_min_dist = self.create_publisher(Float64, '/qp_debug/min_distance', 10)
+        self.pub_top_pairs = self.create_publisher(String, '/qp_debug/top_pairs', 10)
         self.pub_lambda_cbf = self.create_publisher(Float64, '/qp_debug/lambda_cbf', 10)
         self.pub_lambda_joints = self.create_publisher(Float64MultiArray, '/qp_debug/lambda_joints', 10)
         self.pub_dynamic_weights = self.create_publisher(Float64MultiArray, '/qp_debug/dynamic_weights', 10)
@@ -431,6 +432,11 @@ class SafetyQPController(Node):
         self.pub_min_dist.publish(Float64(data=abs_min_distance))
         self.pub_dynamic_weights.publish(Float64MultiArray(data=[float(self.qp.weight_slack), float(self.qp.gamma_clf)]))
         self.pub_d_safe_dynamic.publish(Float64(data=float(d_safe_dynamic)))
+
+        # Top-3 actually-enabled collision pairs (for the debug plot)
+        top = getattr(self.col, 'top_active_pairs', [])
+        pairs_str = ";".join(f"{n1}|{n2}|{d:.4f}" for (n1, n2, d) in top)
+        self.pub_top_pairs.publish(String(data=pairs_str))
 
         # Tracking errors
         if qdot_err_14 is not None:

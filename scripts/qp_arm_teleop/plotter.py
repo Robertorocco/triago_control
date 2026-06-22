@@ -134,6 +134,12 @@ class TriagoDashboard(Node):
         self.d_safe_time = deque(maxlen=self.history_len)
         self.create_subscription(Float64, '/qp_debug/d_safe_dynamic', self.d_safe_callback, qos_profile)
 
+        # --- Top-3 enabled collision pairs (debug) ---
+        self.top_pairs_time = deque(maxlen=self.history_len)
+        self.top_pairs_dist = [deque(maxlen=self.history_len) for _ in range(3)]
+        self.top_pairs_names = ["", "", ""]
+        self.create_subscription(String, '/qp_debug/top_pairs', self.top_pairs_callback, qos_profile)
+
         # --- NEW: TRACKING ERROR SUBSCRIBERS ---
         self.sub_qdot_err = self.create_subscription(
             Float64MultiArray, '/qp_debug/qdot_err', self.qdot_err_callback, 10)
@@ -207,6 +213,31 @@ class TriagoDashboard(Node):
         t = self.get_time()
         self.d_safe_time.append(t)
         self.d_safe_buffer.append(msg.data)
+
+    @staticmethod
+    def _short_pair_name(n1, n2):
+        def short(n):
+            return (n.replace('shadow_right_', 'R:').replace('shadow_left_', 'L:')
+                     .replace('shadow_', '').replace('arm_right_', 'R').replace('arm_left_', 'L')
+                     .replace('_link', '').replace('gripper_right_collision_box', 'R:grip')
+                     .replace('gripper_left_collision_box', 'L:grip')
+                     .replace('_box', '').replace('_cylinder', '_cyl')
+                     .replace('work_table', 'table').replace('ground_plane', 'ground'))
+        return f"{short(n1)}~{short(n2)}"
+
+    def top_pairs_callback(self, msg):
+        t = self.get_time()
+        entries = [e for e in msg.data.split(';') if e]
+        self.top_pairs_time.append(t)
+        for i in range(3):
+            if i < len(entries):
+                parts = entries[i].split('|')
+                if len(parts) == 3:
+                    self.top_pairs_dist[i].append(float(parts[2]))
+                    self.top_pairs_names[i] = self._short_pair_name(parts[0], parts[1])
+                    continue
+            self.top_pairs_dist[i].append(np.nan)
+            self.top_pairs_names[i] = ""
     
     def freq_callback(self, msg):
         t = self.get_time()
@@ -327,7 +358,7 @@ def ros_thread_entry(node):
         pass
 
 
-def update_plot(frame, node, lines_map, axs1, axs2, axs3, dyn_plots, figs):
+def update_plot(frame, node, lines_map, axs1, axs2, axs3, ax_pairs, dyn_plots, figs):
     artists = []
     window = 10.0
 
@@ -568,6 +599,27 @@ def update_plot(frame, node, lines_map, axs1, axs2, axs3, dyn_plots, figs):
     figs[1].canvas.draw_idle()
     figs[2].canvas.draw_idle()
 
+    # --- PART 6: Top-3 enabled collision pairs (debug window) ---
+    if node.top_pairs_time:
+        t_p = list(node.top_pairs_time)
+        labels = []
+        for i in range(3):
+            y = list(node.top_pairs_dist[i])
+            m = min(len(t_p), len(y))
+            if m > 0:
+                lines_map[f'pair_{i}'].set_data(t_p[:m], y[:m])
+            nm = node.top_pairs_names[i]
+            cur = y[-1] if y and not np.isnan(y[-1]) else float('nan')
+            if nm:
+                labels.append(f"#{i+1}  {nm:<22s} d={cur:+.3f} m")
+        lines_map['pair_text'].set_text("\n".join(labels) if labels else "(no active pairs)")
+        # match text colors is fixed white; the line colors already encode rank
+        max_t = t_p[-1]
+        ax_pairs.set_xlim(max(0, max_t - 10.0), max_t + 0.1)
+        ax_pairs.relim()
+        ax_pairs.autoscale_view(scalex=False, scaley=True)
+        figs[3].canvas.draw_idle()
+
     return artists
 
 
@@ -795,19 +847,47 @@ def main(args=None):
 
 
     # ===================================================================
+    # WINDOW 4 (debug): Top-3 enabled collision pairs (CBF "what scares it")
+    # ===================================================================
+    fig4, ax_pairs = plt.subplots(1, 1, figsize=(8, 4))
+    fig4.canvas.manager.set_window_title('CBF Active Pairs (debug)')
+    fig4.patch.set_facecolor('#101018')
+    ax_pairs.set_facecolor('#101018')
+    ax_pairs.tick_params(colors='#aaa')
+    for sp in ax_pairs.spines.values():
+        sp.set_edgecolor('#334')
+    ax_pairs.set_title('3 Closest ENABLED Collision Pairs', color='white', fontsize=11)
+    ax_pairs.set_xlabel('Time [s]', color='#aaa')
+    ax_pairs.set_ylabel('Distance [m]', color='#aaa')
+    ax_pairs.grid(True, color='#223', alpha=0.5)
+    ax_pairs.axhline(0, color='#a33', linewidth=1.0, linestyle='--')  # contact line
+    pair_colors = ['#ff3b3b', '#ff9f1c', '#ffe066']  # #1 critical -> #3
+    for i in range(3):
+        l, = ax_pairs.plot([], [], color=pair_colors[i], linewidth=1.6, label=f'#{i+1}')
+        lines_map[f'pair_{i}'] = l
+    # Live text box showing the current pair names (updated each frame)
+    pair_text = ax_pairs.text(
+        0.015, 0.97, '', transform=ax_pairs.transAxes, va='top', ha='left',
+        fontsize=9, family='monospace', color='white',
+        bbox=dict(boxstyle='round,pad=0.4', facecolor='#1a1a2e', edgecolor='#445', alpha=0.9))
+    lines_map['pair_text'] = pair_text
+    lines_map['pair_colors'] = pair_colors
+
+    # ===================================================================
     # WINDOW PLACEMENT (from wmctrl, slightly aligned)
     # ===================================================================
-    figs = [fig1, fig2, fig3]
+    figs = [fig1, fig2, fig3, fig4]
 
     place_window(fig1, 86, 126, 851, 1131)    # Left: Joint Data
     place_window(fig2, 893, 118, 542, 1131)   # Center: QP Data
     place_window(fig3, 1436, 118, 498, 1131)  # Right: Task Error
+    place_window(fig4, 300, 300, 700, 380)    # Debug: CBF active pairs (floats on top)
 
     # ===================================================================
     # ANIMATION
     # ===================================================================
     ani = FuncAnimation(fig1, update_plot,
-                        fargs=(node, lines_map, axs1, axs2, axs3, dyn_plots, figs),
+                        fargs=(node, lines_map, axs1, axs2, axs3, ax_pairs, dyn_plots, figs),
                         interval=100)
     plt.show()
 
