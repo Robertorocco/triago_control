@@ -412,14 +412,14 @@ class GraspStateMachine:
                 log_lines=log_lines,
             )
 
-        # --- Phase B: Lift vertically (fingers locked) ---
+        # --- Phase B: Lift vertically (fingers locked, CBF bypassed for grasped object) ---
         lift_elapsed = time.time() - self.grip_force_stable_since
 
         # Pure vertical twist (Z-up in base_footprint)
         target_twist = np.array([0.0, 0.0, self.LIFT_VELOCITY, 0.0, 0.0, 0.0])
 
-        # Hold fingers at current position
-        gripper_cmd = f"CLOSE_{inp.active_arm.upper()}_{self.grip_position:.4f}"
+        # Hold fingers at GRIP_FINAL_POSITION
+        gripper_cmd = f"CLOSE_{inp.active_arm.upper()}_{self.GRIP_FINAL_POSITION:.4f}"
 
         if lift_elapsed >= self.LIFT_DURATION:
             log_lines.append(("info", f"[GRASP] Lift complete ({self.LIFT_DURATION:.1f}s). Attaching."))
@@ -449,7 +449,7 @@ class GraspStateMachine:
         return TickOutput(
             target_twist=target_twist,
             new_state=self._state,
-            ignore_cbf="None",
+            ignore_cbf=f"+{self.cylinders[color]['cbf_name']}",  # Bypass CBF for grasped cylinder
             grasp_margin=self.GRASP_CBF_MARGIN,
             gripper_cmd=gripper_cmd,
             log_lines=log_lines,
