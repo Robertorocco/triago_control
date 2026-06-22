@@ -159,6 +159,7 @@ class GraspStateMachine:
             "PRE_GRASP": self._pre_grasp,
             "GRASP_APPROACH": self._grasp_approach,
             "GRASP_CLOSE": self._grasp_close,
+            "HOLDING": self._holding,
         }
 
     def _transition(self, new_state):
@@ -185,7 +186,7 @@ class GraspStateMachine:
         between PRE_GRASP and SHARED_AUTONOMY is re-evaluated every tick based on
         belief + alignment.
         """
-        if self._state in ("GRASP_CLOSE", "GRASP_APPROACH"):
+        if self._state in ("GRASP_CLOSE", "GRASP_APPROACH", "HOLDING"):
             out = self._handlers[self._state](inp)
         elif self._belief_ok(inp) and self._is_aligned(inp):
             out = self._pre_grasp(inp)
@@ -394,12 +395,12 @@ class GraspStateMachine:
         self.grip_position = max(self.GRIP_FINAL_POSITION, self.grip_position)
         gripper_cmd = f"CLOSE_{inp.active_arm.upper()}_{self.grip_position:.4f}"
 
-        # After CLOSURE_WAIT_S of closure → attach via plugin and finish
+        # After CLOSURE_WAIT_S of closure → attach via plugin and HOLD pose
         if elapsed >= self.CLOSURE_WAIT_S:
             log_lines.append(
                 ("info", f"[GRASP] Closure complete ({self.CLOSURE_WAIT_S:.0f}s). "
-                         f"Attaching {color} cylinder to gripper via plugin."))
-            self._transition("SHARED_AUTONOMY")
+                         f"Attaching {color} cylinder. Arm will HOLD current pose."))
+            self._transition("HOLDING")
             return TickOutput(
                 target_twist=np.zeros(6),
                 new_state=self._state,
@@ -416,4 +417,20 @@ class GraspStateMachine:
             grasp_margin=self.GRASP_CBF_MARGIN,
             gripper_cmd=gripper_cmd,
             log_lines=log_lines,
+        )
+
+
+    # ------------------------------------------------------------------
+    # PHASE 4: HOLDING (arm stays still after successful grasp)
+    # ------------------------------------------------------------------
+    def _holding(self, inp: TickInput) -> TickOutput:
+        """Arm holds its current pose. Zero twist. No policy. Stays here until
+        the user issues a new command (e.g. OPEN to release, or a new goal)."""
+        self._transition("HOLDING")
+        return TickOutput(
+            target_twist=np.zeros(6),
+            new_state=self._state,
+            ignore_cbf=None,   # Don't publish anything — keep current bypass state
+            grasp_margin=None,
+            log_lines=[],
         )
