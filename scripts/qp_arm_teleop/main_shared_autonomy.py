@@ -249,9 +249,13 @@ class SharedControlNode(Node):
                 target=self._console_input_thread, daemon=True, name='console-input')
             self._console_thread.start()
 
-        # Open gripper on startup so we know the initial state
+        # Open gripper on startup and reset all CBF state
         self.pub_gripper_cmd.publish(String(data=f"CLOSE_RIGHT_0.7000"))
         self.pub_gripper_cmd.publish(String(data=f"CLOSE_LEFT_0.7000"))
+        # Clear any leftover CBF bypasses and margins from previous runs
+        self.pub_ignore_cbf.publish(String(data="CLEAR"))
+        self._clear_grasp_margin()
+        self.get_logger().info("[INIT] Grippers opened. CBF state reset.")
 
     # --- Callbacks ---
 
