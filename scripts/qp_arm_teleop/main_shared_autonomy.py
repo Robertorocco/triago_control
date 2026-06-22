@@ -78,6 +78,13 @@ from triago_control.shared_autonomy.goal_set import GoalSet, create_transform
 from triago_control.shared_autonomy.belief_estimator import BeliefEstimator
 from triago_control.shared_autonomy.grasp_state_machine import GraspStateMachine, TickInput, CLEAR_MARGIN
 
+# Gazebo IFRA_LinkAttacher plugin service (kinematic grasp in simulation)
+try:
+    from linkattacher_msgs.srv import AttachLink, DetachLink
+    _HAS_LINKATTACHER = True
+except Exception:
+    _HAS_LINKATTACHER = False
+
 
 class SharedControlNode(Node):
     """ROS2 Node for intent inference and safe twist blending via QP-CLF-CBF.
@@ -165,6 +172,21 @@ class SharedControlNode(Node):
 
         # --- Grasping Interaction Topics & State ---
         self.pub_gripper_cmd = self.create_publisher(String, '/shared_autonomy/gripper_cmd', 10)
+
+        # --- Gazebo Link Attacher plugin (kinematic grasp in simulation) ---
+        # Robot model name in Gazebo + per-arm gripper grasping links.
+        self.robot_model_name = 'tiago'
+        self.gripper_link = {'right': 'gripper_right_grasping_link',
+                             'left':  'gripper_left_grasping_link'}
+        self.cylinder_model = {'red': 'red_cylinder', 'blue': 'blue_cylinder'}
+        self.cylinder_link = 'link'
+        # Track what is currently attached so we can detach/re-attach across retries.
+        self.plugin_attached = {}  # {arm: (model2_name, link2_name)}
+        self.attach_cli = None
+        self.detach_cli = None
+        if _HAS_LINKATTACHER:
+            self.attach_cli = self.create_client(AttachLink, '/ATTACHLINK')
+            self.detach_cli = self.create_client(DetachLink, '/DETACHLINK')
         self.sub_trigger = self.create_subscription(Bool, '/haption/trigger', self.trigger_callback, 10)
 
         self.trigger_cmd = False  # consumed event flag
@@ -281,6 +303,48 @@ class SharedControlNode(Node):
         msg = String()
         msg.data = "None"
         self.pub_grasp_margin.publish(msg)
+
+    def _plugin_attach(self, arm, color):
+        """Weld the cylinder to the gripper link via the Gazebo LinkAttacher plugin.
+
+        The plugin captures the CURRENT relative transform between the two links
+        at attach time and freezes it as a fixed joint — so attachment works
+        identically whether the gripper grabbed the cylinder from the side (at
+        any height) or from the top. No manual relative-pose bookkeeping needed.
+        """
+        if self.attach_cli is None:
+            self.get_logger().warn("[ATTACH] LinkAttacher unavailable (msgs not found).")
+            return
+        if not self.attach_cli.service_is_ready():
+            if not self.attach_cli.wait_for_service(timeout_sec=1.0):
+                self.get_logger().warn("[ATTACH] /ATTACHLINK service not available.")
+                return
+        req = AttachLink.Request()
+        req.model1_name = self.robot_model_name
+        req.link1_name = self.gripper_link[arm]
+        req.model2_name = self.cylinder_model[color]
+        req.link2_name = self.cylinder_link
+        self.attach_cli.call_async(req)
+        self.plugin_attached[arm] = (self.cylinder_model[color], self.cylinder_link)
+        self.get_logger().info(
+            f"[ATTACH] Plugin weld: {self.gripper_link[arm]} <-> "
+            f"{self.cylinder_model[color]}/{self.cylinder_link}")
+
+    def _plugin_detach(self, arm):
+        """Release a previously plugin-attached object for the given arm (retry support)."""
+        if self.detach_cli is None or arm not in self.plugin_attached:
+            return
+        model2, link2 = self.plugin_attached.pop(arm)
+        if not self.detach_cli.service_is_ready():
+            if not self.detach_cli.wait_for_service(timeout_sec=1.0):
+                return
+        req = DetachLink.Request()
+        req.model1_name = self.robot_model_name
+        req.link1_name = self.gripper_link[arm]
+        req.model2_name = model2
+        req.link2_name = link2
+        self.detach_cli.call_async(req)
+        self.get_logger().info(f"[DETACH] Plugin release: {self.gripper_link[arm]} <-> {model2}")
 
     def human_reference_callback(self, msg):
         """Extracts the user's SE(3) pose and 6D spatial twist from the synchronized 13-element array.
@@ -543,6 +607,12 @@ class SharedControlNode(Node):
             cmd_msg = String()
             cmd_msg.data = tick_output.gripper_cmd
             self.pub_gripper_cmd.publish(cmd_msg)
+            # On ATTACH command, also weld the cylinder via the Gazebo plugin
+            if tick_output.gripper_cmd.startswith("ATTACH_"):
+                parts = tick_output.gripper_cmd.split('_')
+                arm = parts[1].lower()
+                color = parts[2].lower()
+                self._plugin_attach(arm, color)
 
         if tick_output.reset_trigger:
             self.trigger_cmd = False
@@ -930,15 +1000,16 @@ class SharedControlNode(Node):
                 self.get_logger().info("[TEST] 'CLOSE' command registered via console.")
 
             elif raw == "OPEN":
-                # Open gripper fully and reset grasp state
+                # Open gripper fully, detach any plugin-welded object, reset grasp state
                 cmd_msg = String()
                 cmd_msg.data = f"CLOSE_{self.active_arm.upper()}_0.7000"
                 self.pub_gripper_cmd.publish(cmd_msg)
+                self._plugin_detach(self.active_arm)
                 self.grasp_sm._transition("SHARED_AUTONOMY")
                 self.grasp_sm.grip_contact_detected = False
                 self.grasp_sm.grip_force_stable_since = None
                 self.grasp_sm.grip_position = 0.7
-                self.get_logger().info("[TEST] 'OPEN' command: gripper opened, grasp state reset.")
+                self.get_logger().info("[TEST] 'OPEN' command: gripper opened, object detached, grasp state reset.")
 
             else:
                 print(f"  ✗ unknown goal '{raw}'.  Choose from: {valid_goals}")

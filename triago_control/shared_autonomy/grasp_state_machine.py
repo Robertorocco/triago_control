@@ -370,11 +370,13 @@ class GraspStateMachine:
         )
 
     # ------------------------------------------------------------------
-    # PHASE 3: GRASP_CLOSE (timed closure then vertical lift)
+    # PHASE 3: GRASP_CLOSE (timed slow closure, then plugin attach)
     # ------------------------------------------------------------------
-    LIFT_VELOCITY = 0.02  # m/s upward lift speed
-    LIFT_DURATION = 5.0   # seconds to lift (0.02*5=10cm)
-    CLOSURE_WAIT_S = 10.0 # seconds to wait for fingers to close before lifting
+    # Force sensor data is IGNORED (corrupted). Grasp is confirmed purely by
+    # a fixed closure time, after which the cylinder is welded to the gripper
+    # via the Gazebo LinkAttacher plugin (handled by main_shared_autonomy on
+    # the ATTACH gripper_cmd).
+    CLOSURE_WAIT_S = 5.0  # seconds of slow closure before attaching
 
     def _grasp_close(self, inp: TickInput) -> TickOutput:
         self._transition("GRASP_CLOSE")
@@ -384,63 +386,23 @@ class GraspStateMachine:
         elapsed = time.time() - self.grasp_timer
         dt = 0.01  # 100 Hz tick
 
-        # --- Phase A: Close fingers for CLOSURE_WAIT_S seconds ---
-        if not self.grip_contact_detected:
-            # Keep commanding closure at the slow velocity
-            self.grip_position -= self.GRIP_CLOSE_VELOCITY * dt
-            self.grip_position = max(self.GRIP_FINAL_POSITION, self.grip_position)
-            gripper_cmd = f"CLOSE_{inp.active_arm.upper()}_{self.grip_position:.4f}"
+        target_twist = np.zeros(6)  # Arm frozen throughout closure
 
-            # Wait the full 10s regardless of position reached
-            if elapsed >= self.CLOSURE_WAIT_S:
-                self.grip_contact_detected = True
-                self.grip_force_stable_since = time.time()
-                # Lock fingers at the target position for lifting
-                self.grip_position = self.GRIP_FINAL_POSITION
-                log_lines.append(("info", f"[GRASP] Closure time elapsed ({self.CLOSURE_WAIT_S:.0f}s). "
-                                          f"Locking fingers at {self.GRIP_FINAL_POSITION:.4f} rad. "
-                                          f"Starting lift."))
+        # Close fingers slowly toward the cylinder surface
+        self.grip_position -= self.GRIP_CLOSE_VELOCITY * dt
+        self.grip_position = max(self.GRIP_FINAL_POSITION, self.grip_position)
+        gripper_cmd = f"CLOSE_{inp.active_arm.upper()}_{self.grip_position:.4f}"
 
-            # Arm frozen during closure
-            target_twist = np.zeros(6)
-            return TickOutput(
-                target_twist=target_twist,
-                new_state=self._state,
-                ignore_cbf="None",
-                grasp_margin=self.GRASP_CBF_MARGIN,
-                gripper_cmd=gripper_cmd,
-                log_lines=log_lines,
-            )
-
-        # --- Phase B: Lift vertically (fingers locked, CBF bypassed for grasped object) ---
-        lift_elapsed = time.time() - self.grip_force_stable_since
-
-        # Pure vertical twist (Z-up in base_footprint)
-        target_twist = np.array([0.0, 0.0, self.LIFT_VELOCITY, 0.0, 0.0, 0.0])
-
-        # Hold fingers at GRIP_FINAL_POSITION
-        gripper_cmd = f"CLOSE_{inp.active_arm.upper()}_{self.GRIP_FINAL_POSITION:.4f}"
-
-        if lift_elapsed >= self.LIFT_DURATION:
-            log_lines.append(("info", f"[GRASP] Lift complete ({self.LIFT_DURATION:.1f}s). Attaching."))
+        # After CLOSURE_WAIT_S of closure → attach via plugin and finish
+        if elapsed >= self.CLOSURE_WAIT_S:
+            log_lines.append(
+                ("info", f"[GRASP] Closure complete ({self.CLOSURE_WAIT_S:.0f}s). "
+                         f"Attaching {color} cylinder to gripper via plugin."))
             self._transition("SHARED_AUTONOMY")
             return TickOutput(
                 target_twist=np.zeros(6),
                 new_state=self._state,
-                ignore_cbf="None",
-                grasp_margin=CLEAR_MARGIN,
-                gripper_cmd=f"ATTACH_{inp.active_arm.upper()}_{color.upper()}",
-                log_lines=log_lines,
-            )
-
-        # Timeout fallback
-        if elapsed > 25.0:
-            log_lines.append(("warn", f"[GRASP] Timeout ({elapsed:.1f}s). Attaching anyway."))
-            self._transition("SHARED_AUTONOMY")
-            return TickOutput(
-                target_twist=np.zeros(6),
-                new_state=self._state,
-                ignore_cbf="None",
+                ignore_cbf=f"+{self.cylinders[color]['cbf_name']}",  # keep CBF bypass on grasped obj
                 grasp_margin=CLEAR_MARGIN,
                 gripper_cmd=f"ATTACH_{inp.active_arm.upper()}_{color.upper()}",
                 log_lines=log_lines,
@@ -449,7 +411,7 @@ class GraspStateMachine:
         return TickOutput(
             target_twist=target_twist,
             new_state=self._state,
-            ignore_cbf=f"+{self.cylinders[color]['cbf_name']}",  # Bypass CBF for grasped cylinder
+            ignore_cbf="None",
             grasp_margin=self.GRASP_CBF_MARGIN,
             gripper_cmd=gripper_cmd,
             log_lines=log_lines,
