@@ -397,22 +397,12 @@ class QPVisualizer:
         idx += 1
 
         # --- 2. Red Cylinder (Right Hand Manipulandum) ---
-        markers.markers.append(create_cylinder_marker(
-            idx, 
-            [0.800, -0.20, 0.775], 
-            0.02, 0.15, 
-            ColorRGBA(r=1.0, g=0.0, b=0.0, a=1.0)
-        ))
-        idx += 1
+        # REMOVED: drawn by visualization_engine.py at its live collision pose
+        # (grey when grasped, red otherwise). Keeping a static copy here
+        # creates a phantom duplicate on the table after grasp.
 
         # --- 3. Blue Cylinder (Left Hand Manipulandum) ---
-        markers.markers.append(create_cylinder_marker(
-            idx, 
-            [0.800, 0.20, 0.775], 
-            0.02, 0.15, 
-            ColorRGBA(r=0.0, g=0.0, b=1.0, a=1.0)
-        ))
-        idx += 1
+        # REMOVED: same reason as above.
 
         # --- 4. Target Placement Area (Yellow Manifold on Table) ---
         # Represented as a very flat cylinder slightly elevated above the table surface
