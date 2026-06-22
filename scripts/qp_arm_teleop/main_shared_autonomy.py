@@ -175,7 +175,9 @@ class SharedControlNode(Node):
 
         # --- Gazebo Link Attacher plugin (kinematic grasp in simulation) ---
         # Robot model name in Gazebo + per-arm gripper grasping links.
-        self.robot_model_name = 'tiago'
+        # Overridable at runtime: --ros-args -p robot_model_name:=tiago_dual
+        self.declare_parameter('robot_model_name', 'tiago')
+        self.robot_model_name = self.get_parameter('robot_model_name').value
         self.gripper_link = {'right': 'gripper_right_grasping_link',
                              'left':  'gripper_left_grasping_link'}
         self.cylinder_model = {'red': 'red_cylinder', 'blue': 'blue_cylinder'}
@@ -187,6 +189,12 @@ class SharedControlNode(Node):
         if _HAS_LINKATTACHER:
             self.attach_cli = self.create_client(AttachLink, '/ATTACHLINK')
             self.detach_cli = self.create_client(DetachLink, '/DETACHLINK')
+            self.get_logger().info(
+                f"[INIT] LinkAttacher ready. robot_model_name='{self.robot_model_name}'. "
+                f"Override with -p robot_model_name:=<name> if attach is REJECTED.")
+        else:
+            self.get_logger().warn(
+                "[INIT] linkattacher_msgs not found — plugin grasp disabled.")
         self.sub_trigger = self.create_subscription(Bool, '/haption/trigger', self.trigger_callback, 10)
 
         self.trigger_cmd = False  # consumed event flag
@@ -313,38 +321,77 @@ class SharedControlNode(Node):
         any height) or from the top. No manual relative-pose bookkeeping needed.
         """
         if self.attach_cli is None:
-            self.get_logger().warn("[ATTACH] LinkAttacher unavailable (msgs not found).")
+            self.get_logger().error("[ATTACH] LinkAttacher msgs not found — cannot attach.")
             return
         if not self.attach_cli.service_is_ready():
             if not self.attach_cli.wait_for_service(timeout_sec=1.0):
-                self.get_logger().warn("[ATTACH] /ATTACHLINK service not available.")
+                self.get_logger().error("[ATTACH] /ATTACHLINK service NOT available. "
+                                        "Is the LinkAttacher plugin loaded in the world?")
                 return
         req = AttachLink.Request()
         req.model1_name = self.robot_model_name
         req.link1_name = self.gripper_link[arm]
         req.model2_name = self.cylinder_model[color]
         req.link2_name = self.cylinder_link
-        self.attach_cli.call_async(req)
-        self.plugin_attached[arm] = (self.cylinder_model[color], self.cylinder_link)
-        self.get_logger().info(
-            f"[ATTACH] Plugin weld: {self.gripper_link[arm]} <-> "
-            f"{self.cylinder_model[color]}/{self.cylinder_link}")
+        desc = (f"{self.robot_model_name}/{self.gripper_link[arm]} <-> "
+                f"{self.cylinder_model[color]}/{self.cylinder_link}")
+        future = self.attach_cli.call_async(req)
+        future.add_done_callback(
+            lambda f: self._attach_done(f, arm, color, desc))
+
+    def _attach_done(self, future, arm, color, desc):
+        """Verify the attach service actually succeeded."""
+        try:
+            res = future.result()
+        except Exception as e:
+            self.get_logger().error(f"[ATTACH] Service call FAILED ({desc}): {e}")
+            return
+        success = getattr(res, 'success', None)
+        message = getattr(res, 'message', '')
+        if success is None:
+            # Response has no 'success' field — log raw response once
+            self.get_logger().warn(f"[ATTACH] Response (no success field): {res}")
+            self.plugin_attached[arm] = (self.cylinder_model[color], self.cylinder_link)
+        elif success:
+            self.plugin_attached[arm] = (self.cylinder_model[color], self.cylinder_link)
+            self.get_logger().info(f"[ATTACH] OK: {desc}  ({message})")
+        else:
+            self.get_logger().error(f"[ATTACH] REJECTED: {desc}  ({message})")
 
     def _plugin_detach(self, arm):
         """Release a previously plugin-attached object for the given arm (retry support)."""
         if self.detach_cli is None or arm not in self.plugin_attached:
             return
-        model2, link2 = self.plugin_attached.pop(arm)
+        model2, link2 = self.plugin_attached[arm]
         if not self.detach_cli.service_is_ready():
             if not self.detach_cli.wait_for_service(timeout_sec=1.0):
+                self.get_logger().error("[DETACH] /DETACHLINK service NOT available.")
                 return
         req = DetachLink.Request()
         req.model1_name = self.robot_model_name
         req.link1_name = self.gripper_link[arm]
         req.model2_name = model2
         req.link2_name = link2
-        self.detach_cli.call_async(req)
-        self.get_logger().info(f"[DETACH] Plugin release: {self.gripper_link[arm]} <-> {model2}")
+        desc = f"{self.gripper_link[arm]} <-> {model2}"
+        future = self.detach_cli.call_async(req)
+        future.add_done_callback(lambda f: self._detach_done(f, arm, desc))
+
+    def _detach_done(self, future, arm, desc):
+        """Verify the detach service actually succeeded."""
+        try:
+            res = future.result()
+        except Exception as e:
+            self.get_logger().error(f"[DETACH] Service call FAILED ({desc}): {e}")
+            return
+        success = getattr(res, 'success', None)
+        message = getattr(res, 'message', '')
+        self.plugin_attached.pop(arm, None)
+        if success is None:
+            self.get_logger().warn(f"[DETACH] Response (no success field): {res}")
+        elif success:
+            self.get_logger().info(f"[DETACH] OK: {desc}  ({message})")
+        else:
+            self.get_logger().error(f"[DETACH] REJECTED: {desc}  ({message})")
 
     def human_reference_callback(self, msg):
         """Extracts the user's SE(3) pose and 6D spatial twist from the synchronized 13-element array.
