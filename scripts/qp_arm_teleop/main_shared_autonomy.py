@@ -176,7 +176,7 @@ class SharedControlNode(Node):
         # --- Gazebo Link Attacher plugin (kinematic grasp in simulation) ---
         # Robot model name in Gazebo + per-arm gripper grasping links.
         # Overridable at runtime: --ros-args -p robot_model_name:=tiago_dual
-        self.declare_parameter('robot_model_name', 'tiago')
+        self.declare_parameter('robot_model_name', 'triago')
         self.robot_model_name = self.get_parameter('robot_model_name').value
         self.gripper_link = {'right': 'gripper_right_grasping_link',
                              'left':  'gripper_left_grasping_link'}
