@@ -178,8 +178,17 @@ class SharedControlNode(Node):
         # Overridable at runtime: --ros-args -p robot_model_name:=tiago_dual
         self.declare_parameter('robot_model_name', 'triago')
         self.robot_model_name = self.get_parameter('robot_model_name').value
-        self.gripper_link = {'right': 'gripper_right_grasping_link',
-                             'left':  'gripper_left_grasping_link'}
+        # NOTE: gripper_*_grasping_link is a TF-only frame (lumped into
+        # arm_*_7_link via a fixed joint) and does NOT exist as a Gazebo link,
+        # so LinkAttacher cannot use it. arm_*_7_link is the real, solid wrist
+        # link that the whole gripper base is rigidly fused into — attaching the
+        # cylinder there is stable regardless of finger open/close.
+        self.declare_parameter('grasp_link_right', 'arm_right_7_link')
+        self.declare_parameter('grasp_link_left', 'arm_left_7_link')
+        self.gripper_link = {
+            'right': self.get_parameter('grasp_link_right').value,
+            'left':  self.get_parameter('grasp_link_left').value,
+        }
         self.cylinder_model = {'red': 'red_cylinder', 'blue': 'blue_cylinder'}
         self.cylinder_link = 'link'
         # Track what is currently attached so we can detach/re-attach across retries.
