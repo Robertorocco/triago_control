@@ -185,12 +185,16 @@ class GoalSet:
         if grasp_type == 'Top':
             p_target = p_cyl + np.array([0, 0, h / 2 + approach_offset])
 
-            # Top grasp candidates: gripper approach axis points down (-Z world),
-            # with two opposite roll choices around the approach axis so that we
-            # can pick whichever is closest to the anchor, exactly mirroring the
-            # Side-grasp policy below instead of returning a hard fixed pose.
-            R_top_a = R.from_euler('y', 90, degrees=True).as_matrix()
-            R_top_b = R.from_euler('y', -90, degrees=True).as_matrix()
+            # Top grasp: the gripper approach axis (gripper +X) must point DOWN
+            # (world -Z) to descend onto the cylinder top. Both candidates keep
+            # X pointing down; they differ only by a 180-deg roll about that
+            # approach axis (mirrors the Side-grasp's two finger orientations).
+            # Previously the second candidate used Ry(-90), which flips X to
+            # point UP — physically wrong (gripper would approach from below).
+            R_top_down = R.from_euler('y', 90, degrees=True).as_matrix()
+            R_top_a = R_top_down
+            R_top_b = (R.from_euler('y', 90, degrees=True) *
+                       R.from_euler('x', 180, degrees=True)).as_matrix()
 
             R_target = self._pick_orientation(goal_key, R_top_a, R_top_b, R_anchor,
                                                update_memory=update_memory)

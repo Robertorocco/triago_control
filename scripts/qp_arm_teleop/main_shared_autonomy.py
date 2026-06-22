@@ -255,6 +255,7 @@ class SharedControlNode(Node):
 
         # --- Visualization Infrastructure ---
         self.pub_markers = self.create_publisher(MarkerArray, '/shared_policy_markers', 10)
+        self._goal_markers_cleared = False  # latch so DELETEALL is sent once on grasp
         # Bug fix: this used to be assigned a second time later in __init__,
         # silently leaking the first TransformBroadcaster. Assigned exactly once.
         self.tf_broadcaster = TransformBroadcaster(self)
@@ -679,53 +680,43 @@ class SharedControlNode(Node):
         else:
             target_twist = tick_output.target_twist
 
-        # ==========================================
-        # [INJECT DEBUG BLOCK HERE]
-        # ==========================================
-        if self.grasp_sm.state in ("GRASP_APPROACH", "GRASP_CLOSE"):
-            # 1. Print the raw Twist commands and Errors at 4 Hz
-            self.get_logger().info(
-                f"[GRASP DEBUG] Err(Pos:{pos_error:.3f}m, Ang:{ang_error:.3f}rad) | "
-                f"v_cmd=[{target_twist[0]:.3f}, {target_twist[1]:.3f}, {target_twist[2]:.3f}] | "
-                f"w_cmd=[{target_twist[3]:.3f}, {target_twist[4]:.3f}, {target_twist[5]:.3f}]",
-                throttle_duration_sec=0.25
-            )
-            
-            # 2. Print the exact target position to watch for "Moving Carrot" jitter
-            T_target_debug = self.goal_set.get_dynamic_goal_pose(self.current_T_EE, self.active_goal_key)
-            p_t = T_target_debug[:3, 3]
-            self.get_logger().info(
-                f"[GRASP DEBUG] Dynamic Target Pos: X={p_t[0]:.4f}, Y={p_t[1]:.4f}, Z={p_t[2]:.4f}",
-                throttle_duration_sec=0.25
-            )
-            
         # --- 5. LOCAL INTEGRATION & VISUALIZATION ---
-        if not np.allclose(self.current_T_EE, np.eye(4)):
-            visual_dt = 0.5
-            trajectory_data = []
+        # Once an object is grasped (plugin-attached), clear the goal/prediction
+        # markers ONCE and stop publishing them — the scene shows only the
+        # grasped object (drawn grey at its live pose by the QP visualizer).
+        object_grasped = bool(self.plugin_attached)
+        if object_grasped:
+            if not self._goal_markers_cleared:
+                self._clear_goal_markers()
+                self._goal_markers_cleared = True
+        else:
+            self._goal_markers_cleared = False
+            if not np.allclose(self.current_T_EE, np.eye(4)):
+                visual_dt = 0.5
+                trajectory_data = []
 
-            active_v_geo = self.compute_v_geo(self.current_T_EE, T_active_goal)
-            T_cube_1 = self.integrate_twist(self.current_T_EE, target_twist, visual_dt)
-            trajectory_data.append((T_cube_1, target_twist))
+                active_v_geo = self.compute_v_geo(self.current_T_EE, T_active_goal)
+                T_cube_1 = self.integrate_twist(self.current_T_EE, target_twist, visual_dt)
+                trajectory_data.append((T_cube_1, target_twist))
 
-            sim_T_EE = T_cube_1
-            if in_free_space and valid_matrices:
-                for _ in range(1):
-                    visual_dt = visual_dt + 0.3
-                    T_sim_goal = self.goal_set.get_dynamic_goal_pose(sim_T_EE, self.active_goal_key)
-                    sim_v_geo = self.compute_v_geo(sim_T_EE, T_sim_goal)
-                    sim_twist = self.solve_local_policy(sim_v_geo, self.J_c, self.h_c)
-                    sim_T_next = self.integrate_twist(sim_T_EE, sim_twist, visual_dt)
-                    trajectory_data.append((sim_T_next, sim_twist))
-                    sim_T_EE = sim_T_next
+                sim_T_EE = T_cube_1
+                if in_free_space and valid_matrices:
+                    for _ in range(1):
+                        visual_dt = visual_dt + 0.3
+                        T_sim_goal = self.goal_set.get_dynamic_goal_pose(sim_T_EE, self.active_goal_key)
+                        sim_v_geo = self.compute_v_geo(sim_T_EE, T_sim_goal)
+                        sim_twist = self.solve_local_policy(sim_v_geo, self.J_c, self.h_c)
+                        sim_T_next = self.integrate_twist(sim_T_EE, sim_twist, visual_dt)
+                        trajectory_data.append((sim_T_next, sim_twist))
+                        sim_T_EE = sim_T_next
 
-            self.publish_visualizations(trajectory_data, self.current_T_EE, active_v_geo)
+                self.publish_visualizations(trajectory_data, self.current_T_EE, active_v_geo)
 
-            for goal_key in self.target_keys:
-                T_goal_tf = self.goal_set.get_dynamic_goal_pose(self.current_T_EE, goal_key)
-                self.broadcast_goal_frame(goal_key, T_goal_tf)
+                for goal_key in self.target_keys:
+                    T_goal_tf = self.goal_set.get_dynamic_goal_pose(self.current_T_EE, goal_key)
+                    self.broadcast_goal_frame(goal_key, T_goal_tf)
 
-            self.publish_inference_state(ee_policies, user_policies)
+                self.publish_inference_state(ee_policies, user_policies)
 
         # --- 6. PUBLISH COMMAND TO ROBOT IN TEST MODE ---
         if self.POLICY_BELIEF_TEST and not np.allclose(self.current_T_EE, np.eye(4)):
@@ -882,6 +873,15 @@ class SharedControlNode(Node):
         marker_array.markers.append(arrow_geo)
 
         self.pub_markers.publish(marker_array)
+
+    def _clear_goal_markers(self):
+        """Wipe all goal/prediction markers (DELETEALL) — called once on grasp."""
+        clear = MarkerArray()
+        m = Marker()
+        m.action = Marker.DELETEALL
+        clear.markers.append(m)
+        self.pub_markers.publish(clear)
+        self.get_logger().info("[VIZ] Object grasped — goal/prediction markers cleared.")
 
     def compute_v_geo(self, T_EE, T_goal):
         """Computes the LOCAL_WORLD_ALIGNED decoupled spatial velocity error with

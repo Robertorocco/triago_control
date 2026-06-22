@@ -203,10 +203,32 @@ class VisualizationEngine:
             m.id = m_id
             m.type = Marker.CYLINDER
             m.action = Marker.ADD
-            m.pose.position.x, m.pose.position.y, m.pose.position.z = pos
-            m.pose.orientation.w = 1.0
+
+            # Use the LIVE collision-geometry pose so the cylinder follows the
+            # gripper once it has been re-parented (grasped). Before grasp this
+            # equals the static workspace pose; after grasp it tracks the wrist.
+            attached = cyl_id_for_name in set(hri.attached_objects) if hri is not None else False
+            live_pose = None
+            if cyl_id_for_name is not None and hasattr(self.node, 'col') \
+                    and hasattr(self.node.col, 'cdata') \
+                    and cyl_id_for_name < len(self.node.col.cdata.oMg):
+                live_pose = self.node.col.cdata.oMg[cyl_id_for_name]
+
+            if live_pose is not None:
+                p = live_pose.translation
+                quat = pin.Quaternion(live_pose.rotation)
+                m.pose.position.x, m.pose.position.y, m.pose.position.z = float(p[0]), float(p[1]), float(p[2])
+                m.pose.orientation.x = float(quat.x); m.pose.orientation.y = float(quat.y)
+                m.pose.orientation.z = float(quat.z); m.pose.orientation.w = float(quat.w)
+            else:
+                m.pose.position.x, m.pose.position.y, m.pose.position.z = pos
+                m.pose.orientation.w = 1.0
+
             m.scale.x, m.scale.y, m.scale.z = float(cfg.CYLINDER_SIZE[0] * 2), float(cfg.CYLINDER_SIZE[0] * 2), float(cfg.CYLINDER_SIZE[1])
-            if cfg.DYNAMIC_CBF and cyl_id_for_name in grasp_active_ids:
+            if attached:
+                # Grasped object rendered grey, at its live (gripper-following) pose
+                m.color.r, m.color.g, m.color.b, m.color.a = 0.5, 0.5, 0.5, 1.0
+            elif cfg.DYNAMIC_CBF and cyl_id_for_name in grasp_active_ids:
                 m.color.r, m.color.g, m.color.b, m.color.a = 1.0, 0.5, 0.0, 1.0
             else:
                 m.color.r, m.color.g, m.color.b, m.color.a = default_color
