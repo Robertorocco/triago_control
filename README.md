@@ -59,6 +59,7 @@ main_shared_autonomy ──→  shared_autonomy/*  (belief, goals, state machine
 - **numpy**, **scipy**, **matplotlib**
 - **quadprog** (`pip install quadprog` or `apt install python3-quadprog`)
 - **PAL TRIAGo packages** (URDF, controller manager, gripper controllers)
+- **IFRA_LinkAttacher** (Gazebo grasp plugin — see below)
 - **Meshcat** (optional, for 3D visualization at `http://127.0.0.1:7000/static/`)
 
 ## Build
@@ -67,6 +68,29 @@ main_shared_autonomy ──→  shared_autonomy/*  (belief, goals, state machine
 cd ~/ros2-ws
 colcon build --packages-select triago_control
 source install/setup.bash
+```
+
+## Gazebo Grasp Plugin (IFRA_LinkAttacher)
+
+Required for pick-and-place in simulation. Creates a fixed joint between gripper and object.
+
+```bash
+# Install (separate repo, not part of triago_control)
+cd ~/ros2-ws/src
+git clone https://github.com/IFRA-Cranfield/IFRA_LinkAttacher.git
+cd ~/ros2-ws
+colcon build --packages-up-to ros2_linkattacher
+source install/setup.bash
+```
+
+Add to your Gazebo world file:
+```xml
+<plugin name="ros2_linkattacher" filename="libgazebo_link_attacher.so"/>
+```
+
+Before launching Gazebo:
+```bash
+export GAZEBO_PLUGIN_PATH=$GAZEBO_PLUGIN_PATH:~/ros2-ws/install/ros2_linkattacher/lib
 ```
 
 ## Run

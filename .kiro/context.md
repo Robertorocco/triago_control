@@ -243,6 +243,34 @@ ros2 run haption_teleoperation haption_plotter.py
 ros2 run haption_teleoperation workspace_debug_visualizer.py
 ```
 
+### 4.8 Gazebo Link Attacher (IFRA_LinkAttacher)
+
+External dependency for kinematic object attachment during grasping in Gazebo.
+Creates a fixed joint between the gripper and a grasped object via a ROS 2 service.
+
+```bash
+# Install (clone into workspace src/ — NOT part of triago_control repo)
+cd ~/exchange/ros2-ws/src
+git clone https://github.com/IFRA-Cranfield/IFRA_LinkAttacher.git
+cd ~/exchange/ros2-ws
+colcon build --packages-up-to ros2_linkattacher
+source install/setup.bash
+
+# Required in world file:
+#   <plugin name="ros2_linkattacher" filename="libgazebo_link_attacher.so"/>
+
+# Required environment (before launching Gazebo):
+#   export GAZEBO_PLUGIN_PATH=$GAZEBO_PLUGIN_PATH:~/exchange/ros2-ws/install/ros2_linkattacher/lib
+
+# Services exposed:
+#   /ATTACHLINK (linkattacher_msgs/srv/AttachLink)
+#   /DETACHLINK (linkattacher_msgs/srv/DetachLink — if available)
+
+# Manual test (attach cylinder to gripper):
+ros2 service call /ATTACHLINK linkattacher_msgs/srv/AttachLink \
+  "{model1_name: 'tiago', link1_name: 'gripper_right_grasping_link', model2_name: 'red_cylinder', link2_name: 'link'}"
+```
+
 ---
 
 ## 5. Entry Point → Library Dependency Map
