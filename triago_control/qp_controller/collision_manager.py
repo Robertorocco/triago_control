@@ -260,6 +260,63 @@ class CollisionManager:
         pin.updateGeometryPlacements(self.model, self.data, self.cmodel, self.cdata, current_q)
         pin.computeDistances(self.cmodel, self.cdata)
 
+    def add_attached_object_pairs(self, cyl_id, arm_side, current_q):
+        """Treat a grasped cylinder as a moving link of `arm_side`.
+
+        Builds the adjacency-exclusion set (own-arm links 6, 7, gripper, fingers
+        — too close to the grasp to check) and dynamically CREATES the collision
+        pairs that were missing while the cylinder was a static obstacle:
+        cylinder vs base, torso, ground, wall, table and the other cylinder.
+        Pairs vs both arms already exist from startup; after re-parenting they
+        become self-collision (own arm links 3/4/5 stay active) and other-arm
+        avoidance.
+
+        Returns: (added_names, skipped_names, adjacency_set)
+        Raises on any failure so the caller can report a red error.
+        """
+        own_ids = self.right_geom_ids if arm_side == 'right' else self.left_geom_ids
+
+        # 1. Adjacency exclusion: own-arm geometry fused to / overlapping the grasp.
+        adjacency = set()
+        for gid in own_ids:
+            nm = self.cmodel.geometryObjects[gid].name.lower()
+            if "6_link" in nm or "7_link" in nm or "gripper" in nm or "finger" in nm:
+                adjacency.add(gid)
+
+        # 2. Snapshot the pairs that already exist (unordered) to avoid duplicates.
+        existing = set()
+        for k in range(len(self.cmodel.collisionPairs)):
+            cp = self.cmodel.collisionPairs[k]
+            existing.add((cp.first, cp.second))
+            existing.add((cp.second, cp.first))
+
+        # 3. Targets the cylinder must now be checked against (it's a moving link).
+        targets = list(self.body_geom_ids)          # base box + torso pillar
+        targets.append(self.ground_id)              # ground plane
+        if hasattr(self, 'wall_id'):
+            targets.append(self.wall_id)            # virtual wall
+        for obs in self.workspace_obstacle_ids:     # table + the OTHER cylinder
+            if obs != cyl_id:
+                targets.append(obs)
+
+        added_names, skipped_names = [], []
+        for t in targets:
+            if (cyl_id, t) in existing:
+                skipped_names.append(self.cmodel.geometryObjects[t].name)
+                continue
+            self.cmodel.addCollisionPair(pin.CollisionPair(cyl_id, t))
+            added_names.append(self.cmodel.geometryObjects[t].name)
+
+        # 4. Rebuild cdata for the enlarged pair set and revalidate immediately so
+        #    the same control tick can query distances without a stale/empty array.
+        self.cdata = self.cmodel.createData()
+        for req in self.cdata.distanceRequests:
+            req.enable_nearest_points = True
+        pin.updateGeometryPlacements(self.model, self.data, self.cmodel, self.cdata, current_q)
+        pin.computeDistances(self.cmodel, self.cdata)
+
+        return added_names, skipped_names, adjacency
+
     def compute_softmin_jacobian(self, current_v, idx_right, idx_left,
                                  margin_targets, attached_objs, attached_adjacency,
                                  ignored_targets, publish_counter=0):

@@ -161,20 +161,29 @@ class SharedAutonomyHandler:
             geom.parentJoint = wrist_joint_id  # ... then re-parent
             self.attached_relative_transforms[cyl_id] = jMc.copy()
 
-            # Adjacency-exclusion set: the cylinder is fused only to the wrist (link 7),
-            # gripper box and fingers. Arm links 1-6 and the OTHER arm keep checking it.
-            arm_ids = self.col.right_geom_ids if arm_side == 'right' else self.col.left_geom_ids
-            adjacency = set()
-            for gid in arm_ids:
-                nm = self.col.cmodel.geometryObjects[gid].name.lower()
-                if "_7_link" in nm or "gripper" in nm or "finger" in nm:
-                    adjacency.add(gid)
-            self.attached_adjacency[cyl_id] = adjacency
-
-            self.node.get_logger().info(
-                f"[TOPOLOGY] {color} cylinder bound to joint {wrist_joint_id} "
-                f"(rel pos {np.round(jMc.translation, 3)}). Adjacency-excluded geoms: "
-                f"{sorted(adjacency)}. Collision vs arm 1-6 + other arm STAYS ACTIVE.")
+            # Treat the cylinder as a moving arm link: build adjacency exclusion
+            # (own links 6/7/gripper/fingers) and CREATE the new collision pairs
+            # (vs base, torso, ground, wall, table, other cylinder). Pairs vs
+            # both arms already exist; own links 3/4/5 stay active (self-collision),
+            # the other arm stays active (avoidance).
+            try:
+                added, skipped, adjacency = self.col.add_attached_object_pairs(
+                    cyl_id, arm_side, self.kin.current_q)
+                self.attached_adjacency[cyl_id] = adjacency
+                adj_names = sorted(self.col.cmodel.geometryObjects[g].name for g in adjacency)
+                self.node.get_logger().info(
+                    f"\033[92m[TOPOLOGY OK] {color} cylinder is now a link of the "
+                    f"{arm_side} arm.\n"
+                    f"  NEW collision pairs created: {added}\n"
+                    f"  Already-existing pairs kept: {skipped} + both-arm pairs\n"
+                    f"  Adjacency-EXCLUDED (own links 6/7/gripper/fingers): {adj_names}\n"
+                    f"  Self-collision vs own arm links 3/4/5: ACTIVE.\033[0m")
+            except Exception as e:
+                self.node.get_logger().error(
+                    f"\033[91m[TOPOLOGY FAIL] Could not create collision pairs for "
+                    f"the attached {color} cylinder: {e}\033[0m")
+                # Fall back to the minimal adjacency so we don't crash the loop
+                self.attached_adjacency[cyl_id] = set()
 
         # 3. Update Meshcat visuals (opaque orange) via the thread-safe viz engine
         self.viz.paint_grasp_intent(arm_side, color, self.col, opaque=True)
