@@ -143,6 +143,7 @@ class GraspStateMachine:
         self.grip_position = 0.7   # Start fully open
         self.grip_contact_detected = False
         self.grip_force_stable_since = None
+        self._lift_start_time = None  # reset for HOLDING/LIFT phase
 
         self._last_state_logged = None
 
@@ -332,6 +333,7 @@ class GraspStateMachine:
             self.grip_position = 0.04  # Start from near-cylinder (fingers already around it)
             self.grip_contact_detected = False
             self.grip_force_stable_since = None
+            self._lift_start_time = None  # Reset lift timer for the upcoming HOLDING phase
             log_lines.append(
                 ("info", f"[GRASP] Controlled contact reached (contact_d={contact_d:.4f}m). "
                          f"Freezing arm. Starting force-controlled finger closure."))
@@ -421,16 +423,34 @@ class GraspStateMachine:
 
 
     # ------------------------------------------------------------------
-    # PHASE 4: HOLDING (arm stays still after successful grasp)
+    # PHASE 4: LIFT (raise the grasped object 20cm above table, then hold)
     # ------------------------------------------------------------------
+    LIFT_VELOCITY = 0.067   # m/s upward (0.067 * 3s ≈ 0.20m = 20cm)
+    LIFT_DURATION = 3.0     # seconds of vertical lift
+
     def _holding(self, inp: TickInput) -> TickOutput:
-        """Arm holds its current pose. Zero twist. No policy. Stays here until
-        the user issues a new command (e.g. OPEN to release, or a new goal)."""
+        """Lift phase: command upward twist for LIFT_DURATION, then hold still."""
         self._transition("HOLDING")
+        log_lines = []
+
+        # First entry: record the lift start time
+        if not hasattr(self, '_lift_start_time') or self._lift_start_time is None:
+            self._lift_start_time = time.time()
+            log_lines.append(("info", "[LIFT] Starting vertical lift (20cm in 3s)."))
+
+        elapsed = time.time() - self._lift_start_time
+
+        if elapsed < self.LIFT_DURATION:
+            # Pure Z-up twist in base_footprint
+            target_twist = np.array([0.0, 0.0, self.LIFT_VELOCITY, 0.0, 0.0, 0.0])
+        else:
+            # Lift complete → hold still
+            target_twist = np.zeros(6)
+
         return TickOutput(
-            target_twist=np.zeros(6),
+            target_twist=target_twist,
             new_state=self._state,
-            ignore_cbf=None,   # Don't publish anything — keep current bypass state
+            ignore_cbf=None,
             grasp_margin=None,
-            log_lines=[],
+            log_lines=log_lines,
         )
