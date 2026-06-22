@@ -105,7 +105,8 @@ class GraspStateMachine:
     #     would kick the robot out of PRE_GRASP even while perfectly aligned.
 
     GRASP_CBF_MARGIN = -0.08
-    GRASP_CONTACT_DEPTH = -0.025
+    GRASP_CONTACT_DEPTH = -0.04      # gripper-box↔cylinder overlap to trigger close (deeper = goes further in)
+    GRASP_INSERTION_TRAVEL = 0.09    # m, straight-line advance from standoff along approach axis (DEPTH knob)
     GRASP_FORCE_THRESHOLD = 2.0
     GRASP_CLOSE_HOLD_S = 4.0
     GRASP_APPROACH_TIMEOUT_S = 20.0
@@ -257,24 +258,20 @@ class GraspStateMachine:
                 ("info", f"[GRASP] CLOSE received in PRE_GRASP. Committing to grasp of "
                          f"{color} cylinder with {inp.active_arm} arm."))
 
-            # Fix applied here: the radial-projection goal (GoalSet's Side/Top
-            # grasp computation) is a function of its anchor pose, and its
-            # curvature blows up as the anchor approaches the cylinder surface
-            # -- any microscopic noise in the anchor (J_EE(q)*qdot jitter) turns
-            # into a large jump in the projected target. The previous version
-            # anchored this one-time freeze on inp.current_T_EE, the raw,
-            # instantaneous, noisy EE pose sampled at the exact tick CLOSE
-            # arrives -- baking that single noisy sample permanently into
-            # locked_grasp_pose for the whole approach phase. inp.T_active_goal
-            # (the standoff pose PRE_GRASP has already been smoothly converging
-            # to and hovering at via the QP-constrained policy) is the stable
-            # quantity instead: anchoring on it means the frozen envelop target
-            # descends from a pose the control loop has already settled near,
-            # not a single instant of measurement noise. xdot_ref for this
-            # target is now effectively zero from the moment it's created.
-            r = self.cylinders[color]['radius']
-            self.locked_grasp_pose = inp.get_dynamic_goal_pose(
-                inp.T_active_goal, inp.active_goal_key, approach_offset=-r - 0.06)
+            # Straight-line insertion from the stable, perfectly-aligned standoff
+            # pose (inp.T_active_goal). We FREEZE that orientation and advance
+            # purely along the gripper approach axis (+X), so the gripper goes
+            # straight in without any rotation or radial re-projection — this is
+            # what keeps both fingers symmetric about the cylinder axis during
+            # the advance. GRASP_INSERTION_TRAVEL sets how far past the standoff
+            # to drive (depth knob).
+            T_base = np.asarray(inp.T_active_goal, dtype=float).copy()
+            R_base = T_base[:3, :3]
+            approach_axis = R_base[:, 0]  # gripper +X = approach direction (toward cylinder)
+            locked = np.eye(4)
+            locked[:3, :3] = R_base
+            locked[:3, 3] = T_base[:3, 3] + approach_axis * self.GRASP_INSERTION_TRAVEL
+            self.locked_grasp_pose = locked
 
             self._transition("GRASP_APPROACH")
             self.grasp_timer = time.time()
@@ -319,11 +316,15 @@ class GraspStateMachine:
 
         contact_d = inp.grasp_contact.get(color.lower(), 1.0)
         contact_ok = contact_d <= self.GRASP_CONTACT_DEPTH
-        # Per-tick [GRASP-DBG] heartbeat removed (was unconditional under
-        # self.debug -> spammed at ~100 Hz). Only the transition/timeout
-        # events below are logged now.
 
-        if ang_ok and contact_ok:
+        # Position-reached fallback: with the straight-line locked target, the
+        # advance is finished once the EE is within 1 cm of it, even if the
+        # gripper-box contact distance never crosses GRASP_CONTACT_DEPTH.
+        pos_to_target = np.linalg.norm(
+            inp.current_T_EE[:3, 3] - self.locked_grasp_pose[:3, 3])
+        pos_reached = pos_to_target < 0.01
+
+        if ang_ok and (contact_ok or pos_reached):
             self._transition("GRASP_CLOSE")
             self.grasp_timer = time.time()
             # Reset force-control state for the new closure attempt
