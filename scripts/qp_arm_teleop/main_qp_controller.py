@@ -324,7 +324,8 @@ class SafetyQPController(Node):
         J_soft, h_soft, d_safe_dynamic, abs_min_distance = self.col.compute_softmin_jacobian(
             self.kin.current_v, self.kin.idx_right, self.kin.idx_left,
             self.hri.grasp_margin_targets, self.hri.attached_objects,
-            self.hri.attached_adjacency, self.hri.ignored_targets, self.publish_counter)
+            self.hri.attached_adjacency, self.hri.ignored_targets, self.publish_counter,
+            attach_ramp_shifts=self.hri.get_attach_ramp_shifts())
 
         # --- 2. Task errors ---
         e_r, v_r, e_l, v_l = self.extract_task_errors()
@@ -383,12 +384,13 @@ class SafetyQPController(Node):
             self.viz.publish_teleop_tether()
 
         # --- Diagnostic brake tracker ---
-        if self.publish_counter % 200 == 0:
-            print("\n=== DECOUPLED QP BRAKES ===")
-            print(f"Collision Brakes:  {self.qp.last_lambda_col:.4f}")
-            print(f"Joint Brakes (R):  {self.qp.last_lambda_joints_right:.4f}")
-            print(f"Joint Brakes (L):  {self.qp.last_lambda_joints_left:.4f}")
-            print("===========================\n")
+        # --- Diagnostic brake tracker (disabled: console spam) ---
+        # if self.publish_counter % 200 == 0:
+        #     print("\n=== DECOUPLED QP BRAKES ===")
+        #     print(f"Collision Brakes:  {self.qp.last_lambda_col:.4f}")
+        #     print(f"Joint Brakes (R):  {self.qp.last_lambda_joints_right:.4f}")
+        #     print(f"Joint Brakes (L):  {self.qp.last_lambda_joints_left:.4f}")
+        #     print("===========================\n")
 
     def _publish_telemetry(self, q_dot_safe, slack_r, slack_l, b_col, lambda_joints_total,
                            J_soft, h_soft, d_safe_dynamic, abs_min_distance,

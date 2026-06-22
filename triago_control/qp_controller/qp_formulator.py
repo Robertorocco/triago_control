@@ -78,7 +78,7 @@ class QPFormulator:
                 H.astype(np.float64), g_flat, C.astype(np.float64), b_flat, meq=0)
             return np.array(xf), lagrangians
         except Exception as e:
-            print(f"[QP Error] {e}")
+            print(f"\033[91m[QP Error] No solution: {e}\033[0m")
             return None, None
 
     def _schedule_weights(self, dt):

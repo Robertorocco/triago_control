@@ -20,12 +20,21 @@ from std_msgs.msg import String, Float64MultiArray
 from trajectory_msgs.msg import JointTrajectoryPoint
 from control_msgs.action import FollowJointTrajectory
 from rclpy.action import ActionClient
+import time
 import numpy as np
 import triago_control.qp_controller.config as cfg
 
 
 class SharedAutonomyHandler:
     """Parses shared-autonomy commands and mutates grasp / CBF-exclusion state."""
+
+    # Smooth barrier engagement for a freshly-attached payload: pairs involving
+    # the cylinder start fully relaxed (invisible to the SoftMin) and the true
+    # safety margin is restored linearly over ATTACH_RAMP_S seconds. This
+    # prevents the instantaneous constraint jump that explodes the arm when a
+    # table-resting cylinder suddenly becomes a collision-checked arm link.
+    ATTACH_RAMP_S = 3.0            # seconds to ramp the barrier in
+    ATTACH_RAMP_SHIFT_MAX = 0.30   # initial distance shift [m] (silences the pair)
 
     def __init__(self, node, col_manager, kinematics, viz_engine):
         self.node = node
@@ -39,6 +48,7 @@ class SharedAutonomyHandler:
         self.attached_object_arm = {}           # {cyl_id: 'right'/'left'} owning arm
         self.attached_relative_transforms = {}  # {cyl_id: pin.SE3} relative pose at pick
         self.attached_adjacency = {}            # {cyl_id: set(geom_id)} rigidly-fused links
+        self.attached_time = {}                 # {cyl_id: attach timestamp} for the barrier ramp
         self.grasp_margin_targets = {}          # {cyl_geom_id: negative margin}
         self.pending_attach = None              # (arm_side, color) processed in the QP loop
 
@@ -171,6 +181,7 @@ class SharedAutonomyHandler:
                     cyl_id, arm_side, self.kin.current_q)
                 self.attached_adjacency[cyl_id] = adjacency
                 adj_names = sorted(self.col.cmodel.geometryObjects[g].name for g in adjacency)
+                self.attached_time[cyl_id] = time.time()
                 self.node.get_logger().info(
                     f"\033[92m[TOPOLOGY OK] {color} cylinder is now a link of the "
                     f"{arm_side} arm.\n"
@@ -178,6 +189,10 @@ class SharedAutonomyHandler:
                     f"  Already-existing pairs kept: {skipped} + both-arm pairs\n"
                     f"  Adjacency-EXCLUDED (own links 6/7/gripper/fingers): {adj_names}\n"
                     f"  Self-collision vs own arm links 3/4/5: ACTIVE.\033[0m")
+                self.node.get_logger().info(
+                    f"\033[96m[CBF RAMP] Smoothly engaging the collision barrier for the "
+                    f"{color} cylinder over {self.ATTACH_RAMP_S:.1f}s "
+                    f"(d_safe ramps from -{self.ATTACH_RAMP_SHIFT_MAX:.2f} m to nominal).\033[0m")
             except Exception as e:
                 self.node.get_logger().error(
                     f"\033[91m[TOPOLOGY FAIL] Could not create collision pairs for "
@@ -187,6 +202,23 @@ class SharedAutonomyHandler:
 
         # 3. Update Meshcat visuals (opaque orange) via the thread-safe viz engine
         self.viz.paint_grasp_intent(arm_side, color, self.col, opaque=True)
+
+    def get_attach_ramp_shifts(self):
+        """Per-attached-cylinder distance shift for the smooth barrier ramp.
+
+        Returns {cyl_id: shift_m}. The shift starts at ATTACH_RAMP_SHIFT_MAX
+        (pair invisible to the SoftMin -> no repulsion) right after attach and
+        decays linearly to 0 over ATTACH_RAMP_S seconds (full nominal safety).
+        Cylinders whose ramp has completed are omitted (shift == 0).
+        """
+        shifts = {}
+        now = time.time()
+        for cyl_id, t0 in self.attached_time.items():
+            elapsed = now - t0
+            if elapsed < self.ATTACH_RAMP_S:
+                ramp = max(0.0, min(1.0, elapsed / self.ATTACH_RAMP_S))  # 0 -> 1
+                shifts[cyl_id] = (1.0 - ramp) * self.ATTACH_RAMP_SHIFT_MAX
+        return shifts
 
     def publish_contact_distances(self):
         # Publish signed gripper<->cylinder distance [red, blue] for grasp confirmation.

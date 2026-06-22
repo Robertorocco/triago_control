@@ -319,7 +319,8 @@ class CollisionManager:
 
     def compute_softmin_jacobian(self, current_v, idx_right, idx_left,
                                  margin_targets, attached_objs, attached_adjacency,
-                                 ignored_targets, publish_counter=0):
+                                 ignored_targets, publish_counter=0,
+                                 attach_ramp_shifts=None):
         """
         Aggregate all active collision pairs into one SoftMin CBF.
 
@@ -406,6 +407,16 @@ class CollisionManager:
                             print(f"Was shift applied? shift = {shift:.4f}")
                             print(f"d_raw = {d:.4f} | d_eff = {d + shift:.4f}")
                             print("---------------------\n")
+
+            # --- SHARED-AUTONOMY HOOK 4: attached-payload smooth barrier ramp ---
+            # A freshly-attached cylinder's pairs start relaxed (large +shift ->
+            # invisible to the SoftMin) and the true distance is restored as the
+            # ramp shift decays to 0 over ~3 s, avoiding an instantaneous jump.
+            if attach_ramp_shifts:
+                for cyl_id, sh in attach_ramp_shifts.items():
+                    if first == cyl_id or second == cyl_id:
+                        shift += sh
+                        break
 
             # Extract the nearest points (API differs across hppfcl versions)
             if hasattr(res, 'nearest_points'):
