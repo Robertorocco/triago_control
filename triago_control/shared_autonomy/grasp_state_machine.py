@@ -395,9 +395,11 @@ class GraspStateMachine:
             if elapsed >= self.CLOSURE_WAIT_S:
                 self.grip_contact_detected = True
                 self.grip_force_stable_since = time.time()
+                # Lock fingers at the target position for lifting
+                self.grip_position = self.GRIP_FINAL_POSITION
                 log_lines.append(("info", f"[GRASP] Closure time elapsed ({self.CLOSURE_WAIT_S:.0f}s). "
-                                          f"Fingers at {self.grip_position:.4f} rad. "
-                                          f"Locking grip. Starting lift."))
+                                          f"Locking fingers at {self.GRIP_FINAL_POSITION:.4f} rad. "
+                                          f"Starting lift."))
 
             # Arm frozen during closure
             target_twist = np.zeros(6)
