@@ -249,6 +249,10 @@ class SharedControlNode(Node):
                 target=self._console_input_thread, daemon=True, name='console-input')
             self._console_thread.start()
 
+        # Open gripper on startup so we know the initial state
+        self.pub_gripper_cmd.publish(String(data=f"CLOSE_RIGHT_0.7000"))
+        self.pub_gripper_cmd.publish(String(data=f"CLOSE_LEFT_0.7000"))
+
     # --- Callbacks ---
 
     def trigger_callback(self, msg):
@@ -918,15 +922,19 @@ class SharedControlNode(Node):
                 print(f"  OU bias now   = {np.round(self._ou_bias, 4)}")
 
             elif raw == "CLOSE":
-                # Bug fix: the original wrote self.trigger_cmd = True directly
-                # from this thread without the same protection pattern used
-                # elsewhere. This write is a single attribute assignment of a
-                # bool, which is atomic in CPython (the GIL serializes
-                # bytecode-level STORE_ATTR), so no separate lock is required --
-                # documented here explicitly so the assumption is not silently
-                # relied upon.
                 self.trigger_cmd = True
                 self.get_logger().info("[TEST] 'CLOSE' command registered via console.")
+
+            elif raw == "OPEN":
+                # Open gripper fully and reset grasp state
+                cmd_msg = String()
+                cmd_msg.data = f"CLOSE_{self.active_arm.upper()}_0.7000"
+                self.pub_gripper_cmd.publish(cmd_msg)
+                self.grasp_sm._transition("SHARED_AUTONOMY")
+                self.grasp_sm.grip_contact_detected = False
+                self.grasp_sm.grip_force_stable_since = None
+                self.grasp_sm.grip_position = 0.7
+                self.get_logger().info("[TEST] 'OPEN' command: gripper opened, grasp state reset.")
 
             else:
                 print(f"  ✗ unknown goal '{raw}'.  Choose from: {valid_goals}")

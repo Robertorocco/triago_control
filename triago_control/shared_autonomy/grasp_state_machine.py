@@ -335,8 +335,8 @@ class GraspStateMachine:
                          f"Freezing arm. Starting force-controlled finger closure."))
 
             cyl_radius = self.cylinders[color]['radius']
-            # No single-shot CLOSE here — force-controlled loop in _grasp_close handles it
-            self.grip_position = cyl_radius + 0.005  # Start just outside the cylinder
+            # Start slightly wider than target — closure will slowly bring to GRIP_FINAL_POSITION
+            self.grip_position = self.GRIP_FINAL_POSITION + 0.02
 
             return TickOutput(
                 target_twist=target_twist,
@@ -373,7 +373,7 @@ class GraspStateMachine:
     # PHASE 3: GRASP_CLOSE (slow closure then vertical lift)
     # ------------------------------------------------------------------
     LIFT_VELOCITY = 0.02  # m/s upward lift speed
-    LIFT_DURATION = 3.0   # seconds to lift before declaring success
+    LIFT_DURATION = 5.0   # seconds to lift (0.02*5=10cm)
 
     def _grasp_close(self, inp: TickInput) -> TickOutput:
         self._transition("GRASP_CLOSE")
