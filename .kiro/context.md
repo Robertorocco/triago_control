@@ -1,7 +1,7 @@
 # AI Agent Context — triago_control
 
 > **This file is maintained by the AI agent. Do not edit manually.**
-> Last updated: 2026-06-23 (grasp pipeline confirmed working; focus shifts to post-grasp phases)
+> Last updated: 2026-06-22 (added head_controller architecture — vision-based independent head servoing)
 
 ---
 
@@ -62,6 +62,8 @@ triago_control/
 │   │   ├── keyboard_teleop.py          keyboard cartesian jog
 │   │   ├── plotter.py                  live matplotlib dashboard
 │   │   └── drift_evaluator_node.py     tracking error analysis
+│   ├── head_controller/
+│   │   └── qp_head_visual_servo.py     ★ primary: QP-based visual servoing for head camera
 │   ├── visualize_live_shadow.py
 │   └── workspace_mapper.py
 └── triago_control/                  ← IMPORTABLE PYTHON LIBRARY
@@ -273,7 +275,130 @@ ros2 service call /ATTACHLINK linkattacher_msgs/srv/AttachLink \
 
 ---
 
-## 5. Entry Point → Library Dependency Map
+## 5. Head Controller (Vision-Based Independent Head Servoing)
+
+An **independent subsystem** controlling TRIAGo's 7-DOF head arm to keep both hands in the camera field-of-view. Runs at its own frequency, decoupled from the arm QP safety loop — the head does NOT share the CLF-CBF formulation used for the arms.
+
+### 5.1 Design Philosophy
+
+The head is mechanically identical to the left/right arms (7-DOF, same hardware) but serves a fundamentally different purpose: it carries a camera (RealSense D405 RGBD) and must keep the operator's working hands visible. Future evolution will add image-processing-based algorithms (e.g., object detection, gaze prediction), but the current starting point uses **kinematic hand tracking** (Pinocchio FK projects hand positions into the camera frame — no actual image data required yet).
+
+**Key architectural decision**: the head controller is **fully independent** from the arm controller. It:
+- Has its own QP solver instance (not shared with `main_qp_controller.py`)
+- Commands its own velocity controller (`arm_head_joint_space_controller_vel`)
+- Runs at its own loop rate (currently event-driven via `spin_once`)
+- Does NOT subscribe to or publish `/arm_*/cartesian_reference`
+- Does NOT participate in the arm CBF collision pairs
+
+### 5.2 Kinematic Chain
+
+```
+Head joints (7-DOF):  arm_head_1_joint → arm_head_7_joint
+Head links:           arm_head_1_link  → arm_head_7_link
+End-effector frame:   gripper_head_camera_rgbd_color_optical_frame
+Tracked targets:      arm_right_tool_link, arm_left_tool_link (both hands centroid)
+```
+
+### 5.3 Control Architecture (2.5D Visual Servoing QP)
+
+The controller uses a **two-stage state machine** based on whether the hands are currently visible in the camera FOV:
+
+| Stage | Condition | Strategy |
+|-------|-----------|----------|
+| **PBVS (Look-At)** | Hands outside FOV or behind camera | 3D rotational servoing: cross(z_cam, dir_to_centroid) → angular velocity via J_rot |
+| **IBVS (Pixel Tracking)** | Both hands inside FOV margin | 2.5D image-based visual servoing: interaction matrix Ls maps pixel + depth error to camera twist |
+
+**QP formulation** (both stages):
+
+Decision vector: `x = [dq_head (7), slack (3)]`
+
+Cost:
+- Joint velocity regularization with per-joint weights `[50, 40, 30, 10, 5, 1, 1]` (heavier on base joints → smoother motion, wrist joints freer)
+- Slack penalty: `W_SLACK_PIXELS=1` for u,v errors; `W_SLACK_DEPTH=1e4` for depth (normalizes pixel vs. meter scales)
+- Secondary postural task: centering spring toward mid-range (K_POSTURE=0.05)
+
+Equality constraint (CLF-like):
+- `J_task · dq - slack = -λ · e` (λ_visual = 1)
+- In IBVS: J_task = Ls @ J_cam (3×7), e = [u-u_target, v-v_target, Z-Z_target]
+- In PBVS: J_task = J_rot (3×7), e = ω_desired (cross-product look-at)
+
+Inequality constraints (CBF-style):
+- **FOV barriers** (IBVS only): each hand must stay ≥ FOV_MARGIN=50px from image edges. Per-hand, 4 barriers (left, right, top, bottom) using the interaction matrix gradient.
+- **Joint limits**: velocity-aware position buffer (SAFE_BUF=min(0.15, 10% of range), γ=2.0), capped at MAX_VELOCITY=0.15 rad/s. Uses **soft limits** from URDF safety_controller tags when available.
+
+Solver: `quadprog.solve_qp` (same as arm QP).
+
+### 5.4 Camera Parameters
+
+```python
+# RealSense D405 (720p approximation)
+CAM_W, CAM_H = 1280, 720
+CAM_FX, CAM_FY = 640.0, 640.0
+CAM_CX, CAM_CY = 640.0, 360.0
+
+# Servoing targets
+TARGET_U = CAM_CX      # Keep centroid at image center (u)
+TARGET_V = CAM_CY      # Keep centroid at image center (v)
+TARGET_Z = 1.0         # Keep centroid 1 meter from camera
+```
+
+### 5.5 Controller Switching
+
+The node automatically handles controller activation on startup:
+- **Activates**: `arm_head_joint_space_controller_vel`
+- **Deactivates** (conflicting): `arm_head_controller` (default trajectory controller)
+- Uses `/controller_manager/list_controllers` + `/controller_manager/switch_controller` services
+
+### 5.6 Collision Avoidance (Simplified)
+
+Unlike the arm QP (which uses SoftMin CBF over 60 pairs), the head has a **lightweight collision model**:
+- Head links: capsules (radius=0.08, length=0.2) for each of 7 links
+- Body parts: boxes for `base_link` (0.6×0.5×0.27) and `torso_lift_link` (0.2×0.2×0.6)
+- Virtual wall: box at (0.5, 0.0, 1.0) of size (1.0×0.02×2.0)
+- Collision pairs: head-vs-body + head-vs-wall only (no inter-arm pairs)
+
+**Note**: collision avoidance constraints from this model are NOT currently wired into the QP as CBF inequalities — the model is built but the distance-based barriers are not yet formulated. This is a planned extension.
+
+### 5.7 ROS 2 Interface
+
+**Subscriptions:**
+| Topic | Type | Purpose |
+|-------|------|---------|
+| `/joint_states` | JointState | Full robot state (head + arms, split messages handled) |
+
+**Publications:**
+| Topic | Type | Purpose |
+|-------|------|---------|
+| `/arm_head_joint_space_controller_vel/joint_velocity_cmd` | Float64MultiArray | 7-DOF head velocity command |
+| `/qp_debug/qdot_err` | Float64MultiArray | Solved joint velocities (telemetry) |
+| `/qp_debug/xdot_err` | Float64MultiArray | Visual/rotational error (telemetry) |
+| `/qp_debug/head_cartesian_cmd` | TwistStamped | Cartesian camera velocity (debug) |
+| `/qp_debug/camera_ray` | Marker | Optical axis arrow in RViz |
+| `/qp_debug/target_centroid` | Marker | Green sphere at hands centroid |
+| `/qp_debug/virtual_wall_marker` | Marker | Wall visualization |
+
+### 5.8 Build & Run
+
+```bash
+# Build (part of triago_control package)
+cd ~/exchange/ros2-ws
+colcon build --packages-select triago_control
+source install/setup.bash
+
+# Run head visual servoing
+ros2 run triago_control qp_head_visual_servo.py
+```
+
+### 5.9 Current Limitations & Future Work
+
+- **No actual image processing yet**: hand positions are computed via Pinocchio FK, not from camera images. This is the "starting point" — future work will add detection/tracking from the RGB stream.
+- **Collision CBF not wired**: the hppfcl collision model is built but distance constraints are not yet formulated as QP inequalities.
+- **No shared config file**: gains are hard-coded in-script (unlike the arm QP which uses `config.py`). Will be refactored as the module matures.
+- **Loop rate**: currently event-driven (`spin_once` + `solve_and_publish` per iteration). Future: dedicated timer at a fixed frequency.
+
+---
+
+## 6. Entry Point → Library Dependency Map
 
 ```
 main_qp_controller.py
@@ -324,11 +449,22 @@ haptic_force_manager.py
               /qp_debug/lambda_cbf, /shared_autonomy/goal_names,
               /shared_autonomy/goal_probabilities, /shared_autonomy/user_policy
   publishes: virtuose/force_cmd (Wrench, consumed by virtuose_server_node)
+
+[head_controller — independent subsystem]
+
+qp_head_visual_servo.py
+  subscribes: /joint_states (full robot, for FK of head + hands)
+  publishes: /arm_head_joint_space_controller_vel/joint_velocity_cmd (7-DOF velocities)
+             /qp_debug/qdot_err, /qp_debug/xdot_err, /qp_debug/head_cartesian_cmd
+             /qp_debug/camera_ray, /qp_debug/target_centroid (RViz markers)
+  NOTE: fully independent — does NOT share the arm QP solver, does NOT
+        subscribe to /arm_*/cartesian_reference. Uses its own Pinocchio model
+        instance and quadprog call. Future: will add image-based input.
 ```
 
 ---
 
-## 6. Import Convention
+## 7. Import Convention
 
 All library imports use the **fully-qualified package path**:
 
@@ -342,7 +478,7 @@ from triago_control.shared_autonomy.belief_estimator import BeliefEstimator
 
 ---
 
-## 7. Critical Hardware Quirks
+## 8. Critical Hardware Quirks
 
 1. **Corrupted encoder velocities**: TRIAGo's joint_states `velocity` field is unreliable. The controller derives velocity from position differences and filters with a first-order EMA (`ALPHA_FILTER = 0.15`, ~60ms window). Never trust `msg.velocity` directly.
 
@@ -354,7 +490,7 @@ from triago_control.shared_autonomy.belief_estimator import BeliefEstimator
 
 ---
 
-## 8. Mathematical Core (QP-CLF-CBF)
+## 9. Mathematical Core (QP-CLF-CBF)
 
 Decision vector: `x = [q_dot (nv), delta_right, delta_left]`
 
@@ -372,14 +508,14 @@ Solver: `quadprog.solve_qp` (active-set method).
 
 ---
 
-## 9. Adaptive Scheduling (shadow-price feedback)
+## 10. Adaptive Scheduling (shadow-price feedback)
 
 - **Decoupled slack weighting**: each arm's slack weight drops (toward `BASE_WEIGHT_SLACK=5`) when its shadow price grows, letting the slack absorb more tracking error near obstacles. In free space it rises (toward `MAX_WEIGHT_SLACK=50`) for tighter tracking.
 - **Dynamic gamma (CLF)**: the CLF convergence rate γ drops exponentially with the collision Lagrangian λ_col, low-pass filtered (τ=0.125s). This gives tracking priority in free space but yields to safety near obstacles.
 
 ---
 
-## 10. Shared Autonomy Architecture
+## 11. Shared Autonomy Architecture
 
 The `main_shared_autonomy.py` node implements:
 - **Bayesian belief estimation** over a discrete goal set (with goal **exclusion** support)
@@ -388,7 +524,7 @@ The `main_shared_autonomy.py` node implements:
 - **Alpha-blending** between human teleop input and autonomous policy (WIP)
 - Publishes cartesian references consumed by `main_qp_controller.py`
 
-### 10.1 Goal Set (5 goals)
+### 11.1 Goal Set (5 goals)
 
 `Red_Top`, `Red_Side`, `Blue_Top`, `Blue_Side`, `Platform_Place`.
 
@@ -411,7 +547,7 @@ The `main_shared_autonomy.py` node implements:
     axis to vertical. This constrains 2 DOF (tilt) and leaves yaw-about-vertical free → a true
     placement manifold, not a single pose.
 
-### 10.2 Post-grasp lifecycle (the fix for "architecture dies after grasping")
+### 11.2 Post-grasp lifecycle (the fix for "architecture dies after grasping")
 
 | Phase | Behavior |
 |-------|----------|
@@ -427,7 +563,7 @@ The `main_shared_autonomy.py` node implements:
 - `VisualizationEngine.restore_object_color` clears the orange Meshcat override (cylinder + gripper revert to original material). RViz auto-reverts (grey rendering is keyed on `attached_objects`).
 - **Known limitation**: no Gazebo→twin pose sync, so the QP-twin cylinder freezes at the release pose (matches placement-on-platform; a mid-air drop won't fall in the twin).
 
-### 10.3 Belief exclusion rules
+### 11.3 Belief exclusion rules
 
 `BeliefEstimator.set_excluded_goals(...)` pins a goal to probability 0, skips it in the cost
 update and `blend_policies`, and never returns it from `get_active_goal` — but it stays in
@@ -435,7 +571,7 @@ update and `blend_policies`, and never returns it from `get_active_goal` — but
 - **Gripper empty**: `Platform_Place` excluded.
 - **Holding `<Color>`**: `<Color>_Top` and `<Color>_Side` excluded; `Platform_Place` enabled.
 
-### 10.4 RViz / visualization
+### 11.4 RViz / visualization
 
 Goal poses are drawn as **belief-opacity gripper markers** (ns `goal_poses`), one per goal,
 color-coded by family (Red reddish, Blue bluish, Platform yellow). Opacity is a continuous ramp
@@ -447,7 +583,7 @@ trajectory grippers (ns `policy_grippers`) are unchanged.
 
 ---
 
-## 11. Current State & Known Issues
+## 12. Current State & Known Issues
 
 | Area | Status | Notes |
 |------|--------|-------|
@@ -457,7 +593,7 @@ trajectory grippers (ns `policy_grippers`) are unchanged.
 | Post-grasp (LIFT + HOLDING + place) | ✅ Working | 5 cm slow lift → HOLDING resumes shared autonomy → Platform placement manifold → release back to start |
 | Platform placement goal | 🔧 Active dev | `Platform_Place` manifold (axis ⊥ disk); debugging placement height/orientation live |
 | Haption teleoperation (clutch) | 🔧 Active dev | `teleop_triago_clutch.py` + `haptic_force_manager.py` |
-| Head control | ❌ Not implemented | Planned future addition |
+| Head control (visual servoing) | 🔧 Active dev | `qp_head_visual_servo.py`: QP-based hand-tracking, independent loop. Starting point — no image processing yet. |
 | Mobile base integration | 🔧 Partial | `base_controller.py` exists but not QP-certified |
 | Meshcat visualization | ✅ Working | Thread-safe, auto-reloads on grasp coloring |
 | Digital twin mode | ✅ Working | `SIMULATE_IDEAL_KINEMATICS` flag in config |
@@ -466,7 +602,7 @@ trajectory grippers (ns `policy_grippers`) are unchanged.
 
 ---
 
-## 12. Build & Run Commands
+## 13. Build & Run Commands
 
 ```bash
 # Build
@@ -474,11 +610,14 @@ cd ~/exchange/ros2-ws
 colcon build --packages-select triago_control
 source install/setup.bash
 
-# Run QP controller
+# Run QP controller (bimanual arms)
 ros2 run triago_control main_qp_controller.py
 
 # Run shared autonomy
 ros2 run triago_control main_shared_autonomy.py
+
+# Run head visual servoing (independent, can run alongside arm QP)
+ros2 run triago_control qp_head_visual_servo.py
 
 # Run an open-loop robustness trajectory (edit config/trajectory_endpoints.yaml first)
 ros2 run triago_control trajectory_generator.py
@@ -491,7 +630,7 @@ ros2 run triago_control plotter.py
 
 ---
 
-## 13. Coding Conventions
+## 14. Coding Conventions
 
 - **Config**: every tunable value lives in `qp_controller/config.py`. Never hard-code gains elsewhere.
 - **Naming**: snake_case for files and variables, PascalCase for classes.
@@ -502,7 +641,7 @@ ros2 run triago_control plotter.py
 
 ---
 
-## 14. Git Workflow
+## 15. Git Workflow
 
 - **main** branch: stable, runnable code
 - Feature/fix branches: `feature/xyz` or `fix/xyz`

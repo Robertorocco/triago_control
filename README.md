@@ -2,29 +2,39 @@
 
 A modular, safety-certified motion control framework for the PAL Robotics TRIAGo bimanual platform. The architecture guarantees constraint satisfaction (collision avoidance, joint limits) regardless of the command source — teleoperation, trajectory planning, or autonomous policy.
 
+The system comprises three independent control subsystems running concurrently:
+1. **Bimanual Arm QP Controller** — CLF-CBF safety-critical loop for both arms
+2. **Shared Autonomy** — Bayesian intent prediction + haptic guidance
+3. **Head Visual Servoing** — Independent vision-based head control to keep hands in camera FOV
+
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    EXECUTABLE NODES (scripts/)                    │
-├──────────────────────────────┬──────────────────────────────────┤
-│  main_qp_controller.py      │  main_shared_autonomy.py         │
-│  (safety-critical QP loop)  │  (intent prediction + blending)  │
-└──────────────┬───────────────┴──────────────┬───────────────────┘
-               │                              │
-               ▼                              ▼
-┌──────────────────────────┐   ┌──────────────────────────────────┐
-│  triago_control/         │   │  triago_control/                 │
-│  qp_controller/          │   │  shared_autonomy/                │
-│  ├── config.py           │   │  ├── belief_estimator.py         │
-│  ├── robot_kinematics.py │   │  ├── goal_set.py                 │
-│  ├── collision_manager.py│   │  ├── grasp_state_machine.py      │
-│  ├── qp_formulator.py    │   │  └── plot_manager.py             │
-│  ├── shared_autonomy_    │   └──────────────────────────────────┘
-│  │   handler.py          │
-│  └── visualization_      │
-│      engine.py           │
-└──────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────────┐
+│                         EXECUTABLE NODES (scripts/)                               │
+├──────────────────────────┬────────────────────────────┬─────────────────────────┤
+│  qp_arm_teleop/          │  qp_arm_teleop/            │  head_controller/        │
+│  main_qp_controller.py   │  main_shared_autonomy.py   │  qp_head_visual_servo.py │
+│  (arm safety QP loop)    │  (intent + blending)       │  (head visual servoing)  │
+└────────────┬─────────────┴──────────────┬─────────────┴────────────┬────────────┘
+             │                            │                          │
+             ▼                            ▼                          │ (independent)
+┌──────────────────────────┐   ┌───────────────────────────┐        │
+│  triago_control/         │   │  triago_control/          │        │
+│  qp_controller/          │   │  shared_autonomy/         │        │
+│  ├── config.py           │   │  ├── belief_estimator.py  │        │
+│  ├── robot_kinematics.py │   │  ├── goal_set.py          │        │
+│  ├── collision_manager.py│   │  ├── grasp_state_machine.py│       │
+│  ├── qp_formulator.py    │   │  └── plot_manager.py      │        │
+│  ├── shared_autonomy_    │   └───────────────────────────┘        │
+│  │   handler.py          │                                         │
+│  └── visualization_      │         ┌──────────────────────────────┘
+│      engine.py           │         │  Own Pinocchio model + QP
+└──────────────────────────┘         │  Own velocity controller
+                                     │  No coupling to arm pipeline
+                                     ▼
+                              /joint_states → FK → pixel projection
+                              → QP solve → /arm_head_.../joint_velocity_cmd
 ```
 
 **Dependency flow:**
@@ -35,6 +45,10 @@ main_qp_controller  ──→  qp_controller/*   (the math)
 
 main_shared_autonomy ──→  shared_autonomy/*  (belief, goals, state machine)
                      ──→  publishes references consumed by main_qp_controller
+
+qp_head_visual_servo ──→  own Pinocchio instance (FK + Jacobians)
+                     ──→  own quadprog QP (visual servoing)
+                     ──→  INDEPENDENT: no imports from qp_controller/ or shared_autonomy/
 ```
 
 ## Key Modules
@@ -50,6 +64,12 @@ main_shared_autonomy ──→  shared_autonomy/*  (belief, goals, state machine
 | `shared_autonomy/belief_estimator.py` | Bayesian intent inference over goal set |
 | `shared_autonomy/goal_set.py` | Dynamic goal pose computation |
 | `shared_autonomy/grasp_state_machine.py` | Pick state machine (approach → contact → close → attach) |
+
+### Head Controller (Independent Subsystem)
+
+| Module | Responsibility |
+|--------|---------------|
+| `scripts/head_controller/qp_head_visual_servo.py` | 2.5D visual servoing QP — keeps both hands centered in camera FOV |
 
 ## Prerequisites
 
@@ -111,6 +131,14 @@ ros2 run triago_control main_shared_autonomy.py
 
 Publishes cartesian references for the QP controller based on predicted human intent and optimal policy blending.
 
+### Head Visual Servoing (Independent)
+
+```bash
+ros2 run triago_control qp_head_visual_servo.py
+```
+
+Independently controls the 7-DOF head arm to keep both hands in the camera field-of-view. Uses a QP with 2.5D interaction-matrix-based image servoing (IBVS) when hands are visible, and a 3D rotational look-at (PBVS) when hands are outside FOV. Runs concurrently with the arm QP — no coupling between the two.
+
 ### Auxiliary Nodes
 
 ```bash
@@ -152,6 +180,9 @@ All tunable parameters live in `triago_control/qp_controller/config.py`:
 | `/qp_debug/lambda_cbf` | `std_msgs/Float64` | Collision constraint shadow price |
 | `/qp_debug/slacks` | `std_msgs/Float64MultiArray` | CLF slack [right, left] |
 | `/collision_constraints` | `std_msgs/Float64MultiArray` | Cartesian CBF projection (13 floats) |
+| `/qp_debug/head_cartesian_cmd` | `geometry_msgs/TwistStamped` | Head camera velocity command (debug) |
+| `/qp_debug/camera_ray` | `visualization_msgs/Marker` | Camera optical axis (RViz) |
+| `/qp_debug/target_centroid` | `visualization_msgs/Marker` | Hands centroid sphere (RViz) |
 
 ## License
 
