@@ -146,9 +146,6 @@ class SharedControlNode(Node):
         self.belief_estimator.set_excluded_goals({self.goal_set.PLATFORM_KEY})
         # Color of the currently-held cylinder ('Red'/'Blue'), or None when empty.
         self.grasped_color = None
-        # Tracks the grasp SM state across ticks so the node can react to entries
-        # (e.g. arming the placement goal) exactly once.
-        self._prev_sm_state = self.grasp_sm.state
 
         # --- Grasp State Machine (delegated to GraspStateMachine) ---
         self.grasp_sm = GraspStateMachine(
@@ -156,6 +153,9 @@ class SharedControlNode(Node):
             initial_state="SHARED_AUTONOMY",
             debug=True,  # mirrors the original GRASP_DEBUG flag
         )
+        # Tracks the grasp SM state across ticks so the node can react to entries
+        # (e.g. arming the placement goal) exactly once.
+        self._prev_sm_state = self.grasp_sm.state
 
         # --- Plot Manager (delegated to PlotManager) ---
         # Imported lazily here (after plt.ion() is implicitly handled inside
