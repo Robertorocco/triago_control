@@ -46,6 +46,12 @@ class HeadKinematics:
         self._seen_joints = set()
         self._ready = False
 
+        # EMA velocity reconstruction (same approach as arm QP — encoder vels
+        # are unreliable, so we derive from position differences + filter).
+        self._last_q = None
+        self._last_time = None
+        self._v_filtered = None     # (nv,) EMA-filtered velocity
+
     # ================================================================== #
     # Model construction                                                  #
     # ================================================================== #
@@ -108,8 +114,12 @@ class HeadKinematics:
     # ================================================================== #
     # Live state                                                          #
     # ================================================================== #
-    def update_joint_states(self, names, positions):
-        """Absorb a (possibly partial) /joint_states message."""
+    def update_joint_states(self, names, positions, stamp_sec=None):
+        """Absorb a (possibly partial) /joint_states message.
+
+        Also derives joint velocity via finite-difference + EMA filter
+        (encoder velocities are unreliable — see Critical Hardware Quirks §7).
+        """
         if self.model is None:
             return
         for name, pos in zip(names, positions):
@@ -120,6 +130,18 @@ class HeadKinematics:
         if not self._ready:
             if all(j in self._seen_joints for j in cfg.HEAD_JOINTS):
                 self._ready = True
+                self._v_filtered = np.zeros(self.model.nv)
+
+        # EMA velocity reconstruction from position differences.
+        if self._ready and stamp_sec is not None:
+            if self._last_q is not None and self._last_time is not None:
+                dt = stamp_sec - self._last_time
+                if dt > 1e-5:
+                    v_raw = pin.difference(self.model, self._last_q, self.q_real) / dt
+                    alpha = cfg.ALPHA_VELOCITY_FILTER
+                    self._v_filtered = alpha * v_raw + (1.0 - alpha) * self._v_filtered
+            self._last_q = self.q_real.copy()
+            self._last_time = stamp_sec
 
     def is_ready(self) -> bool:
         return self._ready
@@ -147,6 +169,12 @@ class HeadKinematics:
 
     def get_head_joint_positions(self):
         return np.array([self.q_real[i] for i in self.head_q_idx])
+
+    def get_head_joint_velocities(self):
+        """Return EMA-filtered velocities for the 7 head joints (rad/s)."""
+        if self._v_filtered is None:
+            return np.zeros(len(cfg.HEAD_JOINTS))
+        return np.array([self._v_filtered[i] for i in self.head_v_idx])
 
     def get_head_joint_limits(self):
         """Return (q_min, q_max) arrays for the 7 head joints (soft if known)."""

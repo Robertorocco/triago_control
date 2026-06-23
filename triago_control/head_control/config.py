@@ -95,7 +95,10 @@ LOOKAT_ALIGNED_DEG = 4.0
 # A single viewpoint sees the table top fine, but a slow sweep fills occluded
 # regions and lets temporal smoothing average out depth noise. Disable if you
 # want a static head.
-ENABLE_SCAN = True
+# NOTE: Disabled for now — the scan was causing 8-18 deg oscillation because
+# the QP couldn't track the moving target fast enough. Re-enable once the
+# static look-at is validated and we need broader coverage.
+ENABLE_SCAN = False
 SCAN_AMPLITUDE_X = 0.06      # [m] sweep half-extent along table X (forward)
 SCAN_AMPLITUDE_Y = 0.10      # [m] sweep half-extent along table Y (left/right)
 SCAN_PERIOD_X = 14.0         # [s] period of the X oscillation (slower = easier to track)
@@ -171,6 +174,11 @@ BLUE_HUE_HIGH = 0.75
 DETECTION_EMA_ALPHA = 0.40   # 0..1, higher = more responsive / less smooth
 # Max distance to associate a detection with the previous frame's object.
 DETECTION_MATCH_DIST = 0.10  # [m]
+
+# Velocity EMA filter (mirrors qp_controller's corrupted-encoder workaround):
+# TRIAGo joint_states velocity field is unreliable. Derive velocity from
+# position differences and filter with a first-order EMA.
+ALPHA_VELOCITY_FILTER = 0.15  # ~60ms window, same as arm controller
 
 CONTROL_RATE_HZ = 50.0       # head velocity command rate
 PERCEPTION_RATE_HZ = 5.0     # perception pipeline rate (objects move slowly)

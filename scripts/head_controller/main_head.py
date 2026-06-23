@@ -107,7 +107,9 @@ class HeadPerceptionNode(Node):
     # Callbacks                                                           #
     # ================================================================== #
     def _joint_cb(self, msg: JointState):
-        self.kin.update_joint_states(list(msg.name), list(msg.position))
+        # Convert ROS stamp to float seconds for the EMA velocity filter.
+        stamp_sec = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
+        self.kin.update_joint_states(list(msg.name), list(msg.position), stamp_sec)
 
     # ================================================================== #
     # Control loop                                                        #
