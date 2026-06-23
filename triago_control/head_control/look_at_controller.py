@@ -99,15 +99,13 @@ class LookAtController:
         # Tiny regularisation so H stays strictly positive-definite for quadprog.
         H += np.eye(n_vars) * 1e-6
 
-        # Null-space posture spring toward joint mid-range (keeps the head tidy).
+        # Null-space posture spring toward a known-good observation posture
+        # (keeps the redundant DOF at a forward, top-down viewpoint instead of
+        # drifting to the grazing mid-range config).
         g = np.zeros(n_vars)
         q = self.kin.get_head_joint_positions()
         q_min, q_max = self.kin.get_head_joint_limits()
-        dq_posture = np.zeros(self.n)
-        for i in range(self.n):
-            if (q_max[i] - q_min[i]) > 0.01:
-                q_center = 0.5 * (q_max[i] + q_min[i])
-                dq_posture[i] = -cfg.POSTURE_GAIN * (q[i] - q_center)
+        dq_posture = -cfg.POSTURE_GAIN * (q - cfg.HEAD_POSTURE_TARGET)
         g[:self.n] = H[:self.n, :self.n] @ dq_posture   # scale by H so it isn't drowned
 
         # Equality: look-at task  (J_rot dq - slack = omega_des)

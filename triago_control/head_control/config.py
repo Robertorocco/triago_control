@@ -81,7 +81,15 @@ MAX_HEAD_VELOCITY = 0.25     # rad/s per joint (moderate, allows tracking the sc
 # coarse pointing is done by the wrist, keeping motion smooth and predictable.
 HEAD_JOINT_WEIGHTS = np.array([50.0, 40.0, 30.0, 10.0, 5.0, 1.0, 1.0])
 LOOKAT_SLACK_WEIGHT = 500.0  # HIGH penalty: the look-at task dominates over posture
-POSTURE_GAIN = 0.005         # very weak: avoid fighting the look-at task
+
+# Posture target for the REDUNDANT DOF. The head has 7 DOF but look-at only
+# constrains 2 (pointing direction); the remaining 5 are resolved by pulling
+# toward this posture. We use a KNOWN-GOOD table-observation config (measured
+# from a dense, well-placed run) instead of joint mid-range, so the camera
+# settles at a forward, top-down viewpoint with good table coverage — NOT the
+# grazing "camera above the base" pose that mid-range produces.
+HEAD_POSTURE_TARGET = np.array([-0.20, -0.57, -0.27, -0.81, -1.00, -1.59, -0.02])
+POSTURE_GAIN = 0.50          # acts in the look-at null space (slack weight is high)
 # Velocity-aware joint-limit CBF.
 JOINT_LIMIT_GAMMA = 2.0
 JOINT_LIMIT_BUFFER = 0.15    # rad safety buffer from the hard limit
@@ -95,10 +103,9 @@ LOOKAT_ALIGNED_DEG = 4.0
 # A single viewpoint sees the table top fine, but a slow sweep fills occluded
 # regions and lets temporal smoothing average out depth noise. Disable if you
 # want a static head.
-# NOTE: Re-enabled with minimal amplitude — the high slack weight (500) ensures
-# the QP can track the gentle motion easily. The micro-scan improves EMA
-# averaging across slightly different viewpoints (noise reduction).
-ENABLE_SCAN = True
+# NOTE: Disabled during viewpoint-stabilisation debugging. The posture target
+# now pins a good observation pose; re-enable once detection is solid.
+ENABLE_SCAN = False
 SCAN_AMPLITUDE_X = 0.03      # [m] very small sweep (±3cm along table X)
 SCAN_AMPLITUDE_Y = 0.04      # [m] very small sweep (±4cm along table Y)
 SCAN_PERIOD_X = 14.0         # [s] period of the X oscillation (slower = easier to track)
@@ -110,7 +117,7 @@ SCAN_PERIOD_Y = 9.0          # [s] period of the Y oscillation (coprime-ish ->
 # =============================================================================
 # We subsample the depth image on a pixel grid to keep the cloud small enough
 # for pure-numpy/scipy processing on a CPU. Stride 4 over 1280x720 -> ~57k pts.
-PIXEL_STRIDE = 4
+PIXEL_STRIDE = 2
 DEPTH_MIN = 0.20             # [m] ignore points closer than this (noise/self)
 DEPTH_MAX = 2.50             # [m] ignore points beyond this (background/walls)
 
@@ -131,7 +138,7 @@ PLANE_RANSAC_ITERS = 150
 PLANE_DIST_THRESH = 0.010    # [m] inlier band half-thickness
 # Only accept planes whose normal is within this of vertical (|n . up| >= ...).
 PLANE_MIN_VERTICAL_DOT = 0.90
-PLANE_MIN_INLIERS = 400      # below this, "no table found"
+PLANE_MIN_INLIERS = 120      # below this, "no table found"
 # Gate the plane height: the detected top must lie within this band of the
 # known table top. Prevents locking onto the floor or a wall ledge.
 PLANE_Z_TOLERANCE = 0.15     # [m] around TABLE_TOP_Z_WORLD

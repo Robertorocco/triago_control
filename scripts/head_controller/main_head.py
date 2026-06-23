@@ -103,6 +103,7 @@ class HeadPerceptionNode(Node):
         self._camera_warned = False
         # Last TF-derived camera pose (for the FK-vs-TF cross-check diagnostic).
         self._last_tf_pos = None
+        self._last_tf_R = None
         self._last_depth_frame = None
 
         # --- Timers ----------------------------------------------------
@@ -183,6 +184,7 @@ class HeadPerceptionNode(Node):
         if R_cam_base is None:
             return
         self._last_tf_pos = t_cam_base
+        self._last_tf_R = R_cam_base
         self._last_depth_frame = frame_id
 
         # One-shot diagnostic: confirm camera placement & data shapes.
@@ -297,9 +299,10 @@ class HeadPerceptionNode(Node):
             fk_R, fk_t = self.kin.get_frame_in_base(self._last_depth_frame)
             tf_t = self._last_tf_pos
             if fk_t is not None:
-                diag += (f"\n       [XFORM] TF cam={np.round(tf_t,3)}  "
-                         f"FK cam={np.round(fk_t,3)}  "
-                         f"dPos={np.round(tf_t - fk_t,3)}")
+                tf_rpy = np.degrees(Rot.from_matrix(self._last_tf_R).as_euler("xyz"))
+                fk_rpy = np.degrees(Rot.from_matrix(fk_R).as_euler("xyz"))
+                diag += (f"\n       [XFORM] TF cam={np.round(tf_t,3)} rpy={np.round(tf_rpy,1)}  "
+                         f"FK cam={np.round(fk_t,3)} rpy={np.round(fk_rpy,1)}")
             else:
                 diag += f"\n       [XFORM] TF cam={np.round(tf_t,3)}  (FK: frame not in model)"
         if r.plane_centroid is not None:
