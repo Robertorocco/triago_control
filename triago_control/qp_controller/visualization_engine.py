@@ -159,7 +159,28 @@ class VisualizationEngine:
                     self.cmodel.geometryObjects[box_id].overrideMaterial = True
             self.meshcat_reload_pending = True
 
-    def _run_viz(self):
+    def restore_object_color(self, arm_side, color, col_manager):
+        # Inverse of paint_grasp_intent: drop the orange override so the cylinder
+        # and gripper revert to their original materials (thread-safe).
+        self.node.get_logger().info(
+            f"\033[92m[MESHCAT] Restoring {color} + {arm_side} gripper original color (released).\033[0m")
+        if self.viz_meshcat is None:
+            return
+        cyl_id = col_manager.red_cyl_id if color == "red" else col_manager.blue_cyl_id
+        default = np.array([1.0, 0.0, 0.0, 1.0]) if color == "red" else np.array([0.0, 0.0, 1.0, 1.0])
+
+        with self.meshcat_lock:
+            if cyl_id < len(self.cmodel.geometryObjects):
+                self.cmodel.geometryObjects[cyl_id].meshColor = default
+                self.cmodel.geometryObjects[cyl_id].overrideMaterial = False
+            for geom in self.vmodel.geometryObjects:
+                if f"gripper_{arm_side}" in geom.name:
+                    geom.overrideMaterial = False
+            # Restore the gripper collision box to its normal (visible) state.
+            box_id = col_manager.gripper_box_ids.get(arm_side)
+            if box_id is not None and box_id < len(self.cmodel.geometryObjects):
+                self.cmodel.geometryObjects[box_id].overrideMaterial = False
+            self.meshcat_reload_pending = True
         # SOLE owner of Meshcat WebSocket calls: reload on demand, then display LIVE q.
         while True:
             q = self._q_provider() if self._q_provider is not None else None

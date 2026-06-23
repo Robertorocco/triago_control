@@ -412,7 +412,14 @@ The `main_shared_autonomy.py` node implements:
 | `GRASP_CLOSE` → `LIFT` | Sends `ATTACH_*` (re-parents cylinder as a real arm link in the QP collision world) and **clears** the gripper↔cylinder CBF bypass (`ignore_cbf="None"`) so the held cylinder now actively avoids the environment — it is treated as a link of the arm chain, with the handler's 3 s barrier ramp. |
 | `LIFT` | Slow blind vertical lift: `LIFT_VELOCITY=0.025 m/s × LIFT_DURATION=2.0 s = 5 cm` clear of the table, then → `HOLDING`. |
 | `HOLDING` | Shared autonomy **resumes**: `_holding` passes the outer-loop policy (`pi_max`) straight through, so the user can drive the loaded gripper toward any remaining goal and the belief estimator keeps predicting. **PRE_GRASP is unreachable while holding** (no second grasp with the same gripper). A console banner announces available goals. |
-| Release | A trigger pull (or console `OPEN`) in HOLDING → `_release_object()`: opens gripper, detaches the Gazebo plugin weld, resets to `SHARED_AUTONOMY` as if freshly started (accounting for the now-placed cylinder). **No dedicated PLACE phase.** |
+| Release | A trigger pull (or console `OPEN`) in HOLDING → `_release_object()`: opens gripper, detaches the Gazebo plugin weld, **publishes `DETACH_<arm>_<color>`** (QP-side detach), and resets to `SHARED_AUTONOMY` as if freshly started (accounting for the now-placed cylinder). **No dedicated PLACE phase.** |
+
+**QP-side detach** (inverse of `ATTACH_`, added in `shared_autonomy_handler` + `collision_manager` + `visualization_engine`):
+- `DETACH_<arm>_<color>` → `pending_detach`, processed in the QP loop.
+- `CollisionManager.detach_object` re-parents the cylinder geometry back to the **world** (joint 0), frozen at its current world pose (stops following the wrist). Collision pairs are kept (valid for a static obstacle).
+- The cylinder is dropped from `attached_objects`/adjacency, and the attach **barrier ramp is re-armed** (`attached_time[cyl_id]=now`) so the re-engaged gripper↔cylinder CBF pair ramps in smoothly over `ATTACH_RAMP_S` instead of spiking (gripper is overlapping the just-released cylinder).
+- `VisualizationEngine.restore_object_color` clears the orange Meshcat override (cylinder + gripper revert to original material). RViz auto-reverts (grey rendering is keyed on `attached_objects`).
+- **Known limitation**: no Gazebo→twin pose sync, so the QP-twin cylinder freezes at the release pose (matches placement-on-platform; a mid-air drop won't fall in the twin).
 
 ### 10.3 Belief exclusion rules
 
@@ -424,9 +431,13 @@ update and `blend_policies`, and never returns it from `get_active_goal` — but
 
 ### 10.4 RViz / visualization
 
-Goal frames (`goal_<key>` TF) and the predictive-gripper markers are published during
-`SHARED_AUTONOMY`, `PRE_GRASP` **and `HOLDING`** for every non-excluded goal, so `goal_Platform_Place`
-appears in RViz as soon as a cylinder is held. Excluded goals stop broadcasting their frame.
+Goal poses are drawn as **belief-opacity gripper markers** (ns `goal_poses`), one per goal,
+color-coded by family (Red reddish, Blue bluish, Platform yellow). Opacity is a continuous ramp
+`0.2 + 0.6·belief` (→ 0.8 at belief 1, 0.2 at belief 0), so low/zero-belief goals (the
+just-grasped cylinder, or the Platform while empty) fade out automatically — no state-machine viz
+logic, and nothing goes stale. This **replaced** the per-goal TF frames; only the **active goal**
+still broadcasts a precise TF frame (`goal_<active_key>`) for pose debugging. The predictive
+trajectory grippers (ns `policy_grippers`) are unchanged.
 
 ---
 

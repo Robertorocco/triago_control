@@ -364,6 +364,12 @@ class SharedControlNode(Node):
         self.pub_gripper_cmd.publish(String(data=f"CLOSE_{arm.upper()}_0.7000"))
         # Detach the Gazebo plugin weld.
         self._plugin_detach(arm)
+        # Detach the QP-side collision/visual re-parenting (cylinder back to world,
+        # Meshcat un-oranged, barrier re-engages smoothly). Needs the held color,
+        # so do this BEFORE clearing grasped_color below.
+        if self.grasped_color is not None:
+            self.pub_gripper_cmd.publish(
+                String(data=f"DETACH_{arm.upper()}_{self.grasped_color.upper()}"))
 
         # Reset the grasp state machine back to the start phase.
         self.grasp_sm._transition("SHARED_AUTONOMY")
@@ -801,11 +807,14 @@ class SharedControlNode(Node):
 
             self.publish_visualizations(trajectory_data, self.current_T_EE, active_v_geo)
 
-            for goal_key in self.target_keys:
-                if goal_key in excluded:
-                    continue
-                T_goal_tf = self.goal_set.get_dynamic_goal_pose(self.current_T_EE, goal_key)
-                self.broadcast_goal_frame(goal_key, T_goal_tf)
+            # Goal poses as belief-opacity gripper markers (replaces the per-goal
+            # TF frames, which could not fade and went stale when excluded). Low /
+            # zero-belief goals fade toward 0.2 opacity, decluttering RViz.
+            beliefs = self.belief_estimator.get_beliefs()
+            self.publish_goal_pose_markers(beliefs)
+
+            # Keep a single precise TF frame on the active goal for pose debugging.
+            self.broadcast_goal_frame(self.active_goal_key, T_active_goal)
 
             self.publish_inference_state(ee_policies, user_policies)
 
@@ -832,24 +841,25 @@ class SharedControlNode(Node):
 
     # --- Core Mathematical Functions ---
 
-    def create_gripper_markers(self, T_pose, opacity, step_index, now):
+    def create_gripper_markers(self, T_pose, opacity, step_index, now, ns="policy_grippers", rgb=(0.0, 1.0, 0.0)):
         """Builds a 3-part generic gripper with X as the approach axis."""
         markers = []
         p_center = T_pose[:3, 3]
         R_mat = T_pose[:3, :3]
         quat = R.from_matrix(R_mat).as_quat()
+        cr, cg, cb = rgb
 
         base = Marker()
         base.header.frame_id = "base_footprint"
         base.header.stamp = now
-        base.ns = "policy_grippers"
+        base.ns = ns
         base.id = step_index * 3
         base.type = Marker.CUBE
         base.action = Marker.ADD
         base.pose.position.x, base.pose.position.y, base.pose.position.z = p_center[0], p_center[1], p_center[2]
         base.pose.orientation.x, base.pose.orientation.y, base.pose.orientation.z, base.pose.orientation.w = quat[0], quat[1], quat[2], quat[3]
         base.scale.x, base.scale.y, base.scale.z = 0.02, 0.08, 0.03
-        base.color.r, base.color.g, base.color.b, base.color.a = 0.0, 1.0, 0.0, opacity
+        base.color.r, base.color.g, base.color.b, base.color.a = cr, cg, cb, opacity
         markers.append(base)
 
         offset_l = np.array([0.03, 0.035, 0.0])
@@ -965,7 +975,40 @@ class SharedControlNode(Node):
 
         self.pub_markers.publish(marker_array)
 
-    def _clear_goal_markers(self):
+    # Per-goal-family color (matches the world colors) for the belief-opacity markers.
+    GOAL_FAMILY_RGB = {
+        'Red': (1.0, 0.2, 0.2),
+        'Blue': (0.2, 0.4, 1.0),
+        'Platform': (1.0, 0.85, 0.0),  # yellow placement disk
+    }
+
+    @staticmethod
+    def _belief_to_opacity(belief):
+        """Continuous opacity ramp: 0.2 at belief 0 → 0.8 at belief 1 (clamped)."""
+        b = max(0.0, min(1.0, float(belief)))
+        return 0.2 + 0.6 * b
+
+    def publish_goal_pose_markers(self, beliefs, now=None):
+        """Draw every goal pose as a gripper marker whose opacity tracks its belief.
+
+        Replaces the per-goal TF frames (which cannot fade and went stale when a
+        goal was excluded). Every goal is drawn every tick, so low/zero-belief
+        goals (e.g. the just-grasped cylinder, or the Platform while empty) simply
+        fade toward 0.2 opacity instead of cluttering RViz — no state-machine viz
+        logic, just a continuous function of the belief estimator's output.
+        """
+        if now is None:
+            now = self.get_clock().now().to_msg()
+        marker_array = MarkerArray()
+        for i, goal_key in enumerate(self.target_keys):
+            family = goal_key.split('_')[0]
+            rgb = self.GOAL_FAMILY_RGB.get(family, (0.0, 1.0, 0.0))
+            opacity = self._belief_to_opacity(beliefs.get(goal_key, 0.0))
+            T_goal = self.goal_set.get_dynamic_goal_pose(self.current_T_EE, goal_key)
+            marker_array.markers.extend(
+                self.create_gripper_markers(T_goal, opacity, i, now,
+                                            ns="goal_poses", rgb=rgb))
+        self.pub_markers.publish(marker_array)
         """Wipe all goal/prediction markers (DELETEALL) — called once on grasp."""
         clear = MarkerArray()
         m = Marker()

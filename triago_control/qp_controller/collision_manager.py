@@ -318,6 +318,37 @@ class CollisionManager:
 
         return added_names, skipped_names, adjacency
 
+    def detach_object(self, cyl_id, current_q):
+        """Re-parent a previously-attached cylinder back to the world (inverse of attach).
+
+        Freezes the cylinder at its CURRENT world pose (read from the live
+        geometry data) and re-parents it onto the universe joint (id 0), so it
+        becomes a static obstacle again exactly where it was released — it stops
+        following the wrist. The collision pairs created at attach time are kept
+        (they are all valid for a static obstacle); only the parentJoint and
+        placement change, mirroring attach_object_visually.
+
+        The caller is responsible for dropping the cylinder from the attached_*
+        bookkeeping and (optionally) restarting the barrier ramp for a smooth
+        re-engagement of the gripper<->cylinder pair.
+        """
+        # Make sure oMg reflects the current configuration before snapshotting.
+        pin.updateGeometryPlacements(self.model, self.data, self.cmodel, self.cdata, current_q)
+        world_pose = self.cdata.oMg[cyl_id].copy()
+
+        geom = self.cmodel.geometryObjects[cyl_id]
+        # parentJoint 0 == universe, so the geometry placement IS the world pose.
+        geom.placement = world_pose
+        geom.parentJoint = 0
+
+        # Rebuild cdata for the (unchanged-size) pair set and revalidate so the
+        # same control tick can query distances without a stale array.
+        self.cdata = self.cmodel.createData()
+        for req in self.cdata.distanceRequests:
+            req.enable_nearest_points = True
+        pin.updateGeometryPlacements(self.model, self.data, self.cmodel, self.cdata, current_q)
+        pin.computeDistances(self.cmodel, self.cdata)
+
     def compute_softmin_jacobian(self, current_v, idx_right, idx_left,
                                  margin_targets, attached_objs, attached_adjacency,
                                  ignored_targets, publish_counter=0,

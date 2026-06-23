@@ -51,6 +51,7 @@ class SharedAutonomyHandler:
         self.attached_time = {}                 # {cyl_id: attach timestamp} for the barrier ramp
         self.grasp_margin_targets = {}          # {cyl_geom_id: negative margin}
         self.pending_attach = None              # (arm_side, color) processed in the QP loop
+        self.pending_detach = None              # (arm_side, color) processed in the QP loop
 
         # --- SUBSCRIBERS ---
         self.node.create_subscription(String, '/shared_autonomy/gripper_cmd', self.gripper_cmd_callback, 10)
@@ -92,6 +93,11 @@ class SharedAutonomyHandler:
             parts = cmd.split('_')
             # Defer to the QP loop: re-parenting needs the freshly-updated kinematics
             self.pending_attach = (parts[1].lower(), parts[2].lower())
+        elif cmd.startswith("DETACH_"):
+            parts = cmd.split('_')
+            # Defer to the QP loop: reading the cylinder's live world pose needs
+            # the freshly-updated kinematics (same reason as ATTACH).
+            self.pending_detach = (parts[1].lower(), parts[2].lower())
 
     def ignore_col_callback(self, msg):
         # Dynamically add/remove targets from the CBF bypass set (+/-/CLEAR protocol).
@@ -202,6 +208,41 @@ class SharedAutonomyHandler:
 
         # 3. Update Meshcat visuals (opaque orange) via the thread-safe viz engine
         self.viz.paint_grasp_intent(arm_side, color, self.col, opaque=True)
+
+    def detach_object_visually(self, arm_side, color):
+        # Inverse of attach: release a carried cylinder back into the world.
+        self.node.get_logger().info(
+            f"\033[93m[TOPOLOGY] Detaching {color} cylinder from {arm_side} gripper.\033[0m")
+        cyl_id = self.col.red_cyl_id if color == "red" else self.col.blue_cyl_id
+
+        if cyl_id not in self.attached_objects:
+            self.node.get_logger().warn(
+                f"[TOPOLOGY] {color} cylinder is not attached — nothing to detach.")
+            return
+
+        # 1. RE-PARENT GEOMETRY BACK TO THE WORLD (frozen at the release pose).
+        #    Mirrors attach_object_visually: only parentJoint/placement change, so
+        #    distances, nearest points and the pair set stay continuous.
+        self.col.detach_object(cyl_id, self.kin.current_q)
+
+        # 2. Drop the payload bookkeeping so the SoftMin stops treating the
+        #    cylinder as a fused arm link (adjacency exclusion no longer applies).
+        self.attached_objects.discard(cyl_id)
+        self.attached_object_arm.pop(cyl_id, None)
+        self.attached_relative_transforms.pop(cyl_id, None)
+        self.attached_adjacency.pop(cyl_id, None)
+
+        # 3. SMOOTH RE-ENGAGEMENT: the gripper is still overlapping the just-released
+        #    cylinder, so re-arm the barrier ramp (same machinery as attach). The
+        #    gripper<->cylinder pair starts relaxed and the true safety margin is
+        #    restored linearly over ATTACH_RAMP_S as the arm retreats — no spike.
+        self.attached_time[cyl_id] = time.time()
+
+        # 4. Restore the original Meshcat colors (un-orange cylinder + gripper).
+        self.viz.restore_object_color(arm_side, color, self.col)
+        self.node.get_logger().info(
+            f"\033[92m[TOPOLOGY OK] {color} cylinder released to the world; "
+            f"barrier re-engaging smoothly over {self.ATTACH_RAMP_S:.1f}s.\033[0m")
 
     def get_attach_ramp_shifts(self):
         """Per-attached-cylinder distance shift for the smooth barrier ramp.

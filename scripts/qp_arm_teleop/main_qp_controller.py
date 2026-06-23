@@ -315,6 +315,15 @@ class SafetyQPController(Node):
             except Exception as e:
                 self.get_logger().warn(f"[TOPOLOGY] Attach failed: {e}")
 
+        # --- Deferred detachment (needs fresh oMi / oMg to freeze release pose) ---
+        if self.hri.pending_detach is not None:
+            arm_side, color = self.hri.pending_detach
+            self.hri.pending_detach = None
+            try:
+                self.hri.detach_object_visually(arm_side, color)
+            except Exception as e:
+                self.get_logger().warn(f"[TOPOLOGY] Detach failed: {e}")
+
         # --- Grasp contact distance telemetry ---
         self.hri.publish_contact_distances()
 
