@@ -137,7 +137,7 @@ class PerceptionVisualizer:
             txt.pose.position.z = float(obj.center[2] + obj.height / 2.0 + 0.05)
             txt.scale.z = 0.04
             txt.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=1.0)
-            txt.text = f"{obj.label}\nr={obj.radius*100:.1f}cm h={obj.height*100:.1f}cm"
+            txt.text = f"{obj.label}\nr={obj.radius*100:.1f}cm h={obj.height*100:.1f}cm\nconf={obj.confidence*100:.0f}% (cov {obj.arc_coverage*100:.0f}%)"
             arr.markers.append(txt)
 
         # --- Camera look-at ray ----------------------------------------

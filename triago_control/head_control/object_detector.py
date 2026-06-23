@@ -40,6 +40,9 @@ class DetectedObject:
     axis: np.ndarray = field(default_factory=lambda: np.array([0.0, 0.0, 1.0]))
     mean_rgb: np.ndarray = field(default_factory=lambda: np.zeros(3))
     n_points: int = 0
+    arc_coverage: float = 0.0               # [0..1] fraction of circumference seen
+    fit_rms: float = 0.0                    # [m] RMS radial residual of the circle fit
+    confidence: float = 0.0                 # [0..1] overall estimation confidence
 
 
 class ObjectDetector:
@@ -156,6 +159,27 @@ class ObjectDetector:
         if not (cfg.CYL_MIN_HEIGHT <= height <= cfg.CYL_MAX_HEIGHT):
             return None
 
+        # --- Estimation-quality metrics --------------------------------
+        # Arc coverage: how much of the 360 deg circumference the points span.
+        # Computed by binning the angle of each point about the fitted centre.
+        # A near-full ring (multi-view accumulation) -> ~1.0; a single-view
+        # arc -> ~0.3-0.5. This is the most honest "confidence" signal: it
+        # directly measures how much of the object we have actually observed.
+        rel = xy - center_xy
+        ang = np.arctan2(rel[:, 1], rel[:, 0])              # [-pi, pi]
+        n_bins = 36                                         # 10 deg bins
+        bins = ((ang + np.pi) / (2 * np.pi) * n_bins).astype(int) % n_bins
+        arc_coverage = float(np.unique(bins).size) / n_bins
+
+        # Fit residual: RMS of |radial - radius| (lower = cleaner circle).
+        radial_about_fit = np.linalg.norm(rel, axis=1)
+        fit_rms = float(np.sqrt(np.mean((radial_about_fit - radius) ** 2)))
+
+        # Overall confidence: coverage is primary, penalised by fit error.
+        # fit_rms ~ a few mm on a clean object; normalise by 5mm.
+        rms_quality = float(np.exp(-fit_rms / 0.005))       # 1 at 0mm, ~0.14 at 1cm
+        confidence = float(np.clip(arc_coverage * rms_quality, 0.0, 1.0))
+
         color_name, mean_rgb = ObjectDetector._classify_color(cols)
         label = f"{color_name}_cylinder" if color_name != "unknown" else "unknown_object"
 
@@ -168,6 +192,9 @@ class ObjectDetector:
             axis=plane.normal.copy(),
             mean_rgb=mean_rgb,
             n_points=len(pts),
+            arc_coverage=arc_coverage,
+            fit_rms=fit_rms,
+            confidence=confidence,
         )
 
     @staticmethod

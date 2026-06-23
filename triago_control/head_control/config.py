@@ -103,14 +103,29 @@ LOOKAT_ALIGNED_DEG = 4.0
 # A single viewpoint sees the table top fine, but a slow sweep fills occluded
 # regions and lets temporal smoothing average out depth noise. Disable if you
 # want a static head.
-# NOTE: Disabled during viewpoint-stabilisation debugging. The posture target
-# now pins a good observation pose; re-enable once detection is solid.
-ENABLE_SCAN = False
-SCAN_AMPLITUDE_X = 0.03      # [m] very small sweep (±3cm along table X)
-SCAN_AMPLITUDE_Y = 0.04      # [m] very small sweep (±4cm along table Y)
-SCAN_PERIOD_X = 14.0         # [s] period of the X oscillation (slower = easier to track)
-SCAN_PERIOD_Y = 9.0          # [s] period of the Y oscillation (coprime-ish ->
+# NOTE: Re-enabled now that accumulation is active — head motion FEEDS the
+# voxel map, letting the camera observe the full circumference of each cylinder
+# and fill occluded table regions. The high slack weight (500) keeps look-at
+# tracking the moving target tightly.
+ENABLE_SCAN = True
+SCAN_AMPLITUDE_X = 0.05      # [m] sweep half-extent along table X (forward)
+SCAN_AMPLITUDE_Y = 0.10      # [m] sweep half-extent along table Y (left/right)
+SCAN_PERIOD_X = 12.0         # [s] period of the X oscillation
+SCAN_PERIOD_Y = 8.0          # [s] period of the Y oscillation (coprime-ish ->
                              #     Lissajous coverage of the surface)
+
+# =============================================================================
+# 5b. MULTI-VIEW ACCUMULATION  (fuse frames from many head poses into one map)
+# =============================================================================
+# Turns partial single-view arcs into near-full rings (accurate centre/radius)
+# and fills occluded table regions. Set False to revert to single-frame mode.
+ENABLE_ACCUMULATION = True
+VOXEL_MAP_LEAF = 0.008       # [m] fusion voxel size (8mm)
+VOXEL_MAP_DECAY = 0.92       # per perception frame (~1.6s half-life @5Hz);
+                             #   lets MOVED objects fade instead of smearing.
+VOXEL_MAP_W_MIN = 0.40       # prune voxels whose weight decays below this
+VOXEL_MAP_W_MAX = 25.0       # cap weight so the map stays responsive
+VOXEL_MAP_QUERY_W = 1.0      # min weight for a voxel to be used in detection
 
 # =============================================================================
 # 6. POINT-CLOUD DEPROJECTION  (depth image -> 3D points)

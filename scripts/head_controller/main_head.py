@@ -220,10 +220,14 @@ class HeadPerceptionNode(Node):
         tel = Float64MultiArray()
         n_crop = len(result.cropped_points) if result.cropped_points is not None else 0
         plane_z = result.plane.height if result.plane is not None else float("nan")
+        # Per-colour confidence (so the plotter can show estimation quality).
+        red_conf = next((o.confidence for o in result.objects if o.color_name == "red"), 0.0)
+        blue_conf = next((o.confidence for o in result.objects if o.color_name == "blue"), 0.0)
         tel.data = [
             float(result.n_raw), float(n_crop), float(plane_z),
             float(self.controller.last_angle_deg), float(self.controller.last_slack_norm),
-            float(result.proc_ms),
+            float(result.proc_ms), float(red_conf), float(blue_conf),
+            float(result.map_size),
         ]
         self.pub_telemetry.publish(tel)
 
@@ -286,7 +290,8 @@ class HeadPerceptionNode(Node):
         )
         obj_txt = ", ".join(
             f"{o.label}@({o.center[0]:.2f},{o.center[1]:.2f},{o.center[2]:.2f}) "
-            f"r={o.radius*100:.1f}cm h={o.height*100:.1f}cm"
+            f"r={o.radius*100:.1f}cm h={o.height*100:.1f}cm "
+            f"[cov={o.arc_coverage*100:.0f}% conf={o.confidence*100:.0f}%]"
             for o in r.objects
         ) or "none"
 
@@ -312,7 +317,7 @@ class HeadPerceptionNode(Node):
         self.get_logger().info(
             head_line + "\n"
             f"       [PERCEPTION] raw={r.n_raw} crop={len(r.cropped_points) if r.cropped_points is not None else 0} "
-            f"| {plane_txt} | proc={r.proc_ms:.1f} ms\n"
+            f"map={r.map_size} | {plane_txt} | proc={r.proc_ms:.1f} ms\n"
             f"       [OBJECTS] {obj_txt}\n"
             f"       [JOINTS] {joint_info}" + diag)
 

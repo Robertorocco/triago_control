@@ -23,6 +23,7 @@ import numpy as np
 import triago_control.head_control.config as cfg
 from triago_control.head_control.table_segmenter import TableSegmenter
 from triago_control.head_control.object_detector import ObjectDetector, DetectedObject
+from triago_control.head_control.voxel_map import VoxelMap
 
 
 @dataclass
@@ -34,6 +35,7 @@ class PerceptionResult:
     above_points: np.ndarray = None         # (M,3) above-plane points (for viz)
     plane_centroid: np.ndarray = None       # (3,) centroid of plane inliers (debug)
     n_raw: int = 0
+    map_size: int = 0                       # voxels in the fused map (0 if off)
     proc_ms: float = 0.0
 
 
@@ -42,6 +44,7 @@ class PerceptionPipeline:
         self.segmenter = TableSegmenter()
         self.detector = ObjectDetector()
         self._tracked = []                  # persistent EMA-smoothed objects
+        self.voxel_map = VoxelMap() if cfg.ENABLE_ACCUMULATION else None
 
     # ------------------------------------------------------------------ #
     # Frame transform                                                     #
@@ -82,14 +85,26 @@ class PerceptionPipeline:
         # 1. Optical -> base, then crop to the table region.
         pts_base = self._transform_to_base(points_optical, R_cam_base, t_cam_base)
         pts_c, cols_c = self._crop(pts_base, colors)
-        res.cropped_points = pts_c
-        res.cropped_colors = cols_c
-        if len(pts_c) < cfg.PLANE_MIN_INLIERS:
+
+        # 1b. MULTI-VIEW FUSION. Integrate this frame's cropped points into the
+        # persistent voxel map and run detection on the FUSED cloud, so the
+        # head's motion progressively reveals the full circumference of each
+        # cylinder and the occluded table. (Single-frame mode if disabled.)
+        if self.voxel_map is not None:
+            self.voxel_map.integrate(pts_c, cols_c)
+            work_pts, work_cols = self.voxel_map.get_cloud()
+            res.map_size = self.voxel_map.size()
+        else:
+            work_pts, work_cols = pts_c, cols_c
+
+        res.cropped_points = work_pts          # what RViz shows = the live model
+        res.cropped_colors = work_cols
+        if len(work_pts) < cfg.PLANE_MIN_INLIERS:
             res.proc_ms = (time.perf_counter() - t0) * 1e3
             return res
 
         # 2. Table plane.
-        plane, inlier_mask = self.segmenter.segment(pts_c)
+        plane, inlier_mask = self.segmenter.segment(work_pts)
         res.plane = plane
         if plane is None:
             res.proc_ms = (time.perf_counter() - t0) * 1e3
@@ -98,16 +113,16 @@ class PerceptionPipeline:
         # Debug: centroid of the plane inliers. If the cloud is correctly
         # placed this should sit near the known table centre (x~1.0, y~0.0).
         if inlier_mask is not None and inlier_mask.any():
-            res.plane_centroid = pts_c[inlier_mask].mean(axis=0)
+            res.plane_centroid = work_pts[inlier_mask].mean(axis=0)
 
         # 3. Above-plane slab = candidate objects.
-        sd = plane.signed_distance(pts_c)
+        sd = plane.signed_distance(work_pts)
         above = (
             (sd > cfg.OBJECT_MIN_HEIGHT_ABOVE_PLANE)
             & (sd < cfg.OBJECT_MAX_HEIGHT_ABOVE_PLANE)
         )
-        above_pts = pts_c[above]
-        above_cols = cols_c[above]
+        above_pts = work_pts[above]
+        above_cols = work_cols[above]
         res.above_points = above_pts
 
         # 4. Cluster + fit + classify.

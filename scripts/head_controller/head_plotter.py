@@ -72,6 +72,9 @@ class HeadPlotterNode(Node):
         self.plane_z = deque(maxlen=self.MAXLEN)
         self.look_err = deque(maxlen=self.MAXLEN)
         self.slack = deque(maxlen=self.MAXLEN)
+        self.conf_red = deque(maxlen=self.MAXLEN)
+        self.conf_blue = deque(maxlen=self.MAXLEN)
+        self.map_size = deque(maxlen=self.MAXLEN)
 
         # --- ROS subscriptions -----------------------------------------
         # MarkerArray -> detected cylinder poses; telemetry -> scalar quality.
@@ -82,7 +85,8 @@ class HeadPlotterNode(Node):
         self.get_logger().info("Head Plotter started. Waiting for /head_perception/markers...")
 
     def _telemetry_cb(self, msg: Float64MultiArray):
-        # [n_raw, n_crop, plane_z, look_err_deg, slack, proc_ms]
+        # [n_raw, n_crop, plane_z, look_err_deg, slack, proc_ms,
+        #  red_conf, blue_conf, map_size]
         if len(msg.data) < 6:
             return
         t = time.time() - self.start_time
@@ -91,6 +95,10 @@ class HeadPlotterNode(Node):
             self.proc_ms.append((t, msg.data[5]))
             self.look_err.append((t, msg.data[3]))
             self.slack.append((t, msg.data[4]))
+            if len(msg.data) >= 9:
+                self.conf_red.append((t, msg.data[6] * 100.0))
+                self.conf_blue.append((t, msg.data[7] * 100.0))
+                self.map_size.append((t, msg.data[8]))
 
     def _markers_cb(self, msg: MarkerArray):
         t = time.time() - self.start_time
@@ -144,20 +152,23 @@ def main():
 
     # --- Setup plots ---------------------------------------------------
     plt.ion()
-    fig, axs = plt.subplots(3, 2, figsize=(14, 10))
+    fig, axs = plt.subplots(4, 2, figsize=(14, 12))
     fig.canvas.manager.set_window_title("Head Perception — Live Dashboard")
 
     # Subplot layout:
     # [0,0] XY top-down positions     [0,1] Position error over time
     # [1,0] Radius over time          [1,1] Height over time
-    # [2,0] Plane Z over time         [2,1] Processing cloud size over time
+    # [2,0] Plane Z over time         [2,1] Estimation confidence over time
+    # [3,0] Fused map size over time  [3,1] Raw cloud size over time
 
     ax_xy = axs[0, 0]
     ax_err = axs[0, 1]
     ax_rad = axs[1, 0]
     ax_hgt = axs[1, 1]
     ax_plane = axs[2, 0]
-    ax_cloud = axs[2, 1]
+    ax_conf = axs[2, 1]
+    ax_map = axs[3, 0]
+    ax_cloud = axs[3, 1]
 
     # --- Static elements -----------------------------------------------
     # XY plot: table footprint + GT positions
@@ -221,8 +232,25 @@ def main():
     line_plane, = ax_plane.plot([], [], "g-", linewidth=2, label="Detected")
     ax_plane.legend(loc="upper right", fontsize=8)
 
-    # Cloud size (proxy for perception quality / coverage)
-    ax_cloud.set_title("Raw Cloud Size (perception input)")
+    # Confidence over time (estimation quality = arc coverage x fit quality)
+    ax_conf.set_title("Estimation Confidence (arc coverage x fit quality)")
+    ax_conf.set_ylabel("Confidence [%]")
+    ax_conf.set_xlabel("Time [s]")
+    ax_conf.grid(True, alpha=0.3)
+    ax_conf.set_ylim(0, 105)
+    line_conf_r, = ax_conf.plot([], [], "r-", linewidth=1.5, label="Red")
+    line_conf_b, = ax_conf.plot([], [], "b-", linewidth=1.5, label="Blue")
+    ax_conf.legend(loc="upper right", fontsize=8)
+
+    # Fused voxel-map size (grows as accumulation builds the model)
+    ax_map.set_title("Fused Map Size (accumulated voxels)")
+    ax_map.set_ylabel("Voxels")
+    ax_map.set_xlabel("Time [s]")
+    ax_map.grid(True, alpha=0.3)
+    line_map, = ax_map.plot([], [], "darkorange", linewidth=1.5)
+
+    # Raw cloud size (per-frame perception input)
+    ax_cloud.set_title("Raw Cloud Size (per-frame input)")
     ax_cloud.set_ylabel("Points")
     ax_cloud.set_xlabel("Time [s]")
     ax_cloud.grid(True, alpha=0.3)
@@ -266,6 +294,9 @@ def main():
 
                 plane_list = list(node.plane_z)
                 cloud_list = list(node.cloud_size)
+                conf_r_list = list(node.conf_red)
+                conf_b_list = list(node.conf_blue)
+                map_list = list(node.map_size)
 
             # Update line data
             line_err_r.set_data(rt, r_err)
@@ -276,17 +307,21 @@ def main():
             line_hgt_b.set_data(bt, b_hgt)
             line_plane.set_data(t_list[:len(plane_list)], plane_list)
             if cloud_list:
-                ct = [p[0] for p in cloud_list]
-                cn = [p[1] for p in cloud_list]
-                line_cloud.set_data(ct, cn)
+                line_cloud.set_data([p[0] for p in cloud_list], [p[1] for p in cloud_list])
+            if conf_r_list:
+                line_conf_r.set_data([p[0] for p in conf_r_list], [p[1] for p in conf_r_list])
+            if conf_b_list:
+                line_conf_b.set_data([p[0] for p in conf_b_list], [p[1] for p in conf_b_list])
+            if map_list:
+                line_map.set_data([p[0] for p in map_list], [p[1] for p in map_list])
 
             # Auto-scale time axes
             window_lo = max(0, current_t - node.WINDOW)
-            for ax in (ax_err, ax_rad, ax_hgt, ax_plane, ax_cloud):
+            for ax in (ax_err, ax_rad, ax_hgt, ax_plane, ax_conf, ax_map, ax_cloud):
                 ax.set_xlim(window_lo, current_t + 1)
 
-            # Auto-scale Y axes
-            for ax in (ax_err, ax_rad, ax_hgt, ax_plane, ax_cloud):
+            # Auto-scale Y axes (confidence has a fixed 0-105 range)
+            for ax in (ax_err, ax_rad, ax_hgt, ax_plane, ax_map, ax_cloud):
                 ax.relim()
                 ax.autoscale_view(scalex=False, scaley=True)
 
