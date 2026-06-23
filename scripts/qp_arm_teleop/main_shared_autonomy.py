@@ -127,6 +127,13 @@ class SharedControlNode(Node):
         self.last_collision_time = 0.0
         self.max_data_age = 0.05
 
+        # --- Visualization rate decoupling ---
+        # The control loop runs at 100 Hz, but RViz marker/TF drawing does not need
+        # that rate — republishing every gripper marker at 100 Hz floods the marker
+        # topic and causes stutter/blink. Throttle the heavy drawing to ~20 Hz.
+        self.VIZ_DECIM = 5            # 100 Hz / 5 = 20 Hz marker refresh
+        self._viz_counter = 0
+
         # --- Bimanual Toggling ---
         self.active_arm = 'right'
 
@@ -263,7 +270,6 @@ class SharedControlNode(Node):
 
         # --- Visualization Infrastructure ---
         self.pub_markers = self.create_publisher(MarkerArray, '/shared_policy_markers', 10)
-        self._goal_markers_cleared = False  # latch so DELETEALL is sent once on grasp
         # Bug fix: this used to be assigned a second time later in __init__,
         # silently leaking the first TransformBroadcaster. Assigned exactly once.
         self.tf_broadcaster = TransformBroadcaster(self)
@@ -786,36 +792,43 @@ class SharedControlNode(Node):
         # placement goal appears the moment something is held.
         viz_active = self.grasp_sm.state in ("SHARED_AUTONOMY", "PRE_GRASP", "HOLDING")
         if viz_active and not np.allclose(self.current_T_EE, np.eye(4)):
-            self._goal_markers_cleared = False
-            visual_dt = 0.5
-            trajectory_data = []
+            # Heavy RViz drawing (gripper markers + goal TF) is throttled to ~20 Hz.
+            # Markers persist (no lifetime / no DELETEALL), so a lower refresh rate
+            # is smooth and flicker-free, and keeps the 100 Hz control loop light.
+            self._viz_counter += 1
+            if self._viz_counter >= self.VIZ_DECIM:
+                self._viz_counter = 0
 
-            active_v_geo = self.compute_v_geo(self.current_T_EE, T_active_goal)
-            T_cube_1 = self.integrate_twist(self.current_T_EE, target_twist, visual_dt)
-            trajectory_data.append((T_cube_1, target_twist))
+                visual_dt = 0.5
+                trajectory_data = []
+                active_v_geo = self.compute_v_geo(self.current_T_EE, T_active_goal)
+                T_cube_1 = self.integrate_twist(self.current_T_EE, target_twist, visual_dt)
+                trajectory_data.append((T_cube_1, target_twist))
 
-            sim_T_EE = T_cube_1
-            if in_free_space and valid_matrices:
-                for _ in range(1):
-                    visual_dt = visual_dt + 0.3
-                    T_sim_goal = self.goal_set.get_dynamic_goal_pose(sim_T_EE, self.active_goal_key)
-                    sim_v_geo = self.compute_v_geo(sim_T_EE, T_sim_goal)
-                    sim_twist = self.solve_local_policy(sim_v_geo, self.J_c, self.h_c)
-                    sim_T_next = self.integrate_twist(sim_T_EE, sim_twist, visual_dt)
-                    trajectory_data.append((sim_T_next, sim_twist))
-                    sim_T_EE = sim_T_next
+                sim_T_EE = T_cube_1
+                if in_free_space and valid_matrices:
+                    for _ in range(1):
+                        visual_dt = visual_dt + 0.3
+                        T_sim_goal = self.goal_set.get_dynamic_goal_pose(sim_T_EE, self.active_goal_key)
+                        sim_v_geo = self.compute_v_geo(sim_T_EE, T_sim_goal)
+                        sim_twist = self.solve_local_policy(sim_v_geo, self.J_c, self.h_c)
+                        sim_T_next = self.integrate_twist(sim_T_EE, sim_twist, visual_dt)
+                        trajectory_data.append((sim_T_next, sim_twist))
+                        sim_T_EE = sim_T_next
 
-            self.publish_visualizations(trajectory_data, self.current_T_EE, active_v_geo)
+                self.publish_visualizations(trajectory_data, self.current_T_EE, active_v_geo)
 
-            # Goal poses as belief-opacity gripper markers (replaces the per-goal
-            # TF frames, which could not fade and went stale when excluded). Low /
-            # zero-belief goals fade toward 0.2 opacity, decluttering RViz.
-            beliefs = self.belief_estimator.get_beliefs()
-            self.publish_goal_pose_markers(beliefs)
+                # Goal poses as belief-opacity gripper markers (replaces the per-goal
+                # TF frames, which could not fade and went stale when excluded). Low /
+                # zero-belief goals fade toward 0.2 opacity, decluttering RViz.
+                beliefs = self.belief_estimator.get_beliefs()
+                self.publish_goal_pose_markers(beliefs)
 
-            # Keep a single precise TF frame on the active goal for pose debugging.
-            self.broadcast_goal_frame(self.active_goal_key, T_active_goal)
+                # Keep a single precise TF frame on the active goal for pose debugging.
+                self.broadcast_goal_frame(self.active_goal_key, T_active_goal)
 
+            # Inference state (consumed by the haptic force manager) is lightweight
+            # Float64MultiArray traffic — keep it at the full control rate.
             self.publish_inference_state(ee_policies, user_policies)
 
         # --- 6. PUBLISH COMMAND TO ROBOT IN TEST MODE ---
@@ -1009,13 +1022,6 @@ class SharedControlNode(Node):
                 self.create_gripper_markers(T_goal, opacity, i, now,
                                             ns="goal_poses", rgb=rgb))
         self.pub_markers.publish(marker_array)
-        """Wipe all goal/prediction markers (DELETEALL) — called once on grasp."""
-        clear = MarkerArray()
-        m = Marker()
-        m.action = Marker.DELETEALL
-        clear.markers.append(m)
-        self.pub_markers.publish(clear)
-        self.get_logger().info("[VIZ] Object grasped — goal/prediction markers cleared.")
 
     def compute_v_geo(self, T_EE, T_goal):
         """Computes the LOCAL_WORLD_ALIGNED decoupled spatial velocity error with
