@@ -103,12 +103,17 @@ LOOKAT_ALIGNED_DEG = 4.0
 # A single viewpoint sees the table top fine, but a slow sweep fills occluded
 # regions and lets temporal smoothing average out depth noise. Disable if you
 # want a static head.
-# NOTE: STEPPED scan — the head jumps to a waypoint, settles, dwells (fusing
-# happens here while stationary), then jumps to the next. This guarantees the
-# velocity-gated accumulation gets clean, well-registered frames. The waypoints
-# are small look-at offsets across the table top (base frame, metres).
-ENABLE_SCAN = True
-SCAN_DWELL_S = 4.0           # [s] time parked at each waypoint
+# IMPORTANT — scan is OFF by design. Fusing depth across different head
+# ORIENTATIONS smears the map: the camera here only re-aims (it barely changes
+# POSITION), so multi-view adds no parallax benefit but stacks sub-degree
+# extrinsic error into a >1cm smear (plane jumps, cylinders stretch, phantom
+# objects). With the head STATIC, accumulation becomes pure noise-averaging at
+# one viewpoint -> clean, stable convergence onto the table.
+# Two future paths to genuine multi-view gain (both deliberate additions):
+#   (a) orbit the camera POSITION around the table (vary the head posture), or
+#   (b) ICP-register each frame to the map before fusing (drift-free fusion).
+ENABLE_SCAN = False
+SCAN_DWELL_S = 4.0           # [s] (unused while scan is off)
 SCAN_WAYPOINTS = [
     (0.00, 0.00),
     (0.08, 0.12),
