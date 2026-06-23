@@ -123,22 +123,23 @@ SCAN_WAYPOINTS = [
 ]
 
 # =============================================================================
-# 5b. MULTI-VIEW ACCUMULATION  (fuse frames from many head poses into one map)
+# 5b. MULTI-VIEW ACCUMULATION  (DISABLED — see note)
 # =============================================================================
-# Turns partial single-view arcs into fuller coverage and fills occluded table
-# regions, and averages out depth noise. Set False to revert to single-frame.
-ENABLE_ACCUMULATION = True
+# DISABLED by default. The single-frame pipeline is the proven, reliable path
+# (~2cm, stable). Naive voxel accumulation regressed it: at a FIXED camera
+# position it adds no parallax, and on the real depth stream it stacks
+# frame-to-frame depth variation into a multi-layer band that breaks plane
+# RANSAC (the "different heights / NO TABLE" failure). Genuine multi-view gain
+# requires either (a) orbiting the camera POSITION around the table, or (b)
+# ICP-registering each frame to the map before fusing — both deliberate future
+# features. The VoxelMap code is kept for that work.
+ENABLE_ACCUMULATION = False
 VOXEL_MAP_LEAF = 0.008       # [m] fusion voxel size (8mm)
-VOXEL_MAP_DECAY = 0.90       # per INTEGRATED frame (moved objects fade);
-                             #   decay only happens when we actually integrate.
+VOXEL_MAP_DECAY = 0.90       # per integrated frame
 VOXEL_MAP_W_MIN = 0.40       # prune voxels whose weight decays below this
 VOXEL_MAP_W_MAX = 25.0       # cap weight so the map stays responsive
 VOXEL_MAP_QUERY_W = 1.0      # min weight for a voxel to be used in detection
-# CRITICAL: only fuse a frame when the head is nearly stationary. Fusing while
-# moving smears the map (the table band exceeds the plane threshold -> NO TABLE,
-# and cylinders stretch vertically). EMA joint-velocity norm below this [rad/s]
-# counts as "settled".
-INTEGRATE_VEL_THRESH = 0.04
+INTEGRATE_VEL_THRESH = 0.04  # [rad/s] only fuse when head settled (if enabled)
 
 # =============================================================================
 # 6. POINT-CLOUD DEPROJECTION  (depth image -> 3D points)
