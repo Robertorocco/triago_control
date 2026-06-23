@@ -28,9 +28,11 @@ import numpy as np
 #    name, e.g.  --ros-args -p color_topic:=/my/color)
 # =============================================================================
 # Real TRIAGo head camera topics (RealSense D455, PAL-configured).
+# NOTE: depth is NOT aligned to color — it uses its own intrinsics/resolution.
+# We subscribe to the DEPTH camera_info for deprojection (not color).
 COLOR_TOPIC = "/gripper_head_camera_rgbd/color/image_raw"
 DEPTH_TOPIC = "/gripper_head_camera_rgbd/depth/image_raw"
-CAMERA_INFO_TOPIC = "/gripper_head_camera_rgbd/color/camera_info"
+CAMERA_INFO_TOPIC = "/gripper_head_camera_rgbd/depth/camera_info"
 
 # Optical frame of the head camera (must match the URDF / existing servo script).
 CAMERA_OPTICAL_FRAME = "gripper_head_camera_rgbd_color_optical_frame"
@@ -73,8 +75,8 @@ HEAD_JOINTS = [
 # =============================================================================
 # 4. LOOK-AT CONTROL  (point the camera optical +Z axis at the table)
 # =============================================================================
-LOOKAT_LAMBDA = 1.0          # proportional gain on the angular look-at error
-MAX_HEAD_VELOCITY = 0.20     # rad/s per joint (slow & safe)
+LOOKAT_LAMBDA = 2.0          # proportional gain on the angular look-at error
+MAX_HEAD_VELOCITY = 0.25     # rad/s per joint (moderate, allows tracking the scan)
 # Per-joint velocity-regularisation weights: heavier on proximal joints so the
 # coarse pointing is done by the wrist, keeping motion smooth and predictable.
 HEAD_JOINT_WEIGHTS = np.array([50.0, 40.0, 30.0, 10.0, 5.0, 1.0, 1.0])
@@ -94,10 +96,10 @@ LOOKAT_ALIGNED_DEG = 4.0
 # regions and lets temporal smoothing average out depth noise. Disable if you
 # want a static head.
 ENABLE_SCAN = True
-SCAN_AMPLITUDE_X = 0.12      # [m] sweep half-extent along table X (forward)
-SCAN_AMPLITUDE_Y = 0.18      # [m] sweep half-extent along table Y (left/right)
-SCAN_PERIOD_X = 11.0         # [s] period of the X oscillation
-SCAN_PERIOD_Y = 7.0          # [s] period of the Y oscillation (coprime-ish ->
+SCAN_AMPLITUDE_X = 0.06      # [m] sweep half-extent along table X (forward)
+SCAN_AMPLITUDE_Y = 0.10      # [m] sweep half-extent along table Y (left/right)
+SCAN_PERIOD_X = 14.0         # [s] period of the X oscillation (slower = easier to track)
+SCAN_PERIOD_Y = 9.0          # [s] period of the Y oscillation (coprime-ish ->
                              #     Lissajous coverage of the surface)
 
 # =============================================================================
