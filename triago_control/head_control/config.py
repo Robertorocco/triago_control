@@ -95,12 +95,12 @@ LOOKAT_ALIGNED_DEG = 4.0
 # A single viewpoint sees the table top fine, but a slow sweep fills occluded
 # regions and lets temporal smoothing average out depth noise. Disable if you
 # want a static head.
-# NOTE: Disabled for now — the scan was causing 8-18 deg oscillation because
-# the QP couldn't track the moving target fast enough. Re-enable once the
-# static look-at is validated and we need broader coverage.
-ENABLE_SCAN = False
-SCAN_AMPLITUDE_X = 0.06      # [m] sweep half-extent along table X (forward)
-SCAN_AMPLITUDE_Y = 0.10      # [m] sweep half-extent along table Y (left/right)
+# NOTE: Re-enabled with minimal amplitude — the high slack weight (500) ensures
+# the QP can track the gentle motion easily. The micro-scan improves EMA
+# averaging across slightly different viewpoints (noise reduction).
+ENABLE_SCAN = True
+SCAN_AMPLITUDE_X = 0.03      # [m] very small sweep (±3cm along table X)
+SCAN_AMPLITUDE_Y = 0.04      # [m] very small sweep (±4cm along table Y)
 SCAN_PERIOD_X = 14.0         # [s] period of the X oscillation (slower = easier to track)
 SCAN_PERIOD_Y = 9.0          # [s] period of the Y oscillation (coprime-ish ->
                              #     Lissajous coverage of the surface)
