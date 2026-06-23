@@ -74,10 +74,23 @@ class HeadPlotterNode(Node):
         self.slack = deque(maxlen=self.MAXLEN)
 
         # --- ROS subscriptions -----------------------------------------
-        # We subscribe to the MarkerArray to extract detected cylinder poses.
+        # MarkerArray -> detected cylinder poses; telemetry -> scalar quality.
         self.create_subscription(MarkerArray, "/head_perception/markers", self._markers_cb, 1)
+        self.create_subscription(Float64MultiArray, "/head_perception/telemetry",
+                                 self._telemetry_cb, 10)
 
         self.get_logger().info("Head Plotter started. Waiting for /head_perception/markers...")
+
+    def _telemetry_cb(self, msg: Float64MultiArray):
+        # [n_raw, n_crop, plane_z, look_err_deg, slack, proc_ms]
+        if len(msg.data) < 6:
+            return
+        t = time.time() - self.start_time
+        with self.lock:
+            self.cloud_size.append((t, msg.data[0]))
+            self.proc_ms.append((t, msg.data[5]))
+            self.look_err.append((t, msg.data[3]))
+            self.slack.append((t, msg.data[4]))
 
     def _markers_cb(self, msg: MarkerArray):
         t = time.time() - self.start_time
@@ -252,6 +265,7 @@ def main():
                 b_hgt = list(bd["h"])
 
                 plane_list = list(node.plane_z)
+                cloud_list = list(node.cloud_size)
 
             # Update line data
             line_err_r.set_data(rt, r_err)
@@ -261,6 +275,10 @@ def main():
             line_hgt_r.set_data(rt, r_hgt)
             line_hgt_b.set_data(bt, b_hgt)
             line_plane.set_data(t_list[:len(plane_list)], plane_list)
+            if cloud_list:
+                ct = [p[0] for p in cloud_list]
+                cn = [p[1] for p in cloud_list]
+                line_cloud.set_data(ct, cn)
 
             # Auto-scale time axes
             window_lo = max(0, current_t - node.WINDOW)
@@ -268,7 +286,7 @@ def main():
                 ax.set_xlim(window_lo, current_t + 1)
 
             # Auto-scale Y axes
-            for ax in (ax_err, ax_rad, ax_hgt, ax_plane):
+            for ax in (ax_err, ax_rad, ax_hgt, ax_plane, ax_cloud):
                 ax.relim()
                 ax.autoscale_view(scalex=False, scaley=True)
 

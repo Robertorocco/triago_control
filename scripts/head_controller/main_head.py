@@ -40,10 +40,15 @@ import time
 import numpy as np
 import rclpy
 from rclpy.node import Node
+from rclpy.time import Time
+from rclpy.duration import Duration
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray
 from sensor_msgs.msg import PointCloud2
 from visualization_msgs.msg import MarkerArray
+from scipy.spatial.transform import Rotation as Rot
+
+import tf2_ros
 
 import triago_control.head_control.config as cfg
 from triago_control.head_control.camera_interface import CameraInterface
@@ -73,6 +78,17 @@ class HeadPerceptionNode(Node):
         )
         self.pub_cloud = self.create_publisher(PointCloud2, "/head_perception/cloud", 1)
         self.pub_markers = self.create_publisher(MarkerArray, "/head_perception/markers", 1)
+        # Scalar telemetry for the plotter: [n_raw, n_crop, plane_z, look_err_deg,
+        # slack, proc_ms]. Lets the plotter show cloud size / quality directly.
+        self.pub_telemetry = self.create_publisher(
+            Float64MultiArray, "/head_perception/telemetry", 10
+        )
+
+        # --- TF2 (correct camera pose at the depth frame's timestamp) --
+        self.tf_buffer = tf2_ros.Buffer()
+        self.tf_listener = tf2_ros.TransformListener(self.tf_buffer, self)
+        self._tf_warned = False
+        self._diag_logged = False
 
         # --- Subscriptions ---------------------------------------------
         self.create_subscription(JointState, "/joint_states", self._joint_cb, 50)
@@ -150,14 +166,27 @@ class HeadPerceptionNode(Node):
         cloud = self.camera.get_point_cloud()
         if cloud is None:
             return
-        points_optical, colors, stamp = cloud
+        points_optical, colors, stamp, frame_id = cloud
         if stamp is None:
             stamp = self.get_clock().now().to_msg()
+        if not frame_id:
+            return
 
-        # Snapshot the camera pose so a concurrent FK can't mutate it mid-run.
-        T_cam_base = self.T_cam_base
+        # --- Correct transform: TF lookup of base <- depth_frame AT the depth
+        # frame's timestamp. This fixes both (a) the frame mismatch (color vs
+        # depth optical) and (b) the timing skew while the head moves. ----
+        R_cam_base, t_cam_base = self._lookup_transform(frame_id, stamp)
+        if R_cam_base is None:
+            return
 
-        result = self.pipeline.process(points_optical, colors, T_cam_base)
+        # One-shot diagnostic: confirm camera placement & data shapes.
+        if not self._diag_logged:
+            self.get_logger().info(
+                f"[DIAG] depth_frame='{frame_id}'  raw_pts={len(points_optical)}  "
+                f"cam_pos_base={np.round(t_cam_base, 3)}")
+            self._diag_logged = True
+
+        result = self.pipeline.process(points_optical, colors, R_cam_base, t_cam_base)
         self.latest_result = result
 
         # --- Publish PointCloud2 (cropped coloured cloud) --------------
@@ -168,9 +197,43 @@ class HeadPerceptionNode(Node):
             self.pub_cloud.publish(pc)
 
         # --- Publish markers -------------------------------------------
-        cam_pos_base = T_cam_base.translation
-        markers = self.viz.build(result, self.current_target, cam_pos_base, stamp)
+        markers = self.viz.build(result, self.current_target, t_cam_base, stamp)
         self.pub_markers.publish(markers)
+
+        # --- Publish scalar telemetry for the plotter ------------------
+        tel = Float64MultiArray()
+        n_crop = len(result.cropped_points) if result.cropped_points is not None else 0
+        plane_z = result.plane.height if result.plane is not None else float("nan")
+        tel.data = [
+            float(result.n_raw), float(n_crop), float(plane_z),
+            float(self.controller.last_angle_deg), float(self.controller.last_slack_norm),
+            float(result.proc_ms),
+        ]
+        self.pub_telemetry.publish(tel)
+
+    def _lookup_transform(self, frame_id, stamp):
+        """Return (R 3x3, t 3) for base_footprint <- frame_id at `stamp`.
+
+        Falls back to the latest available transform if the exact stamp is not
+        yet buffered. Returns (None, None) if TF is unavailable.
+        """
+        for query in (Time.from_msg(stamp), Time()):  # try exact time, then latest
+            try:
+                tf = self.tf_buffer.lookup_transform(
+                    cfg.BASE_FRAME, frame_id, query, timeout=Duration(seconds=0.05)
+                )
+                q = tf.transform.rotation
+                t = tf.transform.translation
+                R = Rot.from_quat([q.x, q.y, q.z, q.w]).as_matrix()
+                return R, np.array([t.x, t.y, t.z])
+            except (tf2_ros.LookupException, tf2_ros.ExtrapolationException,
+                    tf2_ros.ConnectivityException):
+                continue
+        if not self._tf_warned:
+            self.get_logger().warn(
+                f"TF lookup base<-{frame_id} failed (is robot_state_publisher up?).")
+            self._tf_warned = True
+        return None, None
 
     # ================================================================== #
     # Console report (low frequency — no per-tick spam)                   #

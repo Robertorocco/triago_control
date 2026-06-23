@@ -46,7 +46,9 @@ class CameraInterface:
         self._color = None          # (H, W, 3) uint8, RGB
         self._depth = None          # (H, W)   float32, metres
         self._depth_stamp = None    # builtin_interfaces/Time of the depth frame
+        self._depth_frame_id = None # frame the depth pixels live in (from header)
         self._K = None              # (fx, fy, cx, cy)
+        self._info_wh = None        # (width, height) the intrinsics were calibrated at
 
         # Resolve topic names from ROS params (fall back to config defaults).
         color_topic = node.declare_parameter("color_topic", cfg.COLOR_TOPIC).value
@@ -85,6 +87,7 @@ class CameraInterface:
         with self._lock:
             self._depth = depth
             self._depth_stamp = msg.header.stamp
+            self._depth_frame_id = msg.header.frame_id
         self.n_depth += 1
 
     def _info_cb(self, msg: CameraInfo):
@@ -92,6 +95,7 @@ class CameraInterface:
         K = msg.k
         with self._lock:
             self._K = (K[0], K[4], K[2], K[5])   # fx, fy, cx, cy
+            self._info_wh = (msg.width, msg.height)
         self.n_info += 1
 
     # ------------------------------------------------------------------ #
@@ -154,9 +158,10 @@ class CameraInterface:
 
         Returns
         -------
-        points : (N, 3) float32   XYZ in the camera OPTICAL frame
-        colors : (N, 3) uint8     matching RGB
-        stamp  : ROS time of the depth frame  (or None)
+        points    : (N, 3) float32   XYZ in the camera OPTICAL frame
+        colors    : (N, 3) uint8     matching RGB
+        stamp     : ROS time of the depth frame  (or None)
+        frame_id  : str, the frame the depth pixels live in (for TF lookup)
         None if no complete frame is available yet.
         """
         with self._lock:
@@ -165,15 +170,24 @@ class CameraInterface:
             color = self._color
             depth = self._depth
             stamp = self._depth_stamp
+            frame_id = self._depth_frame_id
             fx, fy, cx, cy = self._K
-
-        # Colour and (aligned) depth must share the same pixel grid. If the
-        # driver is not publishing *aligned* depth they can differ in size; we
-        # guard against that rather than crash.
-        if color.shape[:2] != depth.shape[:2]:
-            return None
+            info_wh = self._info_wh
 
         H, W = depth.shape
+
+        # SAFETY: if the camera_info was calibrated at a different resolution
+        # than the depth image (common when depth is downscaled), scale the
+        # intrinsics to the actual image size. Wrong intrinsics shift points
+        # laterally in proportion to depth -> large position errors.
+        if info_wh is not None and info_wh != (0, 0):
+            iw, ih = info_wh
+            if iw and ih and (iw != W or ih != H):
+                sx = W / float(iw)
+                sy = H / float(ih)
+                fx *= sx; cx *= sx
+                fy *= sy; cy *= sy
+
         s = cfg.PIXEL_STRIDE
         us = np.arange(0, W, s)
         vs = np.arange(0, H, s)
@@ -190,6 +204,20 @@ class CameraInterface:
         x = (uu - cx) * z / fx
         y = (vv - cy) * z / fy
         points = np.stack((x, y, z), axis=-1).astype(np.float32)
-        colors = color[vv, uu]                        # (N, 3) uint8
 
-        return points, colors, stamp
+        # Colour association. If colour and depth share the pixel grid, sample
+        # directly; otherwise rescale the depth pixel coords into the colour
+        # image (coarse, but colour is only used for red/blue classification).
+        ch, cw = color.shape[:2]
+        if (ch, cw) == (H, W):
+            colors = color[vv, uu]
+        else:
+            cu = np.clip((uu * cw / W).astype(np.int64), 0, cw - 1)
+            cv = np.clip((vv * ch / H).astype(np.int64), 0, ch - 1)
+            colors = color[cv, cu]
+
+        return points, colors, stamp, frame_id
+
+    def get_depth_frame_id(self):
+        with self._lock:
+            return self._depth_frame_id

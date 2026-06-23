@@ -46,10 +46,8 @@ class PerceptionPipeline:
     # Frame transform                                                     #
     # ------------------------------------------------------------------ #
     @staticmethod
-    def _transform_to_base(points, T_cam_base):
-        """Apply the SE(3) camera->base transform to an (N,3) cloud."""
-        R = T_cam_base.rotation
-        t = T_cam_base.translation
+    def _transform_to_base(points, R, t):
+        """Apply the camera->base transform (R, t) to an (N,3) cloud."""
         return points @ R.T + t
 
     # ------------------------------------------------------------------ #
@@ -70,14 +68,18 @@ class PerceptionPipeline:
     # ------------------------------------------------------------------ #
     # Main                                                                #
     # ------------------------------------------------------------------ #
-    def process(self, points_optical, colors, T_cam_base):
-        """Run the full pipeline. Returns a PerceptionResult."""
+    def process(self, points_optical, colors, R_cam_base, t_cam_base):
+        """Run the full pipeline. Returns a PerceptionResult.
+
+        R_cam_base, t_cam_base : the camera-optical -> base_footprint transform,
+        looked up from TF at the depth frame's timestamp (correct frame + time).
+        """
         import time
         t0 = time.perf_counter()
         res = PerceptionResult(n_raw=len(points_optical))
 
         # 1. Optical -> base, then crop to the table region.
-        pts_base = self._transform_to_base(points_optical, T_cam_base)
+        pts_base = self._transform_to_base(points_optical, R_cam_base, t_cam_base)
         pts_c, cols_c = self._crop(pts_base, colors)
         res.cropped_points = pts_c
         res.cropped_colors = cols_c
