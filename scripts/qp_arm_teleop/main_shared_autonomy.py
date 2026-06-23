@@ -809,7 +809,8 @@ class SharedControlNode(Node):
                 if in_free_space and valid_matrices:
                     for _ in range(1):
                         visual_dt = visual_dt + 0.3
-                        T_sim_goal = self.goal_set.get_dynamic_goal_pose(sim_T_EE, self.active_goal_key)
+                        T_sim_goal = self.goal_set.get_dynamic_goal_pose(
+                            sim_T_EE, self.active_goal_key, update_memory=False)
                         sim_v_geo = self.compute_v_geo(sim_T_EE, T_sim_goal)
                         sim_twist = self.solve_local_policy(sim_v_geo, self.J_c, self.h_c)
                         sim_T_next = self.integrate_twist(sim_T_EE, sim_twist, visual_dt)
@@ -1017,7 +1018,8 @@ class SharedControlNode(Node):
             family = goal_key.split('_')[0]
             rgb = self.GOAL_FAMILY_RGB.get(family, (0.0, 1.0, 0.0))
             opacity = self._belief_to_opacity(beliefs.get(goal_key, 0.0))
-            T_goal = self.goal_set.get_dynamic_goal_pose(self.current_T_EE, goal_key)
+            T_goal = self.goal_set.get_dynamic_goal_pose(
+                self.current_T_EE, goal_key, update_memory=False)
             marker_array.markers.extend(
                 self.create_gripper_markers(T_goal, opacity, i, now,
                                             ns="goal_poses", rgb=rgb))

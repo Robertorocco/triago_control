@@ -393,6 +393,12 @@ The `main_shared_autonomy.py` node implements:
 `Red_Top`, `Red_Side`, `Blue_Top`, `Blue_Side`, `Platform_Place`.
 
 - **Side/Top grasp goals**: dynamic SE(3) manifolds around each cylinder (see `goal_set.py`).
+  - **Side-grasp azimuth singularity guard**: the approach direction is the horizontal
+    anchor→axis vector, whose direction is undefined when the gripper hovers over the cylinder
+    top. Within `_SIDE_AZIMUTH_DEADZONE` (0.04 m) of the axis the azimuth is **frozen** to its
+    last committed value (`_last_side_radial`), so crossing the top no longer swings the goal
+    around the cylinder. It switches side only once the anchor is unambiguously on the other side
+    (≥ deadzone) — a single deterministic switch, never indecision oscillation (blend-safe).
 - **`Platform_Place`** (placement manifold): the grasped cylinder must be set down on the
   yellow `placement_area` disk (world center `[1.0, 0.0, 0.701]`, radius `0.15 m`). The ONLY
   hard constraint is **cylinder axis ⊥ platform face** (i.e. vertical). Implementation:

@@ -54,6 +54,16 @@ class GoalSet:
     # ahead by more than this margin, not merely whichever is marginally smaller.
     _ORIENTATION_HYSTERESIS = 0.05  # rad, in the _rotation_distance units
 
+    # Azimuthal (polar) singularity guard for the Side grasp. The approach
+    # direction is the horizontal vector from the anchor to the cylinder axis;
+    # its DIRECTION is undefined when the anchor sits on the axis (gripper hovering
+    # right over the cylinder top). Within this radius of the axis we FREEZE the
+    # approach azimuth to its last committed value, so passing over the top no
+    # longer swings the goal around the cylinder (the oscillation-from-indecision
+    # the operator saw). Must stay below the grasp standoff (r + approach_offset)
+    # so a real side approach still tracks the anchor normally.
+    _SIDE_AZIMUTH_DEADZONE = 0.04   # m
+
     # --- Platform placement goal ---------------------------------------------
     # The placement_area model in the world: a flat yellow disk the grasped
     # cylinders must be set down on (sequentially). The ONLY hard constraint is
@@ -96,6 +106,11 @@ class GoalSet:
         # candidates ('primary' or 'flipped') was last selected. See
         # _ORIENTATION_HYSTERESIS above for why this exists.
         self._last_orientation_choice = {k: None for k in self.target_keys}
+
+        # Sticky approach azimuth for the Side grasp (anti-singularity). Holds the
+        # last committed unit radial direction (anchor->axis, horizontal) per goal
+        # key; None until first computed. See _SIDE_AZIMUTH_DEADZONE.
+        self._last_side_radial = {k: None for k in self.target_keys}
 
         # --- Grasped-object bookkeeping (set on grasp, cleared on release) ----
         # grasped_axis_local: the cylinder's symmetry axis expressed in the
@@ -328,11 +343,35 @@ class GoalSet:
             # 1. Z-Height Tracking (user controls grasp height)
             z_target = np.clip(p_anchor[2], p_cyl[2] - h / 2 + 0.02, p_cyl[2] + h / 2 - 0.02)
 
-            # 2. Radial Projection (horizontal approach vector, pointing cylinder -> anchor)
-            v_rad = p_cyl[:2] - p_anchor[:2]
-            if np.linalg.norm(v_rad) < 1e-3:
-                v_rad = np.array([1.0, 0.0])
-            v_rad = v_rad / np.linalg.norm(v_rad)
+            # 2. Radial Projection (horizontal approach vector, anchor -> cylinder axis)
+            #    Anti-singularity: when the anchor is within _SIDE_AZIMUTH_DEADZONE
+            #    of the axis (hovering over the top), the radial DIRECTION is
+            #    ill-defined and would swing wildly tick-to-tick. We commit to the
+            #    last good azimuth instead, so the goal stays put until the anchor
+            #    is unambiguously on one side again. This is what makes the
+            #    behaviour safe to blend with user guidance — no indecision swing.
+            v_rad_raw = p_cyl[:2] - p_anchor[:2]
+            rad_norm = float(np.linalg.norm(v_rad_raw))
+            last_radial = self._last_side_radial.get(goal_key)
+
+            if rad_norm >= self._SIDE_AZIMUTH_DEADZONE:
+                # Anchor clearly on a side: use (and commit) the true radial.
+                v_rad = v_rad_raw / rad_norm
+                if update_memory:
+                    self._last_side_radial[goal_key] = v_rad
+            elif last_radial is not None:
+                # Inside the singular zone: FREEZE to the last committed azimuth.
+                v_rad = last_radial
+            else:
+                # No prior commit and the anchor is right over the axis: fall back
+                # to the gripper's own horizontal heading (continuous, reflects the
+                # user's blended intent) rather than an undefined radial.
+                approach_xy = R_anchor[:2, 0]
+                a_norm = float(np.linalg.norm(approach_xy))
+                v_rad = (approach_xy / a_norm) if a_norm > 1e-6 else np.array([1.0, 0.0])
+                if update_memory:
+                    self._last_side_radial[goal_key] = v_rad
+
             X_t = np.array([v_rad[0], v_rad[1], 0.0])
 
             # 3. FIXED GRIPPER PLANE: XY perpendicular to cylinder axis (world Z)
