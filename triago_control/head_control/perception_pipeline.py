@@ -72,11 +72,13 @@ class PerceptionPipeline:
     # ------------------------------------------------------------------ #
     # Main                                                                #
     # ------------------------------------------------------------------ #
-    def process(self, points_optical, colors, R_cam_base, t_cam_base):
+    def process(self, points_optical, colors, R_cam_base, t_cam_base, allow_integrate=True):
         """Run the full pipeline. Returns a PerceptionResult.
 
         R_cam_base, t_cam_base : the camera-optical -> base_footprint transform,
         looked up from TF at the depth frame's timestamp (correct frame + time).
+        allow_integrate : only fuse this frame into the voxel map when True
+        (the caller passes False while the head is moving, to avoid smearing).
         """
         import time
         t0 = time.perf_counter()
@@ -87,11 +89,13 @@ class PerceptionPipeline:
         pts_c, cols_c = self._crop(pts_base, colors)
 
         # 1b. MULTI-VIEW FUSION. Integrate this frame's cropped points into the
-        # persistent voxel map and run detection on the FUSED cloud, so the
-        # head's motion progressively reveals the full circumference of each
-        # cylinder and the occluded table. (Single-frame mode if disabled.)
+        # persistent voxel map ONLY when the head is settled (allow_integrate),
+        # then run detection on the FUSED cloud. Fusing while moving would smear
+        # the map; when not integrating we keep the map untouched (no decay) so
+        # it stays crisp and stable during head motion.
         if self.voxel_map is not None:
-            self.voxel_map.integrate(pts_c, cols_c)
+            if allow_integrate:
+                self.voxel_map.integrate(pts_c, cols_c)
             work_pts, work_cols = self.voxel_map.get_cloud()
             res.map_size = self.voxel_map.size()
         else:

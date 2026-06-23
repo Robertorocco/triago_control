@@ -105,6 +105,8 @@ class HeadPerceptionNode(Node):
         self._last_tf_pos = None
         self._last_tf_R = None
         self._last_depth_frame = None
+        self._last_vel_norm = 0.0
+        self._last_integrated = False
 
         # --- Timers ----------------------------------------------------
         self.create_timer(1.0 / cfg.CONTROL_RATE_HZ, self._control_tick)
@@ -202,7 +204,18 @@ class HeadPerceptionNode(Node):
         )
         self.pub_raw_cloud.publish(raw_pc)
 
-        result = self.pipeline.process(points_optical, colors, R_cam_base, t_cam_base)
+        # Snapshot the camera pose so a concurrent FK can't mutate it mid-run.
+        # Velocity-gate accumulation: only fuse when the head is settled, else
+        # a moving head smears the fused map (NO TABLE / stretched cylinders).
+        head_vel = self.kin.get_head_joint_velocities()
+        vel_norm = float(np.linalg.norm(head_vel))
+        allow_integrate = vel_norm < cfg.INTEGRATE_VEL_THRESH
+        self._last_vel_norm = vel_norm
+        self._last_integrated = allow_integrate
+
+        result = self.pipeline.process(
+            points_optical, colors, R_cam_base, t_cam_base, allow_integrate=allow_integrate
+        )
         self.latest_result = result
 
         # --- Publish PointCloud2 (cropped coloured cloud) --------------
@@ -317,7 +330,8 @@ class HeadPerceptionNode(Node):
         self.get_logger().info(
             head_line + "\n"
             f"       [PERCEPTION] raw={r.n_raw} crop={len(r.cropped_points) if r.cropped_points is not None else 0} "
-            f"map={r.map_size} | {plane_txt} | proc={r.proc_ms:.1f} ms\n"
+            f"map={r.map_size} | {plane_txt} | proc={r.proc_ms:.1f} ms | "
+            f"head_vel={self._last_vel_norm:.3f} {'FUSING' if self._last_integrated else 'moving'}\n"
             f"       [OBJECTS] {obj_txt}\n"
             f"       [JOINTS] {joint_info}" + diag)
 

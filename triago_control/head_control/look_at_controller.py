@@ -47,15 +47,16 @@ class LookAtController:
     def scan_target(t: float):
         """Return the look-at point in base_footprint at time t [s].
 
-        A slow Lissajous sweep across the table top. Periods are deliberately
-        non-commensurate so the camera covers the whole surface over time
-        rather than retracing one line.
+        STEPPED scan: hold each waypoint for SCAN_DWELL_S so the head settles
+        and the velocity-gated accumulation can fuse clean, well-registered
+        frames before moving on. Cycles through the waypoint list.
         """
         base = cfg.TABLE_TOP_CENTER_BASE.copy()
         if not cfg.ENABLE_SCAN:
             return base
-        ox = cfg.SCAN_AMPLITUDE_X * np.sin(2.0 * np.pi * t / cfg.SCAN_PERIOD_X)
-        oy = cfg.SCAN_AMPLITUDE_Y * np.sin(2.0 * np.pi * t / cfg.SCAN_PERIOD_Y)
+        wps = cfg.SCAN_WAYPOINTS
+        idx = int(t / cfg.SCAN_DWELL_S) % len(wps)
+        ox, oy = wps[idx]
         return base + np.array([ox, oy, 0.0])
 
     # ------------------------------------------------------------------ #

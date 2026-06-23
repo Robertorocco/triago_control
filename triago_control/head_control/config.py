@@ -103,29 +103,37 @@ LOOKAT_ALIGNED_DEG = 4.0
 # A single viewpoint sees the table top fine, but a slow sweep fills occluded
 # regions and lets temporal smoothing average out depth noise. Disable if you
 # want a static head.
-# NOTE: Re-enabled now that accumulation is active — head motion FEEDS the
-# voxel map, letting the camera observe the full circumference of each cylinder
-# and fill occluded table regions. The high slack weight (500) keeps look-at
-# tracking the moving target tightly.
+# NOTE: STEPPED scan — the head jumps to a waypoint, settles, dwells (fusing
+# happens here while stationary), then jumps to the next. This guarantees the
+# velocity-gated accumulation gets clean, well-registered frames. The waypoints
+# are small look-at offsets across the table top (base frame, metres).
 ENABLE_SCAN = True
-SCAN_AMPLITUDE_X = 0.05      # [m] sweep half-extent along table X (forward)
-SCAN_AMPLITUDE_Y = 0.10      # [m] sweep half-extent along table Y (left/right)
-SCAN_PERIOD_X = 12.0         # [s] period of the X oscillation
-SCAN_PERIOD_Y = 8.0          # [s] period of the Y oscillation (coprime-ish ->
-                             #     Lissajous coverage of the surface)
+SCAN_DWELL_S = 4.0           # [s] time parked at each waypoint
+SCAN_WAYPOINTS = [
+    (0.00, 0.00),
+    (0.08, 0.12),
+    (0.08, -0.12),
+    (-0.05, 0.12),
+    (-0.05, -0.12),
+]
 
 # =============================================================================
 # 5b. MULTI-VIEW ACCUMULATION  (fuse frames from many head poses into one map)
 # =============================================================================
-# Turns partial single-view arcs into near-full rings (accurate centre/radius)
-# and fills occluded table regions. Set False to revert to single-frame mode.
+# Turns partial single-view arcs into fuller coverage and fills occluded table
+# regions, and averages out depth noise. Set False to revert to single-frame.
 ENABLE_ACCUMULATION = True
 VOXEL_MAP_LEAF = 0.008       # [m] fusion voxel size (8mm)
-VOXEL_MAP_DECAY = 0.92       # per perception frame (~1.6s half-life @5Hz);
-                             #   lets MOVED objects fade instead of smearing.
+VOXEL_MAP_DECAY = 0.90       # per INTEGRATED frame (moved objects fade);
+                             #   decay only happens when we actually integrate.
 VOXEL_MAP_W_MIN = 0.40       # prune voxels whose weight decays below this
 VOXEL_MAP_W_MAX = 25.0       # cap weight so the map stays responsive
 VOXEL_MAP_QUERY_W = 1.0      # min weight for a voxel to be used in detection
+# CRITICAL: only fuse a frame when the head is nearly stationary. Fusing while
+# moving smears the map (the table band exceeds the plane threshold -> NO TABLE,
+# and cylinders stretch vertically). EMA joint-velocity norm below this [rad/s]
+# counts as "settled".
+INTEGRATE_VEL_THRESH = 0.04
 
 # =============================================================================
 # 6. POINT-CLOUD DEPROJECTION  (depth image -> 3D points)
