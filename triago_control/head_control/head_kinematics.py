@@ -170,6 +170,23 @@ class HeadKinematics:
     def get_head_joint_positions(self):
         return np.array([self.q_real[i] for i in self.head_q_idx])
 
+    def get_frame_in_base(self, frame_name):
+        """Pinocchio FK pose (R, t) of an arbitrary frame in base_footprint.
+
+        Used to cross-check against TF. Returns (None, None) if the frame is
+        not in the model. Assumes forward() / FK has run with current q.
+        """
+        if not self.model.existFrame(frame_name):
+            return None, None
+        pin.forwardKinematics(self.model, self.data, self.q_real)
+        pin.updateFramePlacements(self.model, self.data)
+        oMf = self.data.oMf[self.model.getFrameId(frame_name)]
+        if self._fid_base is not None:
+            T = self.data.oMf[self._fid_base].inverse() * oMf
+        else:
+            T = oMf
+        return T.rotation.copy(), T.translation.copy()
+
     def get_head_joint_velocities(self):
         """Return EMA-filtered velocities for the 7 head joints (rad/s)."""
         if self._v_filtered is None:

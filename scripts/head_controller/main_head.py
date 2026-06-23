@@ -77,6 +77,7 @@ class HeadPerceptionNode(Node):
             Float64MultiArray, f"/{cfg.HEAD_CONTROLLER}/joint_velocity_cmd", 10
         )
         self.pub_cloud = self.create_publisher(PointCloud2, "/head_perception/cloud", 1)
+        self.pub_raw_cloud = self.create_publisher(PointCloud2, "/head_perception/raw_cloud", 1)
         self.pub_markers = self.create_publisher(MarkerArray, "/head_perception/markers", 1)
         # Scalar telemetry for the plotter: [n_raw, n_crop, plane_z, look_err_deg,
         # slack, proc_ms]. Lets the plotter show cloud size / quality directly.
@@ -100,6 +101,9 @@ class HeadPerceptionNode(Node):
         self.current_target = cfg.TABLE_TOP_CENTER_BASE.copy()
         self.latest_result = None
         self._camera_warned = False
+        # Last TF-derived camera pose (for the FK-vs-TF cross-check diagnostic).
+        self._last_tf_pos = None
+        self._last_depth_frame = None
 
         # --- Timers ----------------------------------------------------
         self.create_timer(1.0 / cfg.CONTROL_RATE_HZ, self._control_tick)
@@ -178,6 +182,8 @@ class HeadPerceptionNode(Node):
         R_cam_base, t_cam_base = self._lookup_transform(frame_id, stamp)
         if R_cam_base is None:
             return
+        self._last_tf_pos = t_cam_base
+        self._last_depth_frame = frame_id
 
         # One-shot diagnostic: confirm camera placement & data shapes.
         if not self._diag_logged:
@@ -185,6 +191,14 @@ class HeadPerceptionNode(Node):
                 f"[DIAG] depth_frame='{frame_id}'  raw_pts={len(points_optical)}  "
                 f"cam_pos_base={np.round(t_cam_base, 3)}")
             self._diag_logged = True
+
+        # Publish the FULL raw cloud (transformed to base) so you can SEE in
+        # RViz where the points actually land relative to the robot model.
+        raw_base = points_optical @ R_cam_base.T + t_cam_base
+        raw_pc = make_pointcloud2(
+            raw_base.astype(np.float32), colors, cfg.BASE_FRAME, stamp
+        )
+        self.pub_raw_cloud.publish(raw_pc)
 
         result = self.pipeline.process(points_optical, colors, R_cam_base, t_cam_base)
         self.latest_result = result
@@ -274,12 +288,30 @@ class HeadPerceptionNode(Node):
             for o in r.objects
         ) or "none"
 
+        # --- Decisive diagnostic: where does TF say the camera is, vs Pinocchio
+        # FK for the SAME depth frame? If they disagree, robot_state_publisher's
+        # TF is not reflecting the live head config (= the transform bug). Also
+        # show the detected table-plane centroid: it should be near (1.0, 0.0).
+        diag = ""
+        if self._last_depth_frame is not None and self._last_tf_pos is not None:
+            fk_R, fk_t = self.kin.get_frame_in_base(self._last_depth_frame)
+            tf_t = self._last_tf_pos
+            if fk_t is not None:
+                diag += (f"\n       [XFORM] TF cam={np.round(tf_t,3)}  "
+                         f"FK cam={np.round(fk_t,3)}  "
+                         f"dPos={np.round(tf_t - fk_t,3)}")
+            else:
+                diag += f"\n       [XFORM] TF cam={np.round(tf_t,3)}  (FK: frame not in model)"
+        if r.plane_centroid is not None:
+            diag += (f"\n       [PLANE-CENTROID] {np.round(r.plane_centroid,3)} "
+                     f"(expect ~[1.0, 0.0, 0.70])")
+
         self.get_logger().info(
             head_line + "\n"
             f"       [PERCEPTION] raw={r.n_raw} crop={len(r.cropped_points) if r.cropped_points is not None else 0} "
             f"| {plane_txt} | proc={r.proc_ms:.1f} ms\n"
             f"       [OBJECTS] {obj_txt}\n"
-            f"       [JOINTS] {joint_info}")
+            f"       [JOINTS] {joint_info}" + diag)
 
 
 def main():

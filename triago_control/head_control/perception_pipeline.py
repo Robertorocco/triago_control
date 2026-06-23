@@ -32,6 +32,7 @@ class PerceptionResult:
     cropped_points: np.ndarray = None       # (N,3) base frame  (for viz)
     cropped_colors: np.ndarray = None       # (N,3) uint8
     above_points: np.ndarray = None         # (M,3) above-plane points (for viz)
+    plane_centroid: np.ndarray = None       # (3,) centroid of plane inliers (debug)
     n_raw: int = 0
     proc_ms: float = 0.0
 
@@ -93,6 +94,11 @@ class PerceptionPipeline:
         if plane is None:
             res.proc_ms = (time.perf_counter() - t0) * 1e3
             return res
+
+        # Debug: centroid of the plane inliers. If the cloud is correctly
+        # placed this should sit near the known table centre (x~1.0, y~0.0).
+        if inlier_mask is not None and inlier_mask.any():
+            res.plane_centroid = pts_c[inlier_mask].mean(axis=0)
 
         # 3. Above-plane slab = candidate objects.
         sd = plane.signed_distance(pts_c)
