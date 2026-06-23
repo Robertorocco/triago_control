@@ -1,7 +1,7 @@
 # AI Agent Context — triago_control
 
 > **This file is maintained by the AI agent. Do not edit manually.**
-> Last updated: 2026-06-22 (added haption_teleoperation package documentation)
+> Last updated: 2026-06-23 (grasp pipeline confirmed working; focus shifts to post-grasp phases)
 
 ---
 
@@ -382,11 +382,51 @@ Solver: `quadprog.solve_qp` (active-set method).
 ## 10. Shared Autonomy Architecture
 
 The `main_shared_autonomy.py` node implements:
-- **Bayesian belief estimation** over a discrete goal set
+- **Bayesian belief estimation** over a discrete goal set (with goal **exclusion** support)
 - **Local QP policy** (separate from the safety QP) for constrained intent following
-- **Grasp state machine**: IDLE → PRE_GRASP → APPROACH → CONTACT → CLOSE → ATTACH
+- **Grasp state machine**: SHARED_AUTONOMY → PRE_GRASP → GRASP_APPROACH → GRASP_CLOSE → LIFT → HOLDING
 - **Alpha-blending** between human teleop input and autonomous policy (WIP)
 - Publishes cartesian references consumed by `main_qp_controller.py`
+
+### 10.1 Goal Set (5 goals)
+
+`Red_Top`, `Red_Side`, `Blue_Top`, `Blue_Side`, `Platform_Place`.
+
+- **Side/Top grasp goals**: dynamic SE(3) manifolds around each cylinder (see `goal_set.py`).
+- **`Platform_Place`** (placement manifold): the grasped cylinder must be set down on the
+  yellow `placement_area` disk (world center `[1.0, 0.0, 0.701]`, radius `0.15 m`). The ONLY
+  hard constraint is **cylinder axis ⊥ platform face** (i.e. vertical). Implementation:
+  - At grasp/attach, `GoalSet.set_grasped(color, T_EE)` freezes the cylinder symmetry axis in the
+    **gripper frame** (`grasped_axis_local = R_grasp^T @ [0,0,1]`) plus the gripper-vs-cylinder
+    height offset.
+  - `get_platform_goal_pose` projects the anchor XY onto the disk (clamped `PLATFORM_PLACE_MARGIN`
+    inside the rim — user chooses *where* by hovering, so the two cylinders land at different
+    spots) and computes the **minimal rotation** of the anchor orientation that brings the held
+    axis to vertical. This constrains 2 DOF (tilt) and leaves yaw-about-vertical free → a true
+    placement manifold, not a single pose.
+
+### 10.2 Post-grasp lifecycle (the fix for "architecture dies after grasping")
+
+| Phase | Behavior |
+|-------|----------|
+| `GRASP_CLOSE` → `LIFT` | Sends `ATTACH_*` (re-parents cylinder as a real arm link in the QP collision world) and **clears** the gripper↔cylinder CBF bypass (`ignore_cbf="None"`) so the held cylinder now actively avoids the environment — it is treated as a link of the arm chain, with the handler's 3 s barrier ramp. |
+| `LIFT` | Slow blind vertical lift: `LIFT_VELOCITY=0.025 m/s × LIFT_DURATION=2.0 s = 5 cm` clear of the table, then → `HOLDING`. |
+| `HOLDING` | Shared autonomy **resumes**: `_holding` passes the outer-loop policy (`pi_max`) straight through, so the user can drive the loaded gripper toward any remaining goal and the belief estimator keeps predicting. **PRE_GRASP is unreachable while holding** (no second grasp with the same gripper). A console banner announces available goals. |
+| Release | A trigger pull (or console `OPEN`) in HOLDING → `_release_object()`: opens gripper, detaches the Gazebo plugin weld, resets to `SHARED_AUTONOMY` as if freshly started (accounting for the now-placed cylinder). **No dedicated PLACE phase.** |
+
+### 10.3 Belief exclusion rules
+
+`BeliefEstimator.set_excluded_goals(...)` pins a goal to probability 0, skips it in the cost
+update and `blend_policies`, and never returns it from `get_active_goal` — but it stays in
+`target_keys` so the UI still shows it (at 0). Its policy is **not evaluated** (zero placeholder).
+- **Gripper empty**: `Platform_Place` excluded.
+- **Holding `<Color>`**: `<Color>_Top` and `<Color>_Side` excluded; `Platform_Place` enabled.
+
+### 10.4 RViz / visualization
+
+Goal frames (`goal_<key>` TF) and the predictive-gripper markers are published during
+`SHARED_AUTONOMY`, `PRE_GRASP` **and `HOLDING`** for every non-excluded goal, so `goal_Platform_Place`
+appears in RViz as soon as a cylinder is held. Excluded goals stop broadcasting their frame.
 
 ---
 
@@ -396,6 +436,9 @@ The `main_shared_autonomy.py` node implements:
 |------|--------|-------|
 | QP bimanual arm control | ✅ Working | Full 6-DOF tracking with CBF safety |
 | Shared autonomy (belief + grasp) | ✅ Working | Refactored from monolithic script |
+| Grasp pipeline (full cycle) | ✅ Working | PRE_GRASP → APPROACH → CLOSE → ATTACH all succeed reliably |
+| Post-grasp (LIFT + HOLDING + place) | ✅ Working | 5 cm slow lift → HOLDING resumes shared autonomy → Platform placement manifold → release back to start |
+| Platform placement goal | 🔧 Active dev | `Platform_Place` manifold (axis ⊥ disk); debugging placement height/orientation live |
 | Haption teleoperation (clutch) | 🔧 Active dev | `teleop_triago_clutch.py` + `haptic_force_manager.py` |
 | Head control | ❌ Not implemented | Planned future addition |
 | Mobile base integration | 🔧 Partial | `base_controller.py` exists but not QP-certified |

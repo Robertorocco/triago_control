@@ -141,6 +141,14 @@ class SharedControlNode(Node):
         self.plot_lock = threading.Lock()
         self.belief_estimator = BeliefEstimator(
             target_keys=self.target_keys, W=self.W, beta=0.04, ema_alpha=0.995)
+        # The Platform placement goal only becomes demandable once something is
+        # actually held — exclude it while the gripper is empty.
+        self.belief_estimator.set_excluded_goals({self.goal_set.PLATFORM_KEY})
+        # Color of the currently-held cylinder ('Red'/'Blue'), or None when empty.
+        self.grasped_color = None
+        # Tracks the grasp SM state across ticks so the node can react to entries
+        # (e.g. arming the placement goal) exactly once.
+        self._prev_sm_state = self.grasp_sm.state
 
         # --- Grasp State Machine (delegated to GraspStateMachine) ---
         self.grasp_sm = GraspStateMachine(
@@ -321,6 +329,66 @@ class SharedControlNode(Node):
         msg = String()
         msg.data = "None"
         self.pub_grasp_margin.publish(msg)
+
+    def _configure_post_grasp(self, color):
+        """Arm the HOLDING phase right after a successful attach.
+
+        - Records the grasped object + its symmetry axis in the goal set (so the
+          Platform goal can enforce 'cylinder axis perpendicular to platform').
+        - Excludes the grasped cylinder's own grasp goals from the belief
+          estimator (they are no longer reachable) and enables the Platform goal.
+        - In test mode, defaults the demanded goal to the Platform so the
+          placement flow starts immediately (the user can still switch).
+        """
+        self.grasped_color = color.capitalize()
+        self.goal_set.set_grasped(color, self.current_T_EE)
+        self.belief_estimator.set_excluded_goals(
+            {f"{self.grasped_color}_Top", f"{self.grasped_color}_Side"})
+        if self.POLICY_BELIEF_TEST:
+            with self._test_goal_lock:
+                self.test_goal_key = self.goal_set.PLATFORM_KEY
+        self.get_logger().info(
+            f"[POST-GRASP] {self.grasped_color} held → its grasp goals excluded, "
+            f"'{self.goal_set.PLATFORM_KEY}' enabled. Remaining goals stay demandable.")
+
+    def _release_object(self):
+        """Open the gripper, detach the payload and reset to the start phase.
+
+        Per design: this is NOT a new dedicated phase — the system simply returns
+        to SHARED_AUTONOMY as if freshly started, now accounting for the updated
+        world (one cylinder already placed). Re-excludes the Platform goal and
+        makes every cylinder demandable again.
+        """
+        arm = self.active_arm
+        # Open fingers fully.
+        self.pub_gripper_cmd.publish(String(data=f"CLOSE_{arm.upper()}_0.7000"))
+        # Detach the Gazebo plugin weld.
+        self._plugin_detach(arm)
+
+        # Reset the grasp state machine back to the start phase.
+        self.grasp_sm._transition("SHARED_AUTONOMY")
+        self.grasp_sm.grip_position = 0.7
+        self.grasp_sm.grip_contact_detected = False
+        self.grasp_sm.grip_force_stable_since = None
+        self.grasp_sm._lift_start_time = None
+        self.grasp_sm._holding_entered = False
+
+        # Reset goal availability: Platform off (empty gripper), cylinders on.
+        prev = self.grasped_color
+        self.belief_estimator.set_excluded_goals({self.goal_set.PLATFORM_KEY})
+        self.goal_set.clear_grasped()
+        self.grasped_color = None
+
+        # In test mode, default the demand to the other (still-on-table) cylinder
+        # so the sequential pick-and-place demo keeps flowing.
+        if self.POLICY_BELIEF_TEST:
+            next_goal = 'Blue_Side' if prev == 'Red' else 'Red_Side'
+            with self._test_goal_lock:
+                self.test_goal_key = next_goal
+
+        self.get_logger().info(
+            "[RELEASE] Object placed. Gripper opened, payload detached, "
+            "back to SHARED_AUTONOMY.")
 
     def _plugin_attach(self, arm, color):
         """Weld the cylinder to the gripper link via the Gazebo LinkAttacher plugin.
@@ -528,7 +596,11 @@ class SharedControlNode(Node):
             self._control_last_print = current_time
 
         msg_ignore = String()
-        in_grasp_state = self.grasp_sm.state in ("PRE_GRASP", "GRASP_APPROACH", "GRASP_CLOSE")
+        # States that run blind (no goal tracking, no collision-data dependency).
+        # HOLDING is intentionally NOT here: it drives toward goals via the QP and
+        # therefore needs fresh collision data, like SHARED_AUTONOMY / PRE_GRASP.
+        in_grasp_state = self.grasp_sm.state in (
+            "PRE_GRASP", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT")
 
         if not in_grasp_state:
             if self.J_c is None or self.h_c is None:
@@ -545,11 +617,22 @@ class SharedControlNode(Node):
         ee_policies = {}
         user_policies = {}
 
-        in_free_space = self.grasp_sm.state in ("SHARED_AUTONOMY", "PRE_GRASP")
+        in_free_space = self.grasp_sm.state in ("SHARED_AUTONOMY", "PRE_GRASP", "HOLDING")
         valid_matrices = self.J_c is not None and self.h_c is not None
+        excluded = self.belief_estimator.get_excluded_goals()
 
         if in_free_space and valid_matrices:
             for key in self.target_keys:
+                # Excluded goals (already-grasped cylinder, or Platform while
+                # empty) are NOT evaluated: their policy is a zero placeholder so
+                # downstream consumers (belief plot, inference publishers) still
+                # see every key, but the QP is never solved for them.
+                if key in excluded:
+                    ee_policies[key] = np.zeros(self.TASK_DIM)
+                    if self.PREDICTION or self.POLICY_BELIEF_TEST:
+                        user_policies[key] = np.zeros(self.TASK_DIM)
+                    continue
+
                 if not self.PREDICTION and key != self.active_goal_key:
                     continue
 
@@ -664,15 +747,23 @@ class SharedControlNode(Node):
             cmd_msg = String()
             cmd_msg.data = tick_output.gripper_cmd
             self.pub_gripper_cmd.publish(cmd_msg)
-            # On ATTACH command, also weld the cylinder via the Gazebo plugin
+            # On ATTACH command, also weld the cylinder via the Gazebo plugin and
+            # reconfigure the shared-autonomy goal set for the HOLDING phase.
             if tick_output.gripper_cmd.startswith("ATTACH_"):
                 parts = tick_output.gripper_cmd.split('_')
                 arm = parts[1].lower()
-                color = parts[2].lower()
-                self._plugin_attach(arm, color)
+                grasped = parts[2].lower()
+                self._plugin_attach(arm, grasped)
+                self._configure_post_grasp(grasped)
 
         if tick_output.reset_trigger:
             self.trigger_cmd = False
+
+        # Release / placement: open the gripper, detach the payload and fall back
+        # to SHARED_AUTONOMY (the system behaves as if freshly started, now aware
+        # the world has one cylinder already placed).
+        if tick_output.release_object:
+            self._release_object()
 
         if self.BLENDING and tick_output.new_state == "SHARED_AUTONOMY":
             alpha = self.compute_alpha(b_max)
@@ -681,42 +772,42 @@ class SharedControlNode(Node):
             target_twist = tick_output.target_twist
 
         # --- 5. LOCAL INTEGRATION & VISUALIZATION ---
-        # Once an object is grasped (plugin-attached), clear the goal/prediction
-        # markers ONCE and stop publishing them — the scene shows only the
-        # grasped object (drawn grey at its live pose by the QP visualizer).
-        object_grasped = bool(self.plugin_attached)
-        if object_grasped:
-            if not self._goal_markers_cleared:
-                self._clear_goal_markers()
-                self._goal_markers_cleared = True
-        else:
+        # Visualization is meaningful whenever the shared-autonomy loop is driving
+        # toward goals: SHARED_AUTONOMY, PRE_GRASP and (now) HOLDING. During the
+        # blind grasp/lift phases (GRASP_APPROACH/GRASP_CLOSE/LIFT) we publish
+        # nothing. Goal frames are broadcast only for demandable (non-excluded)
+        # goals, so the grasped cylinder's grasp goals vanish and the Platform
+        # placement goal appears the moment something is held.
+        viz_active = self.grasp_sm.state in ("SHARED_AUTONOMY", "PRE_GRASP", "HOLDING")
+        if viz_active and not np.allclose(self.current_T_EE, np.eye(4)):
             self._goal_markers_cleared = False
-            if not np.allclose(self.current_T_EE, np.eye(4)):
-                visual_dt = 0.5
-                trajectory_data = []
+            visual_dt = 0.5
+            trajectory_data = []
 
-                active_v_geo = self.compute_v_geo(self.current_T_EE, T_active_goal)
-                T_cube_1 = self.integrate_twist(self.current_T_EE, target_twist, visual_dt)
-                trajectory_data.append((T_cube_1, target_twist))
+            active_v_geo = self.compute_v_geo(self.current_T_EE, T_active_goal)
+            T_cube_1 = self.integrate_twist(self.current_T_EE, target_twist, visual_dt)
+            trajectory_data.append((T_cube_1, target_twist))
 
-                sim_T_EE = T_cube_1
-                if in_free_space and valid_matrices:
-                    for _ in range(1):
-                        visual_dt = visual_dt + 0.3
-                        T_sim_goal = self.goal_set.get_dynamic_goal_pose(sim_T_EE, self.active_goal_key)
-                        sim_v_geo = self.compute_v_geo(sim_T_EE, T_sim_goal)
-                        sim_twist = self.solve_local_policy(sim_v_geo, self.J_c, self.h_c)
-                        sim_T_next = self.integrate_twist(sim_T_EE, sim_twist, visual_dt)
-                        trajectory_data.append((sim_T_next, sim_twist))
-                        sim_T_EE = sim_T_next
+            sim_T_EE = T_cube_1
+            if in_free_space and valid_matrices:
+                for _ in range(1):
+                    visual_dt = visual_dt + 0.3
+                    T_sim_goal = self.goal_set.get_dynamic_goal_pose(sim_T_EE, self.active_goal_key)
+                    sim_v_geo = self.compute_v_geo(sim_T_EE, T_sim_goal)
+                    sim_twist = self.solve_local_policy(sim_v_geo, self.J_c, self.h_c)
+                    sim_T_next = self.integrate_twist(sim_T_EE, sim_twist, visual_dt)
+                    trajectory_data.append((sim_T_next, sim_twist))
+                    sim_T_EE = sim_T_next
 
-                self.publish_visualizations(trajectory_data, self.current_T_EE, active_v_geo)
+            self.publish_visualizations(trajectory_data, self.current_T_EE, active_v_geo)
 
-                for goal_key in self.target_keys:
-                    T_goal_tf = self.goal_set.get_dynamic_goal_pose(self.current_T_EE, goal_key)
-                    self.broadcast_goal_frame(goal_key, T_goal_tf)
+            for goal_key in self.target_keys:
+                if goal_key in excluded:
+                    continue
+                T_goal_tf = self.goal_set.get_dynamic_goal_pose(self.current_T_EE, goal_key)
+                self.broadcast_goal_frame(goal_key, T_goal_tf)
 
-                self.publish_inference_state(ee_policies, user_policies)
+            self.publish_inference_state(ee_policies, user_policies)
 
         # --- 6. PUBLISH COMMAND TO ROBOT IN TEST MODE ---
         if self.POLICY_BELIEF_TEST and not np.allclose(self.current_T_EE, np.eye(4)):
@@ -1025,11 +1116,14 @@ class SharedControlNode(Node):
                 print(f"  current goal: {current}")
 
             elif raw in valid_goals:
-                with self._test_goal_lock:
-                    self.test_goal_key = raw
-                self.get_logger().info(f"[TEST] Goal switched to '{raw}'")
-                print(f"  ✓ goal set to: {raw}")
-                self._ou_bias[:] = 0.0  # reset drift when changing goal
+                if raw in self.belief_estimator.get_excluded_goals():
+                    print(f"  ✗ '{raw}' is not demandable right now (excluded).")
+                else:
+                    with self._test_goal_lock:
+                        self.test_goal_key = raw
+                    self.get_logger().info(f"[TEST] Goal switched to '{raw}'")
+                    print(f"  ✓ goal set to: {raw}")
+                    self._ou_bias[:] = 0.0  # reset drift when changing goal
 
             elif raw.startswith("noise "):
                 try:
@@ -1056,16 +1150,10 @@ class SharedControlNode(Node):
                 self.get_logger().info("[TEST] 'CLOSE' command registered via console.")
 
             elif raw == "OPEN":
-                # Open gripper fully, detach any plugin-welded object, reset grasp state
-                cmd_msg = String()
-                cmd_msg.data = f"CLOSE_{self.active_arm.upper()}_0.7000"
-                self.pub_gripper_cmd.publish(cmd_msg)
-                self._plugin_detach(self.active_arm)
-                self.grasp_sm._transition("SHARED_AUTONOMY")
-                self.grasp_sm.grip_contact_detected = False
-                self.grasp_sm.grip_force_stable_since = None
-                self.grasp_sm.grip_position = 0.7
-                self.get_logger().info("[TEST] 'OPEN' command: gripper opened, object detached, grasp state reset.")
+                # Open gripper, detach the payload and reset to the start phase
+                # (delegates to the shared release routine used by the trigger).
+                self._release_object()
+                print("  ✓ released: gripper opened, object detached, reset to SHARED_AUTONOMY.")
 
             else:
                 print(f"  ✗ unknown goal '{raw}'.  Choose from: {valid_goals}")

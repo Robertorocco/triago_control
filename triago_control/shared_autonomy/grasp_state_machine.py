@@ -83,6 +83,7 @@ class TickOutput:
     grasp_margin: Optional[object] = None
     gripper_cmd: Optional[str] = None         # e.g. "ORANGE_RIGHT_RED", "CLOSE_RIGHT_0.0150"
     reset_trigger: bool = False               # True -> node must force trigger_cmd back to False
+    release_object: bool = False              # True -> node must open gripper, detach payload, reset post-grasp state
     log_lines: list = field(default_factory=list)   # (level, message) tuples for the node to log
 
 
@@ -143,7 +144,8 @@ class GraspStateMachine:
         self.grip_position = 0.7   # Start fully open
         self.grip_contact_detected = False
         self.grip_force_stable_since = None
-        self._lift_start_time = None  # reset for HOLDING/LIFT phase
+        self._lift_start_time = None  # reset for LIFT phase
+        self._holding_entered = False  # latch so the HOLDING banner prints once per grasp
 
         self._last_state_logged = None
 
@@ -160,6 +162,7 @@ class GraspStateMachine:
             "PRE_GRASP": self._pre_grasp,
             "GRASP_APPROACH": self._grasp_approach,
             "GRASP_CLOSE": self._grasp_close,
+            "LIFT": self._lift,
             "HOLDING": self._holding,
         }
 
@@ -187,7 +190,14 @@ class GraspStateMachine:
         between PRE_GRASP and SHARED_AUTONOMY is re-evaluated every tick based on
         belief + alignment.
         """
-        if self._state in ("GRASP_CLOSE", "GRASP_APPROACH", "HOLDING"):
+        if self._state in ("GRASP_CLOSE", "GRASP_APPROACH", "LIFT", "HOLDING"):
+            # GRASP_* and LIFT are pure run-to-completion phases. HOLDING is
+            # special: while an object is in the gripper the PRE_GRASP branch is
+            # deliberately UNREACHABLE (you cannot commit a second grasp with the
+            # same gripper). The user can still drive toward — and the belief
+            # estimator can still predict — any remaining goal; that motion is
+            # produced by the outer loop's policy (pi_max), which _holding passes
+            # straight through. Only an explicit release (trigger) leaves HOLDING.
             out = self._handlers[self._state](inp)
         elif self._belief_ok(inp) and self._is_aligned(inp):
             out = self._pre_grasp(inp)
@@ -207,6 +217,7 @@ class GraspStateMachine:
     # ------------------------------------------------------------------
     def _shared_autonomy(self, inp: TickInput) -> TickOutput:
         self._transition("SHARED_AUTONOMY")
+        self._holding_entered = False  # re-arm the HOLDING banner for the next grasp
         log_lines = []
         if inp.trigger_pulled:
             log_lines.append(("warn", "GRASP REFUSED: Robot is not aligned in the safe PRE_GRASP zone."))
@@ -397,16 +408,23 @@ class GraspStateMachine:
         self.grip_position = max(self.GRIP_FINAL_POSITION, self.grip_position)
         gripper_cmd = f"CLOSE_{inp.active_arm.upper()}_{self.grip_position:.4f}"
 
-        # After CLOSURE_WAIT_S of closure → attach via plugin and HOLD pose
+        # After CLOSURE_WAIT_S of closure → attach via plugin and LIFT the object
         if elapsed >= self.CLOSURE_WAIT_S:
             log_lines.append(
                 ("info", f"[GRASP] Closure complete ({self.CLOSURE_WAIT_S:.0f}s). "
-                         f"Attaching {color} cylinder. Arm will HOLD current pose."))
-            self._transition("HOLDING")
+                         f"Attaching {color} cylinder. Lifting clear of the table."))
+            self._transition("LIFT")
+            self._lift_start_time = None  # _lift records the start on its first tick
             return TickOutput(
                 target_twist=np.zeros(6),
                 new_state=self._state,
-                ignore_cbf=f"+{self.cylinders[color]['cbf_name']}",  # keep CBF bypass on grasped obj
+                # Clear the gripper↔cylinder CBF bypass: the ATTACH command
+                # re-parents the cylinder as a real link of the arm chain (with
+                # its own collision pairs vs the environment and a smooth 3s
+                # barrier ramp), so from now on it must be treated as a robot
+                # link — NOT bypassed. (Self-collision vs the gripper's own
+                # fingers/wrist is already adjacency-excluded by the handler.)
+                ignore_cbf="None",
                 grasp_margin=CLEAR_MARGIN,
                 gripper_cmd=f"ATTACH_{inp.active_arm.upper()}_{color.upper()}",
                 log_lines=log_lines,
@@ -423,32 +441,98 @@ class GraspStateMachine:
 
 
     # ------------------------------------------------------------------
-    # PHASE 4: LIFT (raise the grasped object 20cm above table, then hold)
+    # PHASE 4: LIFT (raise the grasped object a few cm clear of the table)
     # ------------------------------------------------------------------
-    LIFT_VELOCITY = 0.067   # m/s upward (0.067 * 3s ≈ 0.20m = 20cm)
-    LIFT_DURATION = 3.0     # seconds of vertical lift
+    # Slow, short vertical lift just to break contact with the table before the
+    # shared-autonomy placement phase takes over. Tuned per request: ~5 cm at a
+    # gentle speed (0.025 m/s * 2.0 s = 0.05 m).
+    LIFT_VELOCITY = 0.025   # m/s upward (slow)
+    LIFT_DURATION = 2.0     # s  -> 0.025 * 2.0 = 0.05 m = 5 cm lift
+    LIFT_HEIGHT = LIFT_VELOCITY * LIFT_DURATION  # for logging only
 
-    def _holding(self, inp: TickInput) -> TickOutput:
-        """Lift phase: command upward twist for LIFT_DURATION, then hold still."""
-        self._transition("HOLDING")
+    def _lift(self, inp: TickInput) -> TickOutput:
+        """Vertical lift phase: command a slow Z-up twist for LIFT_DURATION, then HOLD.
+
+        Runs blind (arm frozen in XY/orientation, no goal tracking). On completion
+        it transitions to HOLDING, where the shared-autonomy loop resumes and the
+        user may drive the (now loaded) gripper toward any remaining goal.
+        """
+        self._transition("LIFT")
         log_lines = []
 
-        # First entry: record the lift start time
-        if not hasattr(self, '_lift_start_time') or self._lift_start_time is None:
+        if self._lift_start_time is None:
             self._lift_start_time = time.time()
-            log_lines.append(("info", "[LIFT] Starting vertical lift (20cm in 3s)."))
+            log_lines.append(
+                ("info", f"[LIFT] Raising grasped object ~{self.LIFT_HEIGHT * 100:.0f} cm "
+                         f"clear of the table (slow)."))
 
         elapsed = time.time() - self._lift_start_time
 
         if elapsed < self.LIFT_DURATION:
-            # Pure Z-up twist in base_footprint
             target_twist = np.array([0.0, 0.0, self.LIFT_VELOCITY, 0.0, 0.0, 0.0])
-        else:
-            # Lift complete → hold still
-            target_twist = np.zeros(6)
+            return TickOutput(
+                target_twist=target_twist,
+                new_state=self._state,
+                ignore_cbf=None,
+                grasp_margin=None,
+                log_lines=log_lines,
+            )
 
+        # Lift complete -> hand control to HOLDING / shared autonomy.
+        self._transition("HOLDING")
+        log_lines.append(
+            ("info", "[LIFT] Complete. Entering HOLDING — shared autonomy resumed."))
         return TickOutput(
-            target_twist=target_twist,
+            target_twist=np.zeros(6),
+            new_state=self._state,
+            ignore_cbf=None,
+            grasp_margin=None,
+            log_lines=log_lines,
+        )
+
+    # ------------------------------------------------------------------
+    # PHASE 5: HOLDING (object in gripper; shared autonomy drives toward goals)
+    # ------------------------------------------------------------------
+    def _holding(self, inp: TickInput) -> TickOutput:
+        """Loaded shared-autonomy phase.
+
+        The object is grasped and lifted. This handler does NOT command motion of
+        its own — it passes the outer loop's policy twist (inp.pi_max) straight
+        through, so the user can steer the loaded gripper toward any remaining
+        goal (e.g. the Platform placement goal, or the other cylinder for a
+        robustness test) and the belief estimator keeps predicting over those
+        goals. Committing a new grasp (PRE_GRASP) is intentionally impossible here.
+
+        A trigger pull in HOLDING means "release / place": the node opens the
+        gripper, detaches the payload, and the system falls back to
+        SHARED_AUTONOMY exactly as if it had just started, now aware of the
+        updated world (one cylinder already placed).
+        """
+        self._transition("HOLDING")
+        log_lines = []
+
+        if not self._holding_entered:
+            self._holding_entered = True
+            log_lines.append(
+                ("info", "=== [HOLDING] Object grasped & lifted. Any REMAINING goal is "
+                         "demandable (drive / belief only — no second grasp). "
+                         "Type a goal (e.g. 'Platform_Place') to steer; trigger/'OPEN' to release. ==="))
+
+        if inp.trigger_pulled:
+            log_lines.append(
+                ("info", "[HOLDING] Release requested — opening gripper and placing object."))
+            return TickOutput(
+                target_twist=np.zeros(6),
+                new_state=self._state,   # node's release routine performs the actual transition
+                ignore_cbf=None,
+                grasp_margin=None,
+                release_object=True,
+                log_lines=log_lines,
+            )
+
+        # Pass the outer-loop policy straight through (drive toward the active goal).
+        return TickOutput(
+            target_twist=inp.pi_max,
             new_state=self._state,
             ignore_cbf=None,
             grasp_margin=None,

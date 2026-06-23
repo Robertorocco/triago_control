@@ -54,6 +54,20 @@ class GoalSet:
     # ahead by more than this margin, not merely whichever is marginally smaller.
     _ORIENTATION_HYSTERESIS = 0.05  # rad, in the _rotation_distance units
 
+    # --- Platform placement goal ---------------------------------------------
+    # The placement_area model in the world: a flat yellow disk the grasped
+    # cylinders must be set down on (sequentially). The ONLY hard constraint is
+    # that the cylinder's symmetry axis ends up perpendicular to the platform
+    # face (i.e. vertical, world +Z) and its footprint lands inside the disk.
+    # Everything else (where on the disk, yaw about vertical) is a free manifold
+    # the user picks by hovering — exactly mirroring how the Side-grasp goal is a
+    # manifold around the cylinder rather than a single pose.
+    PLATFORM_KEY = 'Platform_Place'
+    PLATFORM_POSE = np.array([1.000, 0.0, 0.701])   # world center of placement_area
+    PLATFORM_RADIUS = 0.15                          # disk radius [m]
+    PLATFORM_THICKNESS = 0.002                      # disk thickness [m]
+    PLATFORM_PLACE_MARGIN = 0.03                    # keep the footprint this far inside the rim [m]
+
     def __init__(self, cylinders=None, target_keys=None):
         """Initializes the cylinder geometry table and the set of valid goal keys.
 
@@ -73,7 +87,8 @@ class GoalSet:
         self.cylinders = cylinders
 
         if target_keys is None:
-            target_keys = ['Red_Top', 'Red_Side', 'Blue_Top', 'Blue_Side']
+            target_keys = ['Red_Top', 'Red_Side', 'Blue_Top', 'Blue_Side',
+                           self.PLATFORM_KEY]
         self.target_keys = target_keys
 
         # Sticky orientation memory, per goal key: None until the first time
@@ -82,6 +97,18 @@ class GoalSet:
         # _ORIENTATION_HYSTERESIS above for why this exists.
         self._last_orientation_choice = {k: None for k in self.target_keys}
 
+        # --- Grasped-object bookkeeping (set on grasp, cleared on release) ----
+        # grasped_axis_local: the cylinder's symmetry axis expressed in the
+        #   gripper frame at the instant of grasp. The placement constraint is
+        #   then simply "R_gripper @ grasped_axis_local must be vertical", which
+        #   stays valid no matter how the user later rotates the gripper about
+        #   the vertical while hovering over the platform.
+        # grasped_color / grasped_z_offset: used to compute the placement height
+        #   so the cylinder bottom rests on the platform face.
+        self.grasped_color = None
+        self.grasped_axis_local = None
+        self.grasped_z_offset = 0.0
+
     def cbf_name(self, color):
         """Returns the CBF pair name registered for this cylinder color."""
         return self.cylinders[color]['cbf_name']
@@ -89,6 +116,98 @@ class GoalSet:
     def radius(self, color):
         """Returns the cylinder radius (m) for this color."""
         return self.cylinders[color]['radius']
+
+    # ------------------------------------------------------------------
+    # Grasped-object bookkeeping (drives the Platform placement constraint)
+    # ------------------------------------------------------------------
+    def set_grasped(self, color, T_grasp):
+        """Record what was grasped and how, at the instant of grasp.
+
+        Args:
+            color: 'red' / 'blue' (case-insensitive) — the grasped cylinder.
+            T_grasp: 4x4 gripper (EE) pose at the moment the object was attached.
+
+        We freeze the cylinder symmetry axis (world +Z, since the cylinders stand
+        upright on the table) expressed in the *gripper* frame:
+            grasped_axis_local = R_grasp^T @ [0, 0, 1]
+        and the gripper's height offset relative to the cylinder center, so the
+        placement goal can put the cylinder bottom flat on the platform.
+        """
+        self.grasped_color = color.capitalize()
+        R_grasp = np.asarray(T_grasp, dtype=float)[:3, :3]
+        world_axis = np.array([0.0, 0.0, 1.0])
+        self.grasped_axis_local = R_grasp.T @ world_axis
+        cyl_center_z = self.cylinders[self.grasped_color]['pos'][2]
+        self.grasped_z_offset = float(T_grasp[2, 3] - cyl_center_z)
+
+    def clear_grasped(self):
+        """Forget the grasped object (called on release / placement)."""
+        self.grasped_color = None
+        self.grasped_axis_local = None
+        self.grasped_z_offset = 0.0
+
+    def get_platform_goal_pose(self, T_anchor, approach_offset=0.05):
+        """SE(3) placement goal on the platform disk, as a perpendicularity manifold.
+
+        Position: the anchor's XY projected onto the disk (clamped to stay
+        PLATFORM_PLACE_MARGIN inside the rim), at a Z that rests the grasped
+        cylinder's bottom on the platform face (plus the standoff approach_offset
+        so the goal hovers above before descending). Because the XY tracks the
+        anchor, the user freely chooses WHERE on the disk to place — the two
+        cylinders can be set down at different spots without colliding.
+
+        Orientation: the minimal rotation of the anchor orientation that brings
+        the grasped cylinder axis to vertical. This is exactly the
+        "cylinder axis ⊥ platform" rule: it constrains 2 DOF (the tilt) and
+        leaves the yaw about vertical free, anchored to the current gripper yaw
+        so there is no wrist flip while hovering.
+        """
+        center = self.PLATFORM_POSE
+        p_anchor = np.asarray(T_anchor, dtype=float)[:3, 3]
+        R_anchor = np.asarray(T_anchor, dtype=float)[:3, :3]
+
+        # --- Position: project onto the disk, clamp inside the rim ---
+        dxy = p_anchor[:2] - center[:2]
+        r = float(np.linalg.norm(dxy))
+        max_r = max(self.PLATFORM_RADIUS - self.PLATFORM_PLACE_MARGIN, 0.0)
+        if r > max_r and r > 1e-9:
+            dxy = dxy / r * max_r
+        p_xy = center[:2] + dxy
+
+        # Place the cylinder bottom on the platform top face.
+        if self.grasped_color is not None and self.grasped_color in self.cylinders:
+            half_h = self.cylinders[self.grasped_color]['height'] / 2.0
+        else:
+            half_h = 0.075  # sane default (15 cm cylinder)
+        platform_top = center[2] + self.PLATFORM_THICKNESS / 2.0
+        z_target = platform_top + half_h + self.grasped_z_offset + approach_offset
+        p_target = np.array([p_xy[0], p_xy[1], z_target])
+
+        # --- Orientation: minimal tilt so the cylinder axis becomes vertical ---
+        axis_local = (self.grasped_axis_local
+                      if self.grasped_axis_local is not None
+                      else np.array([0.0, 0.0, 1.0]))
+        cur_axis_world = R_anchor @ axis_local
+        n = np.linalg.norm(cur_axis_world)
+        if n > 1e-9:
+            cur_axis_world = cur_axis_world / n
+
+        # Snap to whichever vertical direction (+Z / -Z) is closer, so we never
+        # demand a needless 180-degree flip of the held object.
+        target_vert = np.array([0.0, 0.0, 1.0]) if cur_axis_world[2] >= 0.0 \
+            else np.array([0.0, 0.0, -1.0])
+
+        v = np.cross(cur_axis_world, target_vert)
+        s = float(np.linalg.norm(v))
+        c = float(np.dot(cur_axis_world, target_vert))
+        if s < 1e-8:
+            R_align = np.eye(3)  # already (anti)parallel to vertical
+        else:
+            angle = np.arctan2(s, c)
+            R_align = R.from_rotvec((v / s) * angle).as_matrix()
+        R_target = R_align @ R_anchor
+
+        return create_transform(p_target, R_target)
 
     @staticmethod
     def _rotation_distance(R_candidate, R_anchor):
@@ -174,6 +293,12 @@ class GoalSet:
         Top grasp ignored R_anchor entirely and always returned a fixed
         R.from_euler('y', 90 deg)).
         """
+        if goal_key == self.PLATFORM_KEY or goal_key.startswith('Platform'):
+            # Placement goal is a perpendicularity manifold over the disk, not a
+            # cylinder grasp — delegate. (update_memory is irrelevant here since
+            # the orientation is derived directly from the anchor each tick.)
+            return self.get_platform_goal_pose(T_anchor, approach_offset=approach_offset)
+
         color, grasp_type = goal_key.split('_')
         cyl = self.cylinders[color]
         p_cyl = cyl['pos']
