@@ -182,12 +182,24 @@ class HeadPerceptionNode(Node):
 
         r = self.latest_result
         aligned = "ALIGNED" if self.controller.is_aligned() else "slewing"
+        slack_info = f"slack={self.controller.last_slack_norm:.3f}"
         head_line = (
-            f"[HEAD] look-at err={self.controller.last_angle_deg:5.1f} deg ({aligned})"
+            f"[HEAD] look-at err={self.controller.last_angle_deg:5.1f} deg ({aligned}) {slack_info}"
+        )
+
+        # Show joint positions vs limits so we can see what's stuck.
+        q = self.kin.get_head_joint_positions()
+        q_min, q_max = self.kin.get_head_joint_limits()
+        margin_lo = q - q_min
+        margin_hi = q_max - q
+        # Mark joints that are within 0.05 rad of a limit with [!]
+        joint_info = " ".join(
+            f"j{i+1}={'[!]' if min(margin_lo[i], margin_hi[i]) < 0.05 else ''}{q[i]:+.2f}"
+            for i in range(len(q))
         )
 
         if r is None:
-            self.get_logger().info(head_line + " | perception: no frame yet")
+            self.get_logger().info(head_line + " | perception: no frame yet\n       [JOINTS] " + joint_info)
             return
 
         plane_txt = (
@@ -203,7 +215,8 @@ class HeadPerceptionNode(Node):
             head_line + "\n"
             f"       [PERCEPTION] raw={r.n_raw} crop={len(r.cropped_points) if r.cropped_points is not None else 0} "
             f"| {plane_txt} | proc={r.proc_ms:.1f} ms\n"
-            f"       [OBJECTS] {obj_txt}")
+            f"       [OBJECTS] {obj_txt}\n"
+            f"       [JOINTS] {joint_info}")
 
 
 def main():

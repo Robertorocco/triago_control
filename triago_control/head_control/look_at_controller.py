@@ -38,6 +38,7 @@ class LookAtController:
         self.kin = kin              # HeadKinematics
         self.n = len(cfg.HEAD_JOINTS)
         self.last_angle_deg = 180.0  # most recent look-at error (for telemetry)
+        self.last_slack_norm = 0.0   # QP slack magnitude (>0 means joint limits bite)
 
     # ------------------------------------------------------------------ #
     # Scan target generation                                              #
@@ -147,9 +148,12 @@ class LookAtController:
         try:
             sol = quadprog.solve_qp(H, g, C, b, meq=3)[0]
             dq = sol[:self.n]
+            slack = sol[self.n:]
+            self.last_slack_norm = float(np.linalg.norm(slack))
         except ValueError:
             # Infeasible (rare, e.g. at hard limits) -> command zero, stay safe.
             dq = np.zeros(self.n)
+            self.last_slack_norm = -1.0
         return dq
 
     def is_aligned(self) -> bool:
