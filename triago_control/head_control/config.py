@@ -27,12 +27,10 @@ import numpy as np
 # 1. CAMERA TOPICS  (override at runtime with ROS params of the same lowercase
 #    name, e.g.  --ros-args -p color_topic:=/my/color)
 # =============================================================================
-# These are best-guess PAL-style defaults for the head RGB-D camera. If the node
-# reports "waiting for camera data", run `ros2 topic list | grep -i camera` on
-# the robot and set the correct names (see main_head.py instructions).
-COLOR_TOPIC = "/head_front_camera/color/image_raw"
-DEPTH_TOPIC = "/head_front_camera/aligned_depth_to_color/image_raw"
-CAMERA_INFO_TOPIC = "/head_front_camera/color/camera_info"
+# Real TRIAGo head camera topics (RealSense D455, PAL-configured).
+COLOR_TOPIC = "/gripper_head_camera_rgbd/color/image_raw"
+DEPTH_TOPIC = "/gripper_head_camera_rgbd/depth/image_raw"
+CAMERA_INFO_TOPIC = "/gripper_head_camera_rgbd/color/camera_info"
 
 # Optical frame of the head camera (must match the URDF / existing servo script).
 CAMERA_OPTICAL_FRAME = "gripper_head_camera_rgbd_color_optical_frame"
