@@ -131,9 +131,18 @@ class ObjectDetector:
     # ------------------------------------------------------------------ #
     @staticmethod
     def _fit_cylinder(pts, cols, plane):
-        center_xy = pts[:, :2].mean(axis=0)
-        radial = np.linalg.norm(pts[:, :2] - center_xy, axis=1)
-        radius = float(np.percentile(radial, cfg.CYL_RADIUS_PERCENTILE))
+        # --- XY centre + radius via ALGEBRAIC CIRCLE FIT (Kasa) ---------
+        # The camera only sees the near-facing ARC of the cylinder, so a plain
+        # XY centroid is biased toward the camera and the radial spread
+        # over-estimates the radius. A circle fit recovers the TRUE axis centre
+        # and radius from a partial arc, removing both biases.
+        xy = pts[:, :2]
+        center_xy, radius, fit_ok = ObjectDetector._fit_circle(xy)
+        if not fit_ok:
+            # Fallback: centroid + percentile (robust if the arc is too small).
+            center_xy = xy.mean(axis=0)
+            radial = np.linalg.norm(xy - center_xy, axis=1)
+            radius = float(np.percentile(radial, cfg.CYL_RADIUS_PERCENTILE))
 
         z_min, z_max = pts[:, 2].min(), pts[:, 2].max()
         # Anchor the base at the detected table top for a meaningful height.
@@ -160,6 +169,31 @@ class ObjectDetector:
             mean_rgb=mean_rgb,
             n_points=len(pts),
         )
+
+    @staticmethod
+    def _fit_circle(xy):
+        """Algebraic (Kasa) circle fit. Returns (center_xy, radius, ok).
+
+        Minimises sum_i ((x_i-a)^2 + (y_i-b)^2 - R^2)^2 in closed form by
+        solving the linear system  [2x 2y 1] [a b c]^T = [x^2+y^2],  with
+        R = sqrt(c + a^2 + b^2). Robust for arcs >~ 90 deg; flagged not-ok if
+        the system is ill-conditioned (near-collinear points).
+        """
+        if len(xy) < 5:
+            return None, 0.0, False
+        x = xy[:, 0]
+        y = xy[:, 1]
+        A = np.column_stack((2.0 * x, 2.0 * y, np.ones_like(x)))
+        b = x * x + y * y
+        try:
+            sol, *_ = np.linalg.lstsq(A, b, rcond=None)
+        except np.linalg.LinAlgError:
+            return None, 0.0, False
+        a, c_, c = sol
+        val = c + a * a + c_ * c_
+        if val <= 0.0 or not np.isfinite(val):
+            return None, 0.0, False
+        return np.array([a, c_]), float(np.sqrt(val)), True
 
     # ------------------------------------------------------------------ #
     # 4. Colour classification (HSV)                                      #
