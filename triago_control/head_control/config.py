@@ -80,8 +80,8 @@ MAX_HEAD_VELOCITY = 0.25     # rad/s per joint (moderate, allows tracking the sc
 # Per-joint velocity-regularisation weights: heavier on proximal joints so the
 # coarse pointing is done by the wrist, keeping motion smooth and predictable.
 HEAD_JOINT_WEIGHTS = np.array([50.0, 40.0, 30.0, 10.0, 5.0, 1.0, 1.0])
-LOOKAT_SLACK_WEIGHT = 1.0    # penalty on the look-at task slack
-POSTURE_GAIN = 0.05          # null-space spring toward joint mid-range
+LOOKAT_SLACK_WEIGHT = 500.0  # HIGH penalty: the look-at task dominates over posture
+POSTURE_GAIN = 0.005         # very weak: avoid fighting the look-at task
 # Velocity-aware joint-limit CBF.
 JOINT_LIMIT_GAMMA = 2.0
 JOINT_LIMIT_BUFFER = 0.15    # rad safety buffer from the hard limit
