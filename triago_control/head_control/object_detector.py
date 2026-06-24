@@ -135,20 +135,35 @@ class ObjectDetector:
     # ------------------------------------------------------------------ #
     @staticmethod
     def _fit_cylinder(pts, cols, plane):
-        # --- XY centre + radius via ALGEBRAIC CIRCLE FIT (Kasa) ---------
-        # The camera only sees the near-facing ARC of the cylinder, so a plain
-        # XY centroid is biased toward the camera and the radial spread
-        # over-estimates the radius. A circle fit recovers the TRUE axis centre
-        # and radius from a partial arc, removing both biases.
-        xy = pts[:, :2]
-        center_xy, radius, fit_ok = ObjectDetector._fit_circle(xy)
-        if not fit_ok:
-            # Fallback: centroid + percentile (robust if the arc is too small).
-            center_xy = xy.mean(axis=0)
-            radial = np.linalg.norm(xy - center_xy, axis=1)
-            radius = float(np.percentile(radial, cfg.CYL_RADIUS_PERCENTILE))
-
+        # --- Centre & radius from the TOP SLICE ------------------------
+        # The camera looks DOWN at the table, so a cylinder's top face is fully
+        # visible (nothing occludes the top of a cylinder from above). The
+        # centroid of the top-slice points is therefore an UNBIASED estimate of
+        # the true axis (x, y) — unlike the side wall, of which we only ever see
+        # the near hemisphere, biasing the centre toward the camera. The top rim
+        # is a full circle, so it also gives a good radius. The side wall is only
+        # used for the height.
         z_min, z_max = pts[:, 2].min(), pts[:, 2].max()
+        top_mask = pts[:, 2] >= (z_max - cfg.CYL_TOP_SLICE)
+        top_xy = pts[top_mask, :2]
+
+        if len(top_xy) >= 8:
+            center_xy = top_xy.mean(axis=0)
+            radial = np.linalg.norm(top_xy - center_xy, axis=1)
+            radius = float(np.percentile(radial, cfg.CYL_RADIUS_PERCENTILE))
+            xy = top_xy                                  # coverage from the top
+        else:
+            # Fallback (top not seen): full-cluster algebraic circle fit.
+            xy = pts[:, :2]
+            center_xy, radius, fit_ok = ObjectDetector._fit_circle(xy)
+            if not fit_ok:
+                center_xy = xy.mean(axis=0)
+                radial = np.linalg.norm(xy - center_xy, axis=1)
+                radius = float(np.percentile(radial, cfg.CYL_RADIUS_PERCENTILE))
+
+        # Conservative inflation (safety for collision use; 0 by default).
+        radius += cfg.CYL_RADIUS_INFLATION
+
         # Anchor the base at the detected table top for a meaningful height.
         base_z = plane.height
         height = float(z_max - base_z)

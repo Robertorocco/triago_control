@@ -187,6 +187,11 @@ CYL_MIN_RADIUS = 0.010       # [m] plausibility gate
 CYL_MAX_RADIUS = 0.080
 CYL_MIN_HEIGHT = 0.030       # [m]
 CYL_MAX_HEIGHT = 0.400
+# Top-slice thickness used for the UNBIASED centre/radius estimate (the top face
+# of an upright cylinder is fully visible from above, unlike the side wall).
+CYL_TOP_SLICE = 0.030        # [m] take points within this of the cluster's z_max
+# Conservative radius inflation for collision use (0 = report raw estimate).
+CYL_RADIUS_INFLATION = 0.000 # [m]
 
 # =============================================================================
 # 11. COLOUR CLASSIFICATION  (red vs blue from the aligned RGB)
