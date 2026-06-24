@@ -51,7 +51,8 @@ class RobotKinematics:
         self.q_neutral = pin.neutral(self.model)
         self._define_neutral_posture()
 
-        # End-effector frame IDs (None until the URDF is confirmed to contain them)
+        # End-effector frame IDs — inject grasping frames if the URDF lacks them
+        self._ensure_grasping_frames()
         self.ee_id_right = self.model.getFrameId(cfg.RIGHT_TCP_FRAME) if self.model.existFrame(cfg.RIGHT_TCP_FRAME) else None
         self.ee_id_left = self.model.getFrameId(cfg.LEFT_TCP_FRAME) if self.model.existFrame(cfg.LEFT_TCP_FRAME) else None
 
@@ -75,6 +76,48 @@ class RobotKinematics:
             if limit_u < 100.0 and limit_l > -100.0:  # Only when limits are finite
                 self.q_neutral[joint.idx_q] = (limit_u + limit_l) / 2.0
         print("[Init] Posture Neutral Pose calculated.")
+
+    def _ensure_grasping_frames(self):
+        """Inject gripper grasping frames into the Pinocchio model if the URDF lacks them.
+
+        On the real TIAGo Pro, the URDF may not contain gripper_*_grasping_link.
+        We add them programmatically using the known offset from gripper_*_base_link:
+            translation: [0, 0, 0.157]  rotation: Ry(-90°) (pitch = -1.5708 rad)
+        This matches the static_transform_publisher used on hardware.
+        """
+        # Offset: 0.157m along parent Z, then -90° pitch (Ry)
+        R_offset = pin.rpy.rpyToMatrix(0.0, -1.5708, 0.0)
+        t_offset = np.array([0.0, 0.0, 0.157])
+        placement = pin.SE3(R_offset, t_offset)
+
+        frames_to_add = [
+            (cfg.RIGHT_TCP_FRAME, 'gripper_right_base_link'),
+            (cfg.LEFT_TCP_FRAME,  'gripper_left_base_link'),
+        ]
+
+        for tcp_name, parent_body_name in frames_to_add:
+            if self.model.existFrame(tcp_name):
+                continue  # Already in URDF, nothing to do
+            if not self.model.existFrame(parent_body_name):
+                print(f"[WARN] Cannot inject {tcp_name}: parent frame '{parent_body_name}' not found in model.")
+                continue
+            parent_frame_id = self.model.getFrameId(parent_body_name)
+            parent_joint_id = self.model.frames[parent_frame_id].parentJoint
+            # Compose: new frame placement = parent_frame_placement * offset
+            parent_placement = self.model.frames[parent_frame_id].placement
+            frame_placement = parent_placement * placement
+            new_frame = pin.Frame(
+                tcp_name,
+                parent_joint_id,
+                parent_frame_id,
+                frame_placement,
+                pin.FrameType.OP_FRAME,
+            )
+            self.model.addFrame(new_frame)
+            print(f"[Init] Injected frame '{tcp_name}' into Pinocchio model (parent: {parent_body_name}).")
+
+        # Rebuild data to account for new frames
+        self.data = self.model.createData()
 
     def update_from_joint_state(self, q_physical, time_stamp):
         # Derive + EMA-filter joint velocity from positions, bypassing corrupted encoders.

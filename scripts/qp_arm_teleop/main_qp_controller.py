@@ -28,6 +28,8 @@ from std_msgs.msg import Float64MultiArray, Float64, String
 from controller_manager_msgs.srv import SwitchController, ListControllers
 from rcl_interfaces.srv import GetParameters
 from tf2_ros import Buffer, TransformListener
+from tf2_ros.static_transform_broadcaster import StaticTransformBroadcaster
+from geometry_msgs.msg import TransformStamped
 import pinocchio as pin
 import numpy as np
 import time
@@ -55,6 +57,9 @@ class SafetyQPController(Node):
         # --- TF (kept for the start-up transform wait) ---
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
+
+        # --- STATIC TF: publish grasping frames if missing from URDF ---
+        self._publish_grasping_link_tfs()
 
         # --- BUILD MODEL + SUB-MODULES ---
         urdf_str = self.get_urdf()
@@ -154,6 +159,62 @@ class SafetyQPController(Node):
     # =====================================================================
     # SETUP HELPERS
     # =====================================================================
+    def _publish_grasping_link_tfs(self):
+        """Broadcast static TFs for gripper grasping links if not already in the TF tree.
+
+        On the real TIAGo Pro, the URDF may not include gripper_*_grasping_link.
+        We publish the same transforms that would come from a manual
+        static_transform_publisher:
+            parent: gripper_{side}_base_link
+            child:  gripper_{side}_grasping_link
+            translation: [0, 0, 0.157]
+            rotation:    RPY [0, -1.5708, 0]  (quaternion ~ [0, -0.7068, 0, 0.7074])
+        """
+        import math
+        # Check if already available in TF (give 0.5s)
+        need_right = not self.tf_buffer.can_transform(
+            'gripper_right_base_link', 'gripper_right_grasping_link',
+            rclpy.time.Time(), timeout=rclpy.duration.Duration(seconds=0.5))
+        need_left = not self.tf_buffer.can_transform(
+            'gripper_left_base_link', 'gripper_left_grasping_link',
+            rclpy.time.Time(), timeout=rclpy.duration.Duration(seconds=0.5))
+
+        if not need_right and not need_left:
+            self.get_logger().info("[TF] Grasping frames already in TF tree — no static publish needed.")
+            return
+
+        self.static_tf_broadcaster = StaticTransformBroadcaster(self)
+        transforms = []
+
+        # RPY [0, -1.5708, 0] → quaternion
+        # Ry(-pi/2): qx=0, qy=-sin(pi/4), qz=0, qw=cos(pi/4)
+        pitch = -math.pi / 2.0
+        qx, qy, qz, qw = 0.0, -math.sin(pitch / 2.0), 0.0, math.cos(pitch / 2.0)
+
+        sides = []
+        if need_right:
+            sides.append(('gripper_right_base_link', 'gripper_right_grasping_link'))
+        if need_left:
+            sides.append(('gripper_left_base_link', 'gripper_left_grasping_link'))
+
+        for parent, child in sides:
+            t = TransformStamped()
+            t.header.stamp = self.get_clock().now().to_msg()
+            t.header.frame_id = parent
+            t.child_frame_id = child
+            t.transform.translation.x = 0.0
+            t.transform.translation.y = 0.0
+            t.transform.translation.z = 0.157
+            t.transform.rotation.x = qx
+            t.transform.rotation.y = qy
+            t.transform.rotation.z = qz
+            t.transform.rotation.w = qw
+            transforms.append(t)
+
+        self.static_tf_broadcaster.sendTransform(transforms)
+        published_names = [s[1] for s in sides]
+        self.get_logger().info(f"[TF] Published static grasping frames: {published_names}")
+
     def get_urdf(self):
         # Fetch the robot_description string from robot_state_publisher.
         client = self.create_client(GetParameters, '/robot_state_publisher/get_parameters')
