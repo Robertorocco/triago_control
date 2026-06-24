@@ -135,36 +135,22 @@ class ObjectDetector:
     # ------------------------------------------------------------------ #
     @staticmethod
     def _fit_cylinder(pts, cols, plane):
-        # --- Centre & radius from the TOP SLICE ------------------------
-        # The camera looks DOWN at the table, so a cylinder's top face is fully
-        # visible (nothing occludes the top of a cylinder from above). The
-        # centroid of the top-slice points is therefore an UNBIASED estimate of
-        # the true axis (x, y) — unlike the side wall, of which we only ever see
-        # the near hemisphere, biasing the centre toward the camera. The top rim
-        # is a full circle, so it also gives a good radius. The side wall is only
-        # used for the height.
-        z_min, z_max = pts[:, 2].min(), pts[:, 2].max()
-        top_mask = pts[:, 2] >= (z_max - cfg.CYL_TOP_SLICE)
-        top_xy = pts[top_mask, :2]
-
-        if len(top_xy) >= 8:
-            center_xy = top_xy.mean(axis=0)
-            radial = np.linalg.norm(top_xy - center_xy, axis=1)
+        # --- XY centre + radius via ALGEBRAIC CIRCLE FIT (Kasa) ---------
+        # Recovers the axis centre + radius from the visible arc. (We tried a
+        # top-slice centroid; on the real robot it didn't reduce the residual
+        # — that residual is a systematic head-camera extrinsic bias upstream
+        # of the fit, handled separately via cfg.PERCEPTION_XYZ_OFFSET — and it
+        # corrupted the fit-quality metric, so we keep the circle fit here.)
+        xy = pts[:, :2]
+        center_xy, radius, fit_ok = ObjectDetector._fit_circle(xy)
+        if not fit_ok:
+            center_xy = xy.mean(axis=0)
+            radial = np.linalg.norm(xy - center_xy, axis=1)
             radius = float(np.percentile(radial, cfg.CYL_RADIUS_PERCENTILE))
-            xy = top_xy                                  # coverage from the top
-        else:
-            # Fallback (top not seen): full-cluster algebraic circle fit.
-            xy = pts[:, :2]
-            center_xy, radius, fit_ok = ObjectDetector._fit_circle(xy)
-            if not fit_ok:
-                center_xy = xy.mean(axis=0)
-                radial = np.linalg.norm(xy - center_xy, axis=1)
-                radius = float(np.percentile(radial, cfg.CYL_RADIUS_PERCENTILE))
 
-        # Conservative inflation (safety for collision use; 0 by default).
         radius += cfg.CYL_RADIUS_INFLATION
 
-        # Anchor the base at the detected table top for a meaningful height.
+        z_min, z_max = pts[:, 2].min(), pts[:, 2].max()
         base_z = plane.height
         height = float(z_max - base_z)
         center_z = base_z + height / 2.0
@@ -201,10 +187,15 @@ class ObjectDetector:
         color_name, mean_rgb = ObjectDetector._classify_color(cols)
         label = f"{color_name}_cylinder" if color_name != "unknown" else "unknown_object"
 
+        # Optional empirical head-camera bias correction (calibration). Default
+        # is zero (honest raw perception). Set cfg.PERCEPTION_XYZ_OFFSET to the
+        # measured systematic offset (perceived - true) to compensate.
+        center = np.array([center_xy[0], center_xy[1], center_z]) + cfg.PERCEPTION_XYZ_OFFSET
+
         return DetectedObject(
             label=label,
             color_name=color_name,
-            center=np.array([center_xy[0], center_xy[1], center_z]),
+            center=center,
             radius=radius,
             height=height,
             axis=plane.normal.copy(),

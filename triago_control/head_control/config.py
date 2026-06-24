@@ -193,6 +193,16 @@ CYL_TOP_SLICE = 0.030        # [m] take points within this of the cluster's z_ma
 # Conservative radius inflation for collision use (0 = report raw estimate).
 CYL_RADIUS_INFLATION = 0.000 # [m]
 
+# Empirical head-camera bias correction (CALIBRATION). The arm chain grasps the
+# cylinders correctly at their base_footprint config positions (x=0.80), but the
+# HEAD-camera chain (base -> 7 head joints -> optical frame -> depth) is a
+# separate, unvalidated chain that exhibits a systematic ~3cm offset on this
+# setup. This is a legitimate one-time extrinsic calibration: measure
+# (perceived_centre - true_centre) for a known object and put the NEGATIVE of it
+# here to compensate. Default zero = raw, honest perception (the ~3cm then
+# stands as genuine real-world sensing uncertainty).
+PERCEPTION_XYZ_OFFSET = np.array([0.0, 0.0, 0.0])   # [m] added to every object centre
+
 # =============================================================================
 # 11. COLOUR CLASSIFICATION  (red vs blue from the aligned RGB)
 # =============================================================================
