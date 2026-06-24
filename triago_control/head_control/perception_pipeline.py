@@ -24,6 +24,7 @@ import triago_control.head_control.config as cfg
 from triago_control.head_control.table_segmenter import TableSegmenter
 from triago_control.head_control.object_detector import ObjectDetector, DetectedObject
 from triago_control.head_control.voxel_map import VoxelMap
+from triago_control.head_control.object_tracker import ObjectTracker
 
 
 @dataclass
@@ -43,7 +44,8 @@ class PerceptionPipeline:
     def __init__(self):
         self.segmenter = TableSegmenter()
         self.detector = ObjectDetector()
-        self._tracked = []                  # persistent EMA-smoothed objects
+        self.tracker = ObjectTracker()     # object-level temporal fusion
+        self._tracked = []                  # (legacy, unused)
         self.voxel_map = VoxelMap() if cfg.ENABLE_ACCUMULATION else None
 
     # ------------------------------------------------------------------ #
@@ -72,13 +74,17 @@ class PerceptionPipeline:
     # ------------------------------------------------------------------ #
     # Main                                                                #
     # ------------------------------------------------------------------ #
-    def process(self, points_optical, colors, R_cam_base, t_cam_base, allow_integrate=True):
+    def process(self, points_optical, colors, R_cam_base, t_cam_base,
+                allow_integrate=True, allow_track_update=True):
         """Run the full pipeline. Returns a PerceptionResult.
 
         R_cam_base, t_cam_base : the camera-optical -> base_footprint transform,
         looked up from TF at the depth frame's timestamp (correct frame + time).
-        allow_integrate : only fuse this frame into the voxel map when True
-        (the caller passes False while the head is moving, to avoid smearing).
+        allow_integrate : (voxel-map only) fuse this frame's points — kept for
+        the optional VoxelMap path; off by default.
+        allow_track_update : fuse this frame's DETECTIONS into the object tracker
+        — the caller passes False while the head is moving so only clean,
+        settled-frame detections update the grow-only object estimates.
         """
         import time
         t0 = time.perf_counter()
@@ -132,39 +138,9 @@ class PerceptionPipeline:
         # 4. Cluster + fit + classify.
         detections = self.detector.detect(above_pts, above_cols, plane)
 
-        # 5. Temporal smoothing.
-        res.objects = self._smooth(detections)
+        # 5. Object-level temporal fusion (grow-only dims + persistence). Only
+        # fuse when the head is settled so motion never corrupts the estimate.
+        res.objects = self.tracker.update(detections, allow_update=allow_track_update)
 
         res.proc_ms = (time.perf_counter() - t0) * 1e3
         return res
-
-    # ------------------------------------------------------------------ #
-    # Temporal EMA association                                            #
-    # ------------------------------------------------------------------ #
-    def _smooth(self, detections):
-        """Associate each new detection to the nearest tracked object and EMA
-        its centre/radius/height. Keeps poses steady despite per-frame noise.
-        New objects are added; stale ones (unmatched this frame) are dropped.
-        """
-        a = cfg.DETECTION_EMA_ALPHA
-        updated = []
-        used_tracks = set()
-
-        for det in detections:
-            best_i, best_d = -1, cfg.DETECTION_MATCH_DIST
-            for i, tr in enumerate(self._tracked):
-                if i in used_tracks:
-                    continue
-                d = np.linalg.norm(tr.center - det.center)
-                if d < best_d:
-                    best_d, best_i = d, i
-            if best_i >= 0:
-                tr = self._tracked[best_i]
-                used_tracks.add(best_i)
-                det.center = a * det.center + (1 - a) * tr.center
-                det.radius = a * det.radius + (1 - a) * tr.radius
-                det.height = a * det.height + (1 - a) * tr.height
-            updated.append(det)
-
-        self._tracked = updated
-        return updated

@@ -103,17 +103,13 @@ LOOKAT_ALIGNED_DEG = 4.0
 # A single viewpoint sees the table top fine, but a slow sweep fills occluded
 # regions and lets temporal smoothing average out depth noise. Disable if you
 # want a static head.
-# IMPORTANT — scan is OFF by design. Fusing depth across different head
-# ORIENTATIONS smears the map: the camera here only re-aims (it barely changes
-# POSITION), so multi-view adds no parallax benefit but stacks sub-degree
-# extrinsic error into a >1cm smear (plane jumps, cylinders stretch, phantom
-# objects). With the head STATIC, accumulation becomes pure noise-averaging at
-# one viewpoint -> clean, stable convergence onto the table.
-# Two future paths to genuine multi-view gain (both deliberate additions):
-#   (a) orbit the camera POSITION around the table (vary the head posture), or
-#   (b) ICP-register each frame to the map before fusing (drift-free fusion).
-ENABLE_SCAN = False
-SCAN_DWELL_S = 4.0           # [s] (unused while scan is off)
+# Re-ENABLED: with object-level tracking (grow-only dims + cumulative coverage),
+# head motion now HELPS — each settled waypoint adds a viewpoint that grows the
+# box toward true size and fills angular coverage, with NO point-cloud smear
+# (we fuse derived object quantities, not raw points). Tracker updates are
+# gated to settled frames (INTEGRATE_VEL_THRESH) so motion never corrupts them.
+ENABLE_SCAN = True
+SCAN_DWELL_S = 4.0           # [s] time parked at each waypoint (settle + fuse)
 SCAN_WAYPOINTS = [
     (0.00, 0.00),
     (0.08, 0.12),
@@ -206,10 +202,18 @@ BLUE_HUE_HIGH = 0.75
 # =============================================================================
 # 12. TEMPORAL SMOOTHING + LOOP RATES
 # =============================================================================
-# EMA on matched detections across frames -> stable poses despite depth noise.
-DETECTION_EMA_ALPHA = 0.40   # 0..1, higher = more responsive / less smooth
-# Max distance to associate a detection with the previous frame's object.
-DETECTION_MATCH_DIST = 0.10  # [m]
+# Object-level tracker (grow-only dims + persistence) — the robust alternative
+# to point-cloud fusion. Fuses DERIVED object quantities across viewpoints, so
+# head motion HELPS (more arc -> bigger/ truer box, more coverage) without the
+# point-registration smear that broke voxel accumulation.
+TRACK_MATCH_DIST = 0.15      # [m] associate a detection to a track within this
+TRACK_MAX_UNSEEN = 15        # frames an unmatched track survives (~3s @5Hz)
+TRACK_POS_ALPHA = 0.30       # EMA on position (0..1, higher = more responsive)
+TRACK_DIM_DECAY = 0.02       # slow shrink of grow-only dims (lets over-grow recover)
+
+# (legacy single-frame EMA association — no longer used, kept for reference)
+DETECTION_EMA_ALPHA = 0.40
+DETECTION_MATCH_DIST = 0.10
 
 # Velocity EMA filter (mirrors qp_controller's corrupted-encoder workaround):
 # TRIAGo joint_states velocity field is unreliable. Derive velocity from

@@ -43,6 +43,7 @@ class DetectedObject:
     arc_coverage: float = 0.0               # [0..1] fraction of circumference seen
     fit_rms: float = 0.0                    # [m] RMS radial residual of the circle fit
     confidence: float = 0.0                 # [0..1] overall estimation confidence
+    arc_bins: np.ndarray = None             # (36,) bool mask of observed 10-deg sectors
 
 
 class ObjectDetector:
@@ -169,7 +170,9 @@ class ObjectDetector:
         ang = np.arctan2(rel[:, 1], rel[:, 0])              # [-pi, pi]
         n_bins = 36                                         # 10 deg bins
         bins = ((ang + np.pi) / (2 * np.pi) * n_bins).astype(int) % n_bins
-        arc_coverage = float(np.unique(bins).size) / n_bins
+        arc_bins = np.zeros(n_bins, dtype=bool)
+        arc_bins[np.unique(bins)] = True
+        arc_coverage = float(arc_bins.sum()) / n_bins
 
         # Fit residual: RMS of |radial - radius| (lower = cleaner circle).
         radial_about_fit = np.linalg.norm(rel, axis=1)
@@ -195,6 +198,7 @@ class ObjectDetector:
             arc_coverage=arc_coverage,
             fit_rms=fit_rms,
             confidence=confidence,
+            arc_bins=arc_bins,
         )
 
     @staticmethod

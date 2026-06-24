@@ -214,7 +214,8 @@ class HeadPerceptionNode(Node):
         self._last_integrated = allow_integrate
 
         result = self.pipeline.process(
-            points_optical, colors, R_cam_base, t_cam_base, allow_integrate=allow_integrate
+            points_optical, colors, R_cam_base, t_cam_base,
+            allow_integrate=allow_integrate, allow_track_update=allow_integrate
         )
         self.latest_result = result
 
