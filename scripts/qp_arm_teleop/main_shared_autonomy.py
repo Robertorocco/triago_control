@@ -105,7 +105,7 @@ class SharedControlNode(Node):
         self.BLENDING = False    # Augment human input with the optimal policy vs. strictly executing it
         self.TASK_DIM = 6        # 6 for full SE(3) tracking, 5 for S^2 grasping (align X-axis only)
 
-        self.POLICY_BELIEF_TEST = True   # <-- flip this to switch modes
+        self.POLICY_BELIEF_TEST = False   # <-- flip this to switch modes
         # When True:  the node injects pi_stars[test_goal_key] as the fake human
         #             velocity instead of reading from the Haption topic, and
         #             commands the robot directly via /arm_right/cartesian_reference.
