@@ -1094,9 +1094,9 @@ class SharedControlNode(Node):
         m.pose.position.y = float(T_EE[1, 3])
         m.pose.position.z = float(T_EE[2, 3])
         m.pose.orientation.w = 1.0
-        m.scale.x = 0.20
-        m.scale.y = 0.20
-        m.scale.z = 0.20
+        m.scale.x = 0.06
+        m.scale.y = 0.06
+        m.scale.z = 0.06
         m.color.r = 0.1
         m.color.g = 1.0
         m.color.b = 0.1

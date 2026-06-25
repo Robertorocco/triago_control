@@ -95,10 +95,15 @@ class GraspStateMachine:
 
     # --- Tunables (moved out of the node, kept as class-level constants so they
     # can be overridden per-instance without touching the handler logic) ---
-    POS_ERR_ENTER = 0.04
-    ANG_ERR_ENTER = 0.15
-    POS_ERR_STAY = 0.06
-    ANG_ERR_STAY = 0.20
+    # NOTE: alignment is measured against the STANDOFF goal (approach_offset=0.05).
+    # The guidance can drive the gripper right up to the cylinder (past the
+    # standoff), which pushes pos_error back up toward ~0.05; thresholds are kept
+    # forgiving enough (ENTER > standoff) that being at/near the surface still
+    # counts as "aligned" so the grasp stays committable.
+    POS_ERR_ENTER = 0.06
+    ANG_ERR_ENTER = 0.20
+    POS_ERR_STAY = 0.09
+    ANG_ERR_STAY = 0.28
 
     BELIEF_ENTER = 0.90   # belief threshold required to *enter* PRE_GRASP
     BELIEF_STAY = 0.75    # relaxed belief threshold required to *stay* in PRE_GRASP
