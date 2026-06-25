@@ -684,15 +684,21 @@ class SharedControlNode(Node):
             if not grasp_exec_now:
                 # engagement: how actively the user is moving (linear speed).
                 speed = float(np.linalg.norm(self.current_v_h[0:3]))
-                engagement = float(np.clip(
-                    (speed - self.BELIEF_V_LOW) / max(self.BELIEF_V_HIGH - self.BELIEF_V_LOW, 1e-6),
-                    0.0, 1.0))
-                # warmup: slow learning for the first BELIEF_WARMUP_S after a reset.
-                warmup = float(np.clip(
-                    (time.time() - self._belief_warmup_start) / self.BELIEF_WARMUP_S,
-                    self.BELIEF_WARMUP_FLOOR, 1.0))
-                self.belief_estimator.update(
-                    self.current_v_h, user_policies, gain=engagement * warmup)
+                if speed > self.BELIEF_V_LOW:
+                    # User actively moving -> update belief, resuming SMOOTHLY from
+                    # the held history. Below the threshold the belief is FROZEN
+                    # (the update is skipped entirely — no EMA decay either), so the
+                    # intent inferred from past motion is preserved verbatim until
+                    # the user decides to move again.
+                    engagement = float(np.clip(
+                        (speed - self.BELIEF_V_LOW) / max(self.BELIEF_V_HIGH - self.BELIEF_V_LOW, 1e-6),
+                        0.0, 1.0))
+                    warmup = float(np.clip(
+                        (time.time() - self._belief_warmup_start) / self.BELIEF_WARMUP_S,
+                        self.BELIEF_WARMUP_FLOOR, 1.0))
+                    self.belief_estimator.update(
+                        self.current_v_h, user_policies, gain=engagement * warmup)
+                # else: user still -> FREEZE belief (hold history, no decay)
 
             self.plot_manager.push_beliefs(
                 self.belief_estimator.get_beliefs(),
