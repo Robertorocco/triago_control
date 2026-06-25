@@ -147,7 +147,7 @@ class SharedControlNode(Node):
         self.W = np.diag([10.0, 10.0, 10.0, 1.0, 1.0, 1.0])
         self.plot_lock = threading.Lock()
         self.belief_estimator = BeliefEstimator(
-            target_keys=self.target_keys, W=self.W, beta=0.04, ema_alpha=0.995)
+            target_keys=self.target_keys, W=self.W, beta=0.02, ema_alpha=0.999)
         # The Platform placement goal only becomes demandable once something is
         # actually held — exclude it while the gripper is empty.
         self.belief_estimator.set_excluded_goals({self.goal_set.PLATFORM_KEY})
@@ -219,9 +219,10 @@ class SharedControlNode(Node):
         else:
             self.get_logger().warn(
                 "[INIT] linkattacher_msgs not found — plugin grasp disabled.")
-        self.sub_trigger = self.create_subscription(Bool, '/haption/trigger', self.trigger_callback, 10)
+        self.sub_trigger = self.create_subscription(Bool, 'virtuose/button_left', self.trigger_callback, 10)
 
         self.trigger_cmd = False  # consumed event flag
+        self._grasp_cue_phase = 0.0  # pulsing animation counter for PRE_GRASP sphere
 
         # --- Grasp contact confirmation ---
         # Signed gripper<->cylinder collision distance published by teleop.
@@ -711,8 +712,11 @@ class SharedControlNode(Node):
         trigger_pulled = self.trigger_cmd
         self.trigger_cmd = False
 
-        # Block human arm input during active grasp execution
-        if self.grasp_sm.state in ("GRASP_APPROACH", "GRASP_CLOSE"):
+        # Block human arm input during active grasp execution + lift.
+        # The Haption input is disconnected: the grasp state machine drives the
+        # arm autonomously through approach, close and lift. Teleoperation
+        # resumes automatically once HOLDING is reached.
+        if self.grasp_sm.state in ("GRASP_APPROACH", "GRASP_CLOSE", "LIFT"):
             self.current_v_h = np.zeros(6)
 
         # --- 4. THE GRASPING STATE MACHINE (delegated) ---
@@ -827,6 +831,18 @@ class SharedControlNode(Node):
 
                 # Keep a single precise TF frame on the active goal for pose debugging.
                 self.broadcast_goal_frame(self.active_goal_key, T_active_goal)
+
+                # PRE_GRASP visual cue: pulsing green sphere + one-shot console msg
+                if self.grasp_sm.state == "PRE_GRASP":
+                    self.publish_grasp_ready_cue(self.current_T_EE)
+                    if not getattr(self, '_pregrasp_cue_logged', False):
+                        self._pregrasp_cue_logged = True
+                        self.get_logger().info(
+                            "=== [PRE-GRASP READY] Aligned! Press LEFT BUTTON on Haption to execute grasp. ===")
+                else:
+                    if getattr(self, '_pregrasp_cue_logged', False):
+                        self._pregrasp_cue_logged = False
+                        self.clear_grasp_ready_cue()
 
             # Inference state (consumed by the haptic force manager) is lightweight
             # Float64MultiArray traffic — keep it at the full control rate.
@@ -1024,6 +1040,54 @@ class SharedControlNode(Node):
                 self.create_gripper_markers(T_goal, opacity, i, now,
                                             ns="goal_poses", rgb=rgb))
         self.pub_markers.publish(marker_array)
+
+    def publish_grasp_ready_cue(self, T_EE):
+        """Publish a pulsing green sphere around the EE when PRE_GRASP is active.
+
+        The sphere pulses between opacity 0.3 and 0.7 at ~2 Hz, signalling to the
+        operator that the grasp is available (left button commits). Disappears
+        automatically when the state leaves PRE_GRASP.
+        """
+        import math
+        self._grasp_cue_phase += 0.05  # ~20 Hz viz rate * 0.05 ≈ 1 full cycle/s
+        pulse = 0.5 + 0.2 * math.sin(self._grasp_cue_phase * 2.0 * math.pi)
+
+        m = Marker()
+        m.header.frame_id = "base_footprint"
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.ns = "grasp_ready_cue"
+        m.id = 0
+        m.type = Marker.SPHERE
+        m.action = Marker.ADD
+        m.pose.position.x = float(T_EE[0, 3])
+        m.pose.position.y = float(T_EE[1, 3])
+        m.pose.position.z = float(T_EE[2, 3])
+        m.pose.orientation.w = 1.0
+        m.scale.x = 0.12
+        m.scale.y = 0.12
+        m.scale.z = 0.12
+        m.color.r = 0.2
+        m.color.g = 1.0
+        m.color.b = 0.2
+        m.color.a = float(pulse)
+        m.lifetime.sec = 0
+        m.lifetime.nanosec = 200000000  # 200 ms — auto-expires if we stop publishing
+
+        ma = MarkerArray()
+        ma.markers.append(m)
+        self.pub_markers.publish(ma)
+
+    def clear_grasp_ready_cue(self):
+        """Remove the pulsing sphere when leaving PRE_GRASP."""
+        m = Marker()
+        m.header.frame_id = "base_footprint"
+        m.header.stamp = self.get_clock().now().to_msg()
+        m.ns = "grasp_ready_cue"
+        m.id = 0
+        m.action = Marker.DELETE
+        ma = MarkerArray()
+        ma.markers.append(m)
+        self.pub_markers.publish(ma)
 
     def compute_v_geo(self, T_EE, T_goal):
         """Computes the LOCAL_WORLD_ALIGNED decoupled spatial velocity error with
