@@ -183,10 +183,10 @@ class GoalSet:
                 self._last_side_radial[k] = None
 
     def platform_rest_z(self, color):
-        """World Z of an upright cylinder of `color` resting on the placement surface."""
+        """World Z of an upright cylinder of `color` resting on the table top (z=0.70)."""
+        TABLE_TOP_Z = 0.70   # table center 0.35 + half-height 0.35
         half_h = self.cylinders[color.capitalize()]['height'] / 2.0
-        platform_top = self.PLATFORM_POSE[2] + self.PLATFORM_THICKNESS / 2.0
-        return float(platform_top + half_h)
+        return float(TABLE_TOP_Z + half_h)
 
     def get_platform_goal_pose(self, T_anchor, approach_offset=0.05):
         """SE(3) placement goal on the platform disk, as a perpendicularity manifold.

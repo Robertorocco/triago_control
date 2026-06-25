@@ -181,6 +181,8 @@ class VisualizationEngine:
             if box_id is not None and box_id < len(self.cmodel.geometryObjects):
                 self.cmodel.geometryObjects[box_id].overrideMaterial = False
             self.meshcat_reload_pending = True
+
+    def _run_viz(self):
         # SOLE owner of Meshcat WebSocket calls: reload on demand, then display LIVE q.
         while True:
             q = self._q_provider() if self._q_provider is not None else None

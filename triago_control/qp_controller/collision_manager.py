@@ -346,6 +346,32 @@ class CollisionManager:
         geom.placement = world_pose
         geom.parentJoint = 0
 
+        # Remove the cylinder↔table pair that was added during attach (the cylinder
+        # was a moving arm link then, so table collision made sense). Now that the
+        # cylinder is RESTING on the table, that pair fires at distance ~0 and
+        # explodes the SoftMin. The original pre-grasp world never had this pair
+        # (cylinders on the table are in workspace_obstacle_ids and only check vs
+        # the arms, not vs the table). Also remove cylinder↔ground for the same reason.
+        table_id = self.workspace_obstacle_ids[0] if self.workspace_obstacle_ids else None
+        pairs_to_remove = []
+        for k in range(len(self.cmodel.collisionPairs)):
+            cp = self.cmodel.collisionPairs[k]
+            ids = {cp.first, cp.second}
+            if cyl_id not in ids:
+                continue
+            other = (ids - {cyl_id}).pop()
+            # Remove pairs vs table and ground (the cylinder rests on/touches these)
+            if other == table_id or other == self.ground_id:
+                pairs_to_remove.append(k)
+            # Also remove pairs vs body (base, torso) that were added at attach —
+            # a static resting cylinder should only be checked vs the arms.
+            if other in set(self.body_geom_ids):
+                pairs_to_remove.append(k)
+
+        # Remove in reverse order to keep indices valid.
+        for k in sorted(set(pairs_to_remove), reverse=True):
+            self.cmodel.removeCollisionPair(self.cmodel.collisionPairs[k])
+
         # Rebuild cdata for the (unchanged-size) pair set and revalidate so the
         # same control tick can query distances without a stale array.
         self.cdata = self.cmodel.createData()
