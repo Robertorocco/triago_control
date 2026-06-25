@@ -318,14 +318,14 @@ class CollisionManager:
 
         return added_names, skipped_names, adjacency
 
-    def detach_object(self, cyl_id, current_q):
+    def detach_object(self, cyl_id, current_q, world_pos=None):
         """Re-parent a previously-attached cylinder back to the world (inverse of attach).
 
-        Freezes the cylinder at its CURRENT world pose (read from the live
-        geometry data) and re-parents it onto the universe joint (id 0), so it
-        becomes a static obstacle again exactly where it was released — it stops
-        following the wrist. The collision pairs created at attach time are kept
-        (they are all valid for a static obstacle); only the parentJoint and
+        Re-parents the cylinder geometry onto the universe joint (id 0). If
+        `world_pos` is given (the perfect-fall placement position computed by the
+        shared-autonomy node), the cylinder is placed UPRIGHT there; otherwise it
+        is frozen at its current live pose. The collision pairs created at attach
+        time are kept (all valid for a static obstacle); only the parentJoint and
         placement change, mirroring attach_object_visually.
 
         The caller is responsible for dropping the cylinder from the attached_*
@@ -334,7 +334,12 @@ class CollisionManager:
         """
         # Make sure oMg reflects the current configuration before snapshotting.
         pin.updateGeometryPlacements(self.model, self.data, self.cmodel, self.cdata, current_q)
-        world_pose = self.cdata.oMg[cyl_id].copy()
+
+        if world_pos is not None:
+            # Upright cylinder resting at the placement location (perfect fall).
+            world_pose = pin.SE3(np.eye(3), np.asarray(world_pos, dtype=float))
+        else:
+            world_pose = self.cdata.oMg[cyl_id].copy()
 
         geom = self.cmodel.geometryObjects[cyl_id]
         # parentJoint 0 == universe, so the geometry placement IS the world pose.

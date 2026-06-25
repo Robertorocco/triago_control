@@ -150,6 +150,7 @@ class GraspStateMachine:
         self.grip_contact_detected = False
         self.grip_force_stable_since = None
         self._lift_start_time = None  # reset for LIFT phase
+        self._release_lift_start = None  # reset for RELEASE_LIFT (post-OPEN) phase
         self._holding_entered = False  # latch so the HOLDING banner prints once per grasp
 
         self._last_state_logged = None
@@ -170,6 +171,7 @@ class GraspStateMachine:
             "GRASP_CLOSE": self._grasp_close,
             "LIFT": self._lift,
             "HOLDING": self._holding,
+            "RELEASE_LIFT": self._release_lift,
         }
 
     def _transition(self, new_state):
@@ -196,7 +198,7 @@ class GraspStateMachine:
         between PRE_GRASP and SHARED_AUTONOMY is re-evaluated every tick based on
         belief + alignment.
         """
-        if self._state in ("GRASP_CLOSE", "GRASP_APPROACH", "LIFT", "HOLDING", "GRASP_ALIGN"):
+        if self._state in ("GRASP_CLOSE", "GRASP_APPROACH", "LIFT", "HOLDING", "GRASP_ALIGN", "RELEASE_LIFT"):
             # GRASP_* and LIFT are pure run-to-completion phases. HOLDING is
             # special: while an object is in the gripper the PRE_GRASP branch is
             # deliberately UNREACHABLE (you cannot commit a second grasp with the
@@ -612,6 +614,51 @@ class GraspStateMachine:
         # Pass the outer-loop policy straight through (drive toward the active goal).
         return TickOutput(
             target_twist=inp.pi_max,
+            new_state=self._state,
+            ignore_cbf=None,
+            grasp_margin=None,
+            log_lines=log_lines,
+        )
+
+    # ------------------------------------------------------------------
+    # PHASE 6: RELEASE_LIFT (post-OPEN: move clear of the just-placed object)
+    # ------------------------------------------------------------------
+    def _release_lift(self, inp: TickInput) -> TickOutput:
+        """Dual of the post-CLOSE LIFT, executed after the object is released.
+
+        Right after OPEN the gripper is sitting on top of the freshly-placed
+        cylinder, which is being re-introduced into the collision world with a
+        smooth barrier ramp. We drive a slow vertical lift to move clear of it
+        BEFORE the barrier fully engages, then hand control back to the user
+        (SHARED_AUTONOMY). Mirrors _lift but returns to SHARED_AUTONOMY instead
+        of HOLDING.
+        """
+        self._transition("RELEASE_LIFT")
+        log_lines = []
+
+        if self._release_lift_start is None:
+            self._release_lift_start = time.time()
+            log_lines.append(
+                ("info", f"[RELEASE-LIFT] Moving ~{self.LIFT_HEIGHT * 100:.0f} cm clear of the "
+                         f"placed object before the barrier engages."))
+
+        elapsed = time.time() - self._release_lift_start
+
+        if elapsed < self.LIFT_DURATION:
+            target_twist = np.array([0.0, 0.0, self.LIFT_VELOCITY, 0.0, 0.0, 0.0])
+            return TickOutput(
+                target_twist=target_twist,
+                new_state=self._state,
+                ignore_cbf=None,
+                grasp_margin=None,
+                log_lines=log_lines,
+            )
+
+        # Clear of the object -> return control to the user.
+        self._transition("SHARED_AUTONOMY")
+        log_lines.append(("info", "[RELEASE-LIFT] Clear. Teleoperation resumed."))
+        return TickOutput(
+            target_twist=np.zeros(6),
             new_state=self._state,
             ignore_cbf=None,
             grasp_margin=None,

@@ -97,7 +97,17 @@ class SharedAutonomyHandler:
             parts = cmd.split('_')
             # Defer to the QP loop: reading the cylinder's live world pose needs
             # the freshly-updated kinematics (same reason as ATTACH).
-            self.pending_detach = (parts[1].lower(), parts[2].lower())
+            # Optional trailing floats carry the perfect-fall placement pose:
+            #   DETACH_<ARM>_<COLOR>_<x>_<y>_<z>
+            arm = parts[1].lower()
+            color = parts[2].lower()
+            world_pos = None
+            if len(parts) >= 6:
+                try:
+                    world_pos = [float(parts[3]), float(parts[4]), float(parts[5])]
+                except ValueError:
+                    world_pos = None
+            self.pending_detach = (arm, color, world_pos)
 
     def ignore_col_callback(self, msg):
         # Dynamically add/remove targets from the CBF bypass set (+/-/CLEAR protocol).
@@ -209,7 +219,7 @@ class SharedAutonomyHandler:
         # 3. Update Meshcat visuals (opaque orange) via the thread-safe viz engine
         self.viz.paint_grasp_intent(arm_side, color, self.col, opaque=True)
 
-    def detach_object_visually(self, arm_side, color):
+    def detach_object_visually(self, arm_side, color, world_pos=None):
         # Inverse of attach: release a carried cylinder back into the world.
         self.node.get_logger().info(
             f"\033[93m[TOPOLOGY] Detaching {color} cylinder from {arm_side} gripper.\033[0m")
@@ -220,10 +230,10 @@ class SharedAutonomyHandler:
                 f"[TOPOLOGY] {color} cylinder is not attached — nothing to detach.")
             return
 
-        # 1. RE-PARENT GEOMETRY BACK TO THE WORLD (frozen at the release pose).
-        #    Mirrors attach_object_visually: only parentJoint/placement change, so
-        #    distances, nearest points and the pair set stay continuous.
-        self.col.detach_object(cyl_id, self.kin.current_q)
+        # 1. RE-PARENT GEOMETRY BACK TO THE WORLD. If a perfect-fall placement
+        #    pose was provided, the cylinder is set down UPRIGHT there; otherwise
+        #    it is frozen at its current pose. Only parentJoint/placement change.
+        self.col.detach_object(cyl_id, self.kin.current_q, world_pos=world_pos)
 
         # 2. Drop the payload bookkeeping so the SoftMin stops treating the
         #    cylinder as a fused arm link (adjacency exclusion no longer applies).

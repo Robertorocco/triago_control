@@ -564,7 +564,13 @@ The `main_shared_autonomy.py` node implements:
 | `GRASP_CLOSE` → `LIFT` | Sends `ATTACH_*` (re-parents cylinder as a real arm link in the QP collision world) and **clears** the gripper↔cylinder CBF bypass (`ignore_cbf="None"`) so the held cylinder now actively avoids the environment — it is treated as a link of the arm chain, with the handler's 3 s barrier ramp. |
 | `LIFT` | Slow blind vertical lift: `LIFT_VELOCITY=0.025 m/s × LIFT_DURATION=2.0 s = 5 cm` clear of the table, then → `HOLDING`. |
 | `HOLDING` | Shared autonomy **resumes**: `_holding` passes the outer-loop policy (`pi_max`) straight through, so the user can drive the loaded gripper toward any remaining goal and the belief estimator keeps predicting. **PRE_GRASP is unreachable while holding** (no second grasp with the same gripper). A console banner announces available goals. |
-| Release | A trigger pull (or console `OPEN`) in HOLDING → `_release_object()`: opens gripper, detaches the Gazebo plugin weld, **publishes `DETACH_<arm>_<color>`** (QP-side detach), and resets to `SHARED_AUTONOMY` as if freshly started (accounting for the now-placed cylinder). **No dedicated PLACE phase.** |
+| Release | A trigger pull (or console `OPEN`) in HOLDING → `_release_object()`: opens gripper, detaches the Gazebo plugin weld, **publishes `DETACH_<arm>_<color>_<x>_<y>_<z>`** with the perfect-fall placement pose, **relocates the cylinder in the world model** (`goal_set.relocate_cylinder`) so the re-enabled grasp goals point where it was placed (NOT the spawn), then enters **`RELEASE_LIFT`**. |
+| `RELEASE_LIFT` | Dual of the post-CLOSE `LIFT`: a slow vertical lift to move clear of the just-placed object while its CBF barrier ramps in, then → `SHARED_AUTONOMY` (control returned to the user). Belief frozen, Haption yielded, authority handed over — same as the grasp-execution phases. |
+
+**World building on placement** (perfect-fall model, no Gazebo pose reads — ready for real experiments):
+- The placed cylinder is assumed to end UPRIGHT resting on the placement surface at the **XY where the EE released it**; Z = `goal_set.platform_rest_z()` (platform top + half height).
+- `goal_set.relocate_cylinder(color, pos)` updates the believed cylinder position (and resets its sticky orientation/azimuth memory), so `Color_Top`/`Color_Side` goals re-point to the new location.
+- The QP collision obstacle is placed at the same fallen pose via `CollisionManager.detach_object(world_pos=...)`, with the smooth `ATTACH_RAMP_S` barrier ramp re-armed so the gripper can lift clear before the barrier fully engages.
 
 **QP-side detach** (inverse of `ATTACH_`, added in `shared_autonomy_handler` + `collision_manager` + `visualization_engine`):
 - `DETACH_<arm>_<color>` → `pending_detach`, processed in the QP loop.

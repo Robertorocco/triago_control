@@ -405,10 +405,10 @@ class SafetyQPController(Node):
 
         # --- Deferred detachment (needs fresh oMi / oMg to freeze release pose) ---
         if self.hri.pending_detach is not None:
-            arm_side, color = self.hri.pending_detach
+            arm_side, color, world_pos = self.hri.pending_detach
             self.hri.pending_detach = None
             try:
-                self.hri.detach_object_visually(arm_side, color)
+                self.hri.detach_object_visually(arm_side, color, world_pos)
             except Exception as e:
                 self.get_logger().warn(f"[TOPOLOGY] Detach failed: {e}")
 

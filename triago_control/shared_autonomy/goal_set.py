@@ -161,6 +161,33 @@ class GoalSet:
         self.grasped_axis_local = None
         self.grasped_z_offset = 0.0
 
+    def relocate_cylinder(self, color, new_pos):
+        """Move a cylinder's believed position (world building after a placement).
+
+        Called when an object is released: the world model must reflect that the
+        cylinder is now where it was placed, NOT at its original spawn. The
+        re-enabled grasp goals (Color_Top / Color_Side) are computed dynamically
+        from cylinders[color]['pos'], so updating it here is all that's needed for
+        the goal set. The sticky orientation/azimuth memory for that cylinder is
+        reset, since its geometry just changed.
+        """
+        color = color.capitalize()
+        if color not in self.cylinders:
+            return
+        self.cylinders[color]['pos'] = np.asarray(new_pos, dtype=float).copy()
+        for gt in ('Top', 'Side'):
+            k = f"{color}_{gt}"
+            if k in self._last_orientation_choice:
+                self._last_orientation_choice[k] = None
+            if k in self._last_side_radial:
+                self._last_side_radial[k] = None
+
+    def platform_rest_z(self, color):
+        """World Z of an upright cylinder of `color` resting on the placement surface."""
+        half_h = self.cylinders[color.capitalize()]['height'] / 2.0
+        platform_top = self.PLATFORM_POSE[2] + self.PLATFORM_THICKNESS / 2.0
+        return float(platform_top + half_h)
+
     def get_platform_goal_pose(self, T_anchor, approach_offset=0.05):
         """SE(3) placement goal on the platform disk, as a perpendicularity manifold.
 

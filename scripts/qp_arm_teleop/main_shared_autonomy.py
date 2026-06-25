@@ -387,15 +387,30 @@ class SharedControlNode(Node):
         self.pub_gripper_cmd.publish(String(data=f"CLOSE_{arm.upper()}_0.7000"))
         # Detach the Gazebo plugin weld.
         self._plugin_detach(arm)
-        # Detach the QP-side collision/visual re-parenting (cylinder back to world,
-        # Meshcat un-oranged, barrier re-engages smoothly). Needs the held color,
-        # so do this BEFORE clearing grasped_color below.
+        # World building + QP-side detach. The cylinder is NOT back at its spawn:
+        # under the perfect-fall assumption it now rests UPRIGHT on the placement
+        # surface at the XY where the EE released it. We update the goal set so the
+        # re-enabled red goals point at the new location, and pass that same pose
+        # to the QP collision world via the DETACH command so the obstacle is
+        # placed there (with the smooth barrier ramp). Needs the held color, so do
+        # this BEFORE clearing grasped_color below.
         if self.grasped_color is not None:
-            self.pub_gripper_cmd.publish(
-                String(data=f"DETACH_{arm.upper()}_{self.grasped_color.upper()}"))
+            ee_xy = self.current_T_EE[:2, 3]
+            fallen = np.array([float(ee_xy[0]), float(ee_xy[1]),
+                               self.goal_set.platform_rest_z(self.grasped_color)])
+            self.goal_set.relocate_cylinder(self.grasped_color, fallen)
+            self.pub_gripper_cmd.publish(String(
+                data=f"DETACH_{arm.upper()}_{self.grasped_color.upper()}_"
+                     f"{fallen[0]:.4f}_{fallen[1]:.4f}_{fallen[2]:.4f}"))
+            self.get_logger().info(
+                f"[WORLD] {self.grasped_color} cylinder placed at "
+                f"[{fallen[0]:.3f}, {fallen[1]:.3f}, {fallen[2]:.3f}] (perfect-fall model).")
 
-        # Reset the grasp state machine back to the start phase.
-        self.grasp_sm._transition("SHARED_AUTONOMY")
+        # Reset the grasp state machine into the post-OPEN lift phase: it will
+        # drive a short vertical lift to clear the just-placed object, then return
+        # to SHARED_AUTONOMY on its own (mirrors the post-CLOSE LIFT -> HOLDING).
+        self.grasp_sm._transition("RELEASE_LIFT")
+        self.grasp_sm._release_lift_start = None
         self.grasp_sm.grip_position = 0.7
         self.grasp_sm.grip_contact_detected = False
         self.grasp_sm.grip_force_stable_since = None
@@ -608,7 +623,7 @@ class SharedControlNode(Node):
         # HOLDING is intentionally NOT here: it drives toward goals via the QP and
         # therefore needs fresh collision data, like SHARED_AUTONOMY / PRE_GRASP.
         in_grasp_state = self.grasp_sm.state in (
-            "PRE_GRASP", "GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT")
+            "PRE_GRASP", "GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT", "RELEASE_LIFT")
 
         if not in_grasp_state:
             if self.J_c is None or self.h_c is None:
@@ -674,7 +689,7 @@ class SharedControlNode(Node):
             # twist is zeroed, and the belief should stay FROZEN until the grasp
             # ends — otherwise the distribution evolves on meaningless data.
             grasp_exec_now = self.grasp_sm.state in (
-                "GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT")
+                "GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT", "RELEASE_LIFT")
             # Falling edge (grasp just finished) -> restart the warm-up so the
             # post-grasp navigation does not instantly lock onto a goal.
             if self._prev_grasp_exec and not grasp_exec_now:
@@ -744,7 +759,7 @@ class SharedControlNode(Node):
         # The Haption input is disconnected: the grasp state machine drives the
         # arm autonomously through approach, close and lift. Teleoperation
         # resumes automatically once HOLDING is reached.
-        if self.grasp_sm.state in ("GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT"):
+        if self.grasp_sm.state in ("GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT", "RELEASE_LIFT"):
             self.current_v_h = np.zeros(6)
 
         # --- 4. THE GRASPING STATE MACHINE (delegated) ---
@@ -818,7 +833,8 @@ class SharedControlNode(Node):
         # --- AUTHORITY HANDOVER + HAPTIC FIXTURE STATE ---
         # During autonomous grasp execution (approach/close/lift) the node DRIVES
         # the arm directly (see section 6) and the Haption teleop must yield.
-        grasp_exec = self.grasp_sm.state in ("GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT")
+        grasp_exec = self.grasp_sm.state in (
+            "GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT", "RELEASE_LIFT")
         self.pub_grasp_active.publish(Bool(data=grasp_exec))
 
         # Active goal pose + confidence for the haptic position virtual fixture.
