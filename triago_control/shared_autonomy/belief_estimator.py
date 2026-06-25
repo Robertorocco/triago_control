@@ -96,29 +96,22 @@ class BeliefEstimator:
             key = max(active, key=active.get)
             return key, active[key]
 
-    def update(self, v_h_curr, pi_stars, gain=1.0):
+    def update(self, v_h_curr, pi_stars, gain=1.0, pos_costs=None):
         """Performs one EMA log-belief update given the latest observed human twist.
-
-        Note on the fix applied here: the original `update_belief(self, v_h, pi_stars)`
-        accepted `v_h` but silently ignored it, instead reading
-        `self.trajectory_data[-1]['v_h']` from the node's buffer. That made the
-        signature misleading and broke unit-testability (you could not test belief
-        update logic without also wiring up the trajectory deque). This version
-        takes `v_h_curr` directly and uses only what is passed in -- the caller
-        (SharedControlNode) is responsible for sourcing it from its trajectory
-        buffer or anywhere else.
 
         Args:
             v_h_curr: the most recent human/user 6D twist sample (np.ndarray).
             pi_stars: dict {goal_key: 6D policy twist} -- must contain all
                       non-excluded target_keys.
-            gain: in [0, 1], scales the learning step (beta) this tick. The caller
-                  uses it to make the system "listen more, lock less": ~0 when the
-                  user is still or during a warm-up window (belief gently relaxes
-                  toward uniform via the EMA decay, never sharpening on noise), 1.0
-                  when the user is actively, unambiguously moving. The forgetting
-                  (ema_alpha) is NOT scaled, so a stale lock still decays when the
-                  user stops driving it.
+            gain: in [0, 1], scales BOTH the learning step AND the forgetting
+                  decay. When the user is still (gain low), the belief shape is
+                  nearly frozen (neither sharpens on noise NOR flattens to uniform).
+                  When the user is actively moving, full responsiveness.
+            pos_costs: optional dict {goal_key: float} giving a small proximity
+                  bonus (lower = closer to that goal). Used to break the symmetry
+                  when twist-costs are degenerate (aligned policies). If provided,
+                  pos_costs are blended in at 10% weight relative to the main twist
+                  cost so that a stationary user near a goal sees it slowly climb.
         """
         active = [k for k in self.target_keys if k not in self._excluded]
         if not active:
@@ -126,12 +119,20 @@ class BeliefEstimator:
         if not all(k in pi_stars for k in active):
             return
 
-        beta_eff = self.beta * float(np.clip(gain, 0.0, 1.0))
+        g = float(np.clip(gain, 0.0, 1.0))
+        beta_eff = self.beta * g
+        # Scale the forgetting so the belief shape holds when the user is still.
+        alpha_eff = 1.0 - (1.0 - self.ema_alpha) * g   # gain=0 -> alpha=1 (no decay)
 
-        # One EMA step with min-max normalised cost (kept as a nested helper to
-        # mirror the original structure while operating on instance state).
+        # Twist cost.
         raw = {k: float((v_h_curr - pi_stars[k]) @ self.W @ (v_h_curr - pi_stars[k]))
                for k in active}
+
+        # Blend in position-distance cost (10% weight) to break degeneracy.
+        if pos_costs is not None:
+            for k in active:
+                if k in pos_costs:
+                    raw[k] = 0.90 * raw[k] + 0.10 * pos_costs[k]
 
         min_c = min(raw.values())
         max_c = max(raw.values())
@@ -139,13 +140,12 @@ class BeliefEstimator:
 
         with self._lock:
             if spread < 1e-12:
-                # All policies identical at this sample: just decay.
                 for k in active:
-                    self.log_beliefs[k] *= self.ema_alpha
+                    self.log_beliefs[k] *= alpha_eff
             else:
                 for k in active:
-                    norm_cost = (raw[k] - min_c) / spread  # in [0, 1]
-                    self.log_beliefs[k] = (self.ema_alpha * self.log_beliefs[k]
+                    norm_cost = (raw[k] - min_c) / spread
+                    self.log_beliefs[k] = (alpha_eff * self.log_beliefs[k]
                                             - beta_eff * norm_cost)
 
             # Convert log-beliefs -> probabilities over the ACTIVE set only

@@ -714,8 +714,22 @@ class SharedControlNode(Node):
                 warmup = float(np.clip(
                     (time.time() - self._belief_warmup_start) / self.BELIEF_WARMUP_S,
                     self.BELIEF_WARMUP_FLOOR, 1.0))
+                # Compute position-distance cost for each active goal: squared
+                # distance from the user pose to the goal. This breaks the
+                # degeneracy when policies are aligned (e.g. Red_Side / Blue_Side
+                # from the same side) — the nearest goal always has a lower cost
+                # and its belief slowly climbs even when the user is still.
+                pos_costs = {}
+                for key in self.target_keys:
+                    if key in excluded:
+                        continue
+                    T_g = self.goal_set.get_dynamic_goal_pose(
+                        self.current_T_EE, key, update_memory=False)
+                    pos_costs[key] = float(np.sum(
+                        (self.current_T_EE[:3, 3] - T_g[:3, 3]) ** 2))
                 self.belief_estimator.update(
-                    self.current_v_h, user_policies, gain=engagement * warmup)
+                    self.current_v_h, user_policies,
+                    gain=engagement * warmup, pos_costs=pos_costs)
                 # else: user still -> FREEZE belief (hold history, no decay)
 
             self.plot_manager.push_beliefs(
