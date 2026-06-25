@@ -151,6 +151,7 @@ class GraspStateMachine:
         self.grip_force_stable_since = None
         self._lift_start_time = None  # reset for LIFT phase
         self._release_lift_start = None  # reset for RELEASE_LIFT (post-OPEN) phase
+        self._align_start = None  # reset for GRASP_ALIGN timeout
         self._holding_entered = False  # latch so the HOLDING banner prints once per grasp
 
         self._last_state_logged = None
@@ -310,40 +311,41 @@ class GraspStateMachine:
     # ------------------------------------------------------------------
     # PHASE 1.5: GRASP_ALIGN (precise centering before the blind insertion)
     # ------------------------------------------------------------------
-    ALIGN_POS_TOL = 0.015   # m — must be within 1.5 cm of the exact standoff
-    ALIGN_ANG_TOL = 0.08    # rad — must be within ~5° of the goal orientation
-    ALIGN_TIMEOUT_S = 5.0   # if alignment doesn't converge in 5 s, abort
+    ALIGN_POS_TOL = 0.02    # m — must be within 2 cm of the exact standoff
+    ALIGN_ANG_TOL = 0.13    # rad — approach-axis within ~7.5° of the goal
+    ALIGN_TIMEOUT_S = 6.0   # if alignment doesn't converge in this time, abort
 
     def _grasp_align(self, inp: TickInput) -> TickOutput:
         """Drive precisely to the standoff pose before committing the blind insertion.
 
         The PRE_GRASP entry tolerances are generous (6 cm / 0.20 rad) so the user
-        can trigger the grasp comfortably. But the straight-line insertion requires
-        near-perfect centering on the cylinder axis; otherwise the fingers push the
-        object sideways. This sub-phase uses v_geo toward the frozen standoff to
-        converge to tight tolerances, then transitions into GRASP_APPROACH.
+        can trigger comfortably; but the straight-line insertion needs near-perfect
+        centering on the cylinder axis, or the fingers shove the object sideways.
+
+        IMPORTANT: the gripper<->cylinder CBF is RELAXED here (same as in
+        GRASP_APPROACH). With the nominal barrier the gripper is held a few cm
+        short of the standoff, the position error can never reach ALIGN_POS_TOL,
+        and alignment always times out (the bug the operator hit). Relaxed, the
+        gripper can seat exactly on the standoff and converge.
         """
         self._transition("GRASP_ALIGN")
         log_lines = []
         color = inp.active_goal_key.split('_')[0]
+        cbf_name = self.cylinders[color]['cbf_name']
 
-        # Drive toward the exact standoff (using the raw geometric velocity, NOT
-        # the QP-constrained pi_max which decelerates near the CBF and may stall).
-        # The gripper CBF margin will be relaxed in GRASP_APPROACH; here we keep
-        # the nominal safety so the arm approaches naturally to the standoff.
+        # Drive toward the exact standoff with the raw geometric velocity.
         target_twist = inp.compute_v_geo(inp.current_T_EE, self._align_target)
 
-        # Check tight alignment
         pos_err = np.linalg.norm(inp.current_T_EE[:3, 3] - self._align_target[:3, 3])
         ang_err = np.linalg.norm(
             np.cross(inp.current_T_EE[:3, :3][:, 0], self._align_target[:3, :3][:, 0]))
+        pos_ok = pos_err < self.ALIGN_POS_TOL
+        ang_ok = ang_err < self.ALIGN_ANG_TOL
 
-        if pos_err < self.ALIGN_POS_TOL and ang_err < self.ALIGN_ANG_TOL:
+        if pos_ok and ang_ok:
             log_lines.append(
                 ("info", f"[GRASP] Alignment converged (pos={pos_err:.4f}m, ang={ang_err:.4f}). "
                          f"Starting straight-line approach."))
-
-            # Compute the locked insertion target (same logic as the old trigger path)
             T_base = self._align_target.copy()
             R_base = T_base[:3, :3]
             approach_axis = R_base[:, 0]
@@ -351,43 +353,52 @@ class GraspStateMachine:
             locked[:3, :3] = R_base
             locked[:3, 3] = T_base[:3, 3] + approach_axis * self.GRASP_INSERTION_TRAVEL
             self.locked_grasp_pose = locked
-
             self._transition("GRASP_APPROACH")
             self.grasp_timer = time.time()
+            self._align_start = None
             log_lines.append(
                 ("info", f"[GRASP] Gripper-{color} CBF margin relaxed to "
                          f"{self.GRASP_CBF_MARGIN:+.3f} m. Approaching controlled contact..."))
             return TickOutput(
                 target_twist=target_twist,
                 new_state=self._state,
-                ignore_cbf="None",
-                grasp_margin=None,
+                ignore_cbf=f"+{cbf_name}",
+                grasp_margin=self.GRASP_CBF_MARGIN,
                 log_lines=log_lines,
             )
 
-        # Timeout guard
-        if not hasattr(self, '_align_start') or self._align_start is None:
+        # Timeout guard with an EXPLICIT reason (which gate failed and by how much).
+        if self._align_start is None:
             self._align_start = time.time()
         if time.time() - self._align_start > self.ALIGN_TIMEOUT_S:
+            reasons = []
+            if not pos_ok:
+                reasons.append(
+                    f"POSITION not centred (pos_err={pos_err:.4f} m, need < {self.ALIGN_POS_TOL} m)")
+            if not ang_ok:
+                reasons.append(
+                    f"APPROACH-AXIS not aligned (ang_err={ang_err:.4f}, need < {self.ALIGN_ANG_TOL})")
             log_lines.append(
-                ("warn", f"[GRASP] Alignment timeout (pos={pos_err:.4f}m, ang={ang_err:.4f}). "
-                         f"Aborting grasp."))
+                ("warn", f"[GRASP] Alignment timeout after {self.ALIGN_TIMEOUT_S:.0f}s — aborting. "
+                         f"Reason(s): {'; '.join(reasons)}."))
             self._transition("SHARED_AUTONOMY")
             self._align_start = None
             return TickOutput(
                 target_twist=np.zeros(6),
                 new_state=self._state,
                 ignore_cbf="None",
-                grasp_margin=None,
+                grasp_margin=CLEAR_MARGIN,   # restore full CBF safety on abort
                 reset_trigger=True,
                 log_lines=log_lines,
             )
 
+        # Still converging — keep the gripper<->cylinder CBF relaxed so the
+        # standoff stays reachable.
         return TickOutput(
             target_twist=target_twist,
             new_state=self._state,
-            ignore_cbf="None",
-            grasp_margin=None,
+            ignore_cbf=f"+{cbf_name}",
+            grasp_margin=self.GRASP_CBF_MARGIN,
             log_lines=log_lines,
         )
 

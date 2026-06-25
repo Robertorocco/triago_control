@@ -74,8 +74,13 @@ DISTANCE_FILTER_THRESHOLD = 0.15  # Ignore collision pairs farther than this [m]
 K_MAX_PAIRS = 60               # Max number of closest pairs fed into the SoftMin
 
 # Diagonal task weights [Px, Py, Pz, Roll, Pitch, Yaw]: heavily penalize position,
-# barely penalize orientation. Equivalent to np.array([1,1,1,0.1,0.1,0.1]) * 10.
-TASK_WEIGHTS_6D = np.array([1.0, 1.0, 1.0, 0.1, 0.1, 0.1]) * 10.0
+# barely penalize orientation. Orientation lowered from 0.1 -> 0.04 (relative to
+# the 1.0 position weight, i.e. a 25:1 position:orientation ratio) so the QP
+# prioritizes CLOSING POSITION ERROR over matching orientation when the two
+# conflict near an obstacle — fixes the "parked at the wrong position but right
+# orientation" behaviour the operator reported. The CLF math is unchanged (still
+# a positive-definite diagonal-weighted scalar CLF); only the weighting ratio.
+TASK_WEIGHTS_6D = np.array([1.0, 1.0, 1.0, 0.04, 0.04, 0.04]) * 10.0
 
 # Mesh package search paths used to build the Meshcat visual model from the URDF.
 MESH_PATHS = ["/opt/pal/alum/share", "/opt/ros/humble/share", "/opt/pal/ferrum/share", "."]

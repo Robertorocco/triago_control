@@ -58,6 +58,7 @@ out in a comment at its location, summarized here:
 
 import threading
 import time
+import warnings
 
 import numpy as np
 import quadprog
@@ -859,7 +860,13 @@ class SharedControlNode(Node):
         # while the arm is being driven autonomously.
         fix_conf = 0.0 if grasp_exec else float(b_max)
         gp = T_active_goal[:3, 3]
-        grpy = R.from_matrix(T_active_goal[:3, :3]).as_euler('xyz')
+        # Suppress scipy's "Gimbal lock detected" UserWarning: at pitch = ±90°
+        # (e.g. the Top-grasp / Platform poses where the gripper points straight
+        # down) the xyz-Euler decomposition is non-unique, but it still round-trips
+        # correctly through from_euler on the haptic side, so the warning is noise.
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            grpy = R.from_matrix(T_active_goal[:3, :3]).as_euler('xyz')
         self.pub_active_goal_pose.publish(Float64MultiArray(
             data=[float(gp[0]), float(gp[1]), float(gp[2]),
                   float(grpy[0]), float(grpy[1]), float(grpy[2]), fix_conf]))
@@ -920,6 +927,17 @@ class SharedControlNode(Node):
                     if getattr(self, '_pregrasp_cue_logged', False):
                         self._pregrasp_cue_logged = False
                         self.clear_grasp_ready_cue()
+
+                # Grasp-guidance arrows: how to move/rotate to satisfy the grasp
+                # condition. Only for cylinder grasp goals (not the Platform), and
+                # only while still free (SHARED_AUTONOMY / PRE_GRASP).
+                is_cylinder_goal = self.active_goal_key.split('_')[0] in self.goal_set.cylinders
+                if is_cylinder_goal and self.grasp_sm.state in ("SHARED_AUTONOMY", "PRE_GRASP"):
+                    self.publish_grasp_guidance(self.current_T_EE, T_active_goal, pos_error, ang_error)
+                    self._guidance_shown = True
+                elif getattr(self, '_guidance_shown', False):
+                    self._guidance_shown = False
+                    self.clear_grasp_guidance()
 
             # Inference state (consumed by the haptic force manager) is lightweight
             # Float64MultiArray traffic — keep it at the full control rate.
@@ -1180,6 +1198,127 @@ class SharedControlNode(Node):
         m.action = Marker.DELETE
         ma = MarkerArray()
         ma.markers.append(m)
+        self.pub_markers.publish(ma)
+
+    def publish_grasp_guidance(self, T_EE, T_goal, pos_error, ang_error, now=None):
+        """Draw 'how to move to satisfy the grasp condition' cues on the gripper.
+
+        Appears when within 2x the PRE_GRASP-ready range (and the target is a
+        cylinder grasp goal):
+          - a GREEN straight arrow from the EE to the standoff goal position
+            (where to translate), shown while position is not yet within range;
+          - an ORANGE curved arrow (arc) around the rotation-error axis at the EE
+            (which way to rotate), shown while the approach axis is not aligned.
+        Each cue turns to a brighter colour once its own sub-condition is met, and
+        is DELETEd individually so the operator gets unambiguous per-axis feedback
+        (no POV ambiguity like the static red ghost gripper).
+        """
+        if now is None:
+            now = self.get_clock().now().to_msg()
+        ma = MarkerArray()
+
+        pos_enter = self.grasp_sm.POS_ERR_ENTER
+        ang_enter = self.grasp_sm.ANG_ERR_ENTER
+        p_ee = T_EE[:3, 3]
+        p_goal = T_goal[:3, 3]
+
+        # --- POSITION ARROW (EE -> standoff) ---
+        show_pos = (pos_error < 2.0 * pos_enter) and (pos_error > 0.012)
+        a = Marker()
+        a.header.frame_id = "base_footprint"
+        a.header.stamp = now
+        a.ns = "grasp_guidance_pos"
+        a.id = 0
+        a.type = Marker.ARROW
+        if show_pos:
+            a.action = Marker.ADD
+            a.points = [
+                Point(x=float(p_ee[0]), y=float(p_ee[1]), z=float(p_ee[2])),
+                Point(x=float(p_goal[0]), y=float(p_goal[1]), z=float(p_goal[2])),
+            ]
+            a.scale.x, a.scale.y, a.scale.z = 0.008, 0.02, 0.025
+            within = pos_error < pos_enter
+            a.color.r, a.color.g, a.color.b, a.color.a = (
+                (0.2, 1.0, 0.2, 0.95) if within else (1.0, 0.9, 0.1, 0.95))
+        else:
+            a.action = Marker.DELETE
+        ma.markers.append(a)
+
+        # --- ORIENTATION ARC (curved arrow around the rotation-error axis) ---
+        R_ee = T_EE[:3, :3]
+        R_goal = T_goal[:3, :3]
+        err_rotvec = R.from_matrix(R_goal @ R_ee.T).as_rotvec()
+        ang = float(np.linalg.norm(err_rotvec))
+        show_ang = (ang_error < 2.0 * ang_enter) and (ang > 0.06)
+
+        arc = Marker()
+        arc.header.frame_id = "base_footprint"
+        arc.header.stamp = now
+        arc.ns = "grasp_guidance_rot"
+        arc.id = 0
+        arc.type = Marker.LINE_STRIP
+        head = Marker()
+        head.header.frame_id = "base_footprint"
+        head.header.stamp = now
+        head.ns = "grasp_guidance_rot"
+        head.id = 1
+        head.type = Marker.ARROW
+
+        if show_ang and ang > 1e-6:
+            axis = err_rotvec / ang
+            # A reference vector perpendicular to the rotation axis.
+            seed = np.array([1.0, 0.0, 0.0]) if abs(axis[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+            ref = np.cross(axis, seed)
+            ref = ref / np.linalg.norm(ref)
+            radius = 0.07
+            n_seg = 18
+            arc.points = []
+            for i in range(n_seg + 1):
+                th = ang * (i / n_seg)
+                v = R.from_rotvec(axis * th).apply(ref)
+                pt = p_ee + radius * v
+                arc.points.append(Point(x=float(pt[0]), y=float(pt[1]), z=float(pt[2])))
+            arc.scale.x = 0.006  # line width
+            within_a = ang_error < ang_enter
+            arc.color.r, arc.color.g, arc.color.b, arc.color.a = (
+                (0.2, 1.0, 0.2, 0.95) if within_a else (1.0, 0.55, 0.0, 0.95))
+            arc.action = Marker.ADD
+
+            # Arrowhead: a short cone from the second-last to the last arc point.
+            p_tip = p_ee + radius * R.from_rotvec(axis * ang).apply(ref)
+            v_prev = R.from_rotvec(axis * (ang * (n_seg - 1) / n_seg)).apply(ref)
+            p_prev = p_ee + radius * v_prev
+            tangent = p_tip - p_prev
+            tn = np.linalg.norm(tangent)
+            tangent = tangent / tn if tn > 1e-9 else axis
+            head.action = Marker.ADD
+            head.points = [
+                Point(x=float(p_tip[0]), y=float(p_tip[1]), z=float(p_tip[2])),
+                Point(x=float(p_tip[0] + 0.025 * tangent[0]),
+                      y=float(p_tip[1] + 0.025 * tangent[1]),
+                      z=float(p_tip[2] + 0.025 * tangent[2])),
+            ]
+            head.scale.x, head.scale.y, head.scale.z = 0.006, 0.02, 0.02
+            head.color = arc.color
+        else:
+            arc.action = Marker.DELETE
+            head.action = Marker.DELETE
+
+        ma.markers.append(arc)
+        ma.markers.append(head)
+        self.pub_markers.publish(ma)
+
+    def clear_grasp_guidance(self):
+        """Remove all grasp-guidance arrows."""
+        ma = MarkerArray()
+        for ns, mid in (("grasp_guidance_pos", 0), ("grasp_guidance_rot", 0), ("grasp_guidance_rot", 1)):
+            m = Marker()
+            m.header.frame_id = "base_footprint"
+            m.header.stamp = self.get_clock().now().to_msg()
+            m.ns = ns
+            m.id = mid
+            m.action = Marker.DELETE
+            ma.markers.append(m)
         self.pub_markers.publish(ma)
 
     def compute_v_geo(self, T_EE, T_goal):
