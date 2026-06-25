@@ -96,7 +96,7 @@ class BeliefEstimator:
             key = max(active, key=active.get)
             return key, active[key]
 
-    def update(self, v_h_curr, pi_stars):
+    def update(self, v_h_curr, pi_stars, gain=1.0):
         """Performs one EMA log-belief update given the latest observed human twist.
 
         Note on the fix applied here: the original `update_belief(self, v_h, pi_stars)`
@@ -112,12 +112,21 @@ class BeliefEstimator:
             v_h_curr: the most recent human/user 6D twist sample (np.ndarray).
             pi_stars: dict {goal_key: 6D policy twist} -- must contain all
                       non-excluded target_keys.
+            gain: in [0, 1], scales the learning step (beta) this tick. The caller
+                  uses it to make the system "listen more, lock less": ~0 when the
+                  user is still or during a warm-up window (belief gently relaxes
+                  toward uniform via the EMA decay, never sharpening on noise), 1.0
+                  when the user is actively, unambiguously moving. The forgetting
+                  (ema_alpha) is NOT scaled, so a stale lock still decays when the
+                  user stops driving it.
         """
         active = [k for k in self.target_keys if k not in self._excluded]
         if not active:
             return
         if not all(k in pi_stars for k in active):
             return
+
+        beta_eff = self.beta * float(np.clip(gain, 0.0, 1.0))
 
         # One EMA step with min-max normalised cost (kept as a nested helper to
         # mirror the original structure while operating on instance state).
@@ -137,7 +146,7 @@ class BeliefEstimator:
                 for k in active:
                     norm_cost = (raw[k] - min_c) / spread  # in [0, 1]
                     self.log_beliefs[k] = (self.ema_alpha * self.log_beliefs[k]
-                                            - self.beta * norm_cost)
+                                            - beta_eff * norm_cost)
 
             # Convert log-beliefs -> probabilities over the ACTIVE set only
             # (numerically stable softmax); excluded goals are pinned to 0.

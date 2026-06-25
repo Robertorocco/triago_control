@@ -154,6 +154,21 @@ class SharedControlNode(Node):
         # Color of the currently-held cylinder ('Red'/'Blue'), or None when empty.
         self.grasped_color = None
 
+        # --- User-led belief acquisition ("listen more, lock less") ---
+        # The belief update step (beta) is scaled each tick by engagement * warmup:
+        #  - engagement: ~0 when the user twist is near zero (no evidence -> belief
+        #    gently relaxes toward uniform instead of locking on noise), ramps to 1
+        #    as the user actively moves.
+        #  - warmup: a short exploration window after start / release / arm-switch /
+        #    grasp-completion, during which learning is slowed so the autonomy does
+        #    not instantly lock a goal and drag the device.
+        self.BELIEF_V_LOW = 0.005     # m/s linear twist -> "still"
+        self.BELIEF_V_HIGH = 0.030    # m/s linear twist -> fully engaged
+        self.BELIEF_WARMUP_S = 2.5    # s exploration window after a reset
+        self.BELIEF_WARMUP_FLOOR = 0.25  # min learning-rate scale during warm-up
+        self._belief_warmup_start = time.time()
+        self._prev_grasp_exec = False
+
         # --- Grasp State Machine (delegated to GraspStateMachine) ---
         self.grasp_sm = GraspStateMachine(
             cylinders=self.goal_set.cylinders,
@@ -392,6 +407,10 @@ class SharedControlNode(Node):
         self.belief_estimator.set_excluded_goals({self.goal_set.PLATFORM_KEY})
         self.goal_set.clear_grasped()
         self.grasped_color = None
+        # Restart the belief warm-up so the system re-acquires intent gently
+        # (looks for the user's twist) instead of instantly locking a goal and
+        # yanking the device right after release.
+        self._belief_warmup_start = time.time()
 
         # In test mode, default the demand to the other (still-on-table) cylinder
         # so the sequential pick-and-place demo keeps flowing.
@@ -531,6 +550,7 @@ class SharedControlNode(Node):
             # Reset belief and OU bias to avoid jumps across the arm switch.
             self.belief_estimator.reset()
             self._ou_bias = np.zeros(6)
+            self._belief_warmup_start = time.time()  # re-explore after arm switch
 
     def robot_state_callback(self, msg):
         """Extracts EE pose dynamically based on the active arm.
@@ -648,8 +668,35 @@ class SharedControlNode(Node):
 
         if self.PREDICTION:
             self.trajectory_data.append({'time': time.time(), 'v_h': self.current_v_h.copy()})
-            self.belief_estimator.update(self.current_v_h, user_policies)
-            self.plot_manager.push_beliefs(self.belief_estimator.get_beliefs())
+
+            # Suspend belief learning entirely during autonomous grasp execution
+            # (ALIGN/APPROACH/CLOSE/LIFT): the arm is driven by the SM, the user
+            # twist is zeroed, and the belief should stay FROZEN until the grasp
+            # ends — otherwise the distribution evolves on meaningless data.
+            grasp_exec_now = self.grasp_sm.state in (
+                "GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT")
+            # Falling edge (grasp just finished) -> restart the warm-up so the
+            # post-grasp navigation does not instantly lock onto a goal.
+            if self._prev_grasp_exec and not grasp_exec_now:
+                self._belief_warmup_start = time.time()
+            self._prev_grasp_exec = grasp_exec_now
+
+            if not grasp_exec_now:
+                # engagement: how actively the user is moving (linear speed).
+                speed = float(np.linalg.norm(self.current_v_h[0:3]))
+                engagement = float(np.clip(
+                    (speed - self.BELIEF_V_LOW) / max(self.BELIEF_V_HIGH - self.BELIEF_V_LOW, 1e-6),
+                    0.0, 1.0))
+                # warmup: slow learning for the first BELIEF_WARMUP_S after a reset.
+                warmup = float(np.clip(
+                    (time.time() - self._belief_warmup_start) / self.BELIEF_WARMUP_S,
+                    self.BELIEF_WARMUP_FLOOR, 1.0))
+                self.belief_estimator.update(
+                    self.current_v_h, user_policies, gain=engagement * warmup)
+
+            self.plot_manager.push_beliefs(
+                self.belief_estimator.get_beliefs(),
+                self.belief_estimator.get_excluded_goals())
 
             if self.POLICY_BELIEF_TEST:
                 with self._test_goal_lock:

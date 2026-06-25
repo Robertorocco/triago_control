@@ -56,6 +56,7 @@ class PlotManager:
         # Staging slot: producer (control loop) writes, update() reads, under plot_lock.
         self._twist_snapshot = None  # dict: {'v_h', 'pi_star', 'goal_key'}
         self._latest_beliefs = {k: 1.0 / len(self.target_keys) for k in self.target_keys}
+        self._excluded_goals = set()  # goals disabled from estimation -> drawn lighter
 
         plt.ion()
         self._build_belief_figure()
@@ -150,10 +151,11 @@ class PlotManager:
     # ------------------------------------------------------------------
     # Producer-side API (called from the control loop thread)
     # ------------------------------------------------------------------
-    def push_beliefs(self, beliefs: dict):
-        """Thread-safe write of the latest belief distribution."""
+    def push_beliefs(self, beliefs: dict, excluded=None):
+        """Thread-safe write of the latest belief distribution (+ excluded set)."""
         with self.plot_lock:
             self._latest_beliefs = dict(beliefs)
+            self._excluded_goals = set(excluded) if excluded else set()
 
     def push_twist_snapshot(self, v_h, pi_star, goal_key):
         """Thread-safe write of the latest (v_h, pi*, goal_key) sample for the twist plot."""
@@ -184,19 +186,28 @@ class PlotManager:
         with self.plot_lock:
             snap = self._twist_snapshot
             probs = [self._latest_beliefs[k] for k in self.target_keys]
+            excluded = set(self._excluded_goals)
 
-        self._update_belief_bars(probs)
+        self._update_belief_bars(probs, excluded)
 
         if snap is None:
             return
         self._update_twist_plot(snap)
 
-    def _update_belief_bars(self, probs):
+    def _update_belief_bars(self, probs, excluded=frozenset()):
         max_idx = int(np.argmax(probs))
         for i, bar in enumerate(self.bars):
+            key = self.target_keys[i]
             bar.set_height(probs[i])
-            bar.set_color('red' if i == max_idx else '#00BFFF')
-            bar.set_edgecolor('black')
+            if key in excluded:
+                # Goal disabled from estimation -> draw it light/faded.
+                bar.set_color('#cccccc')
+                bar.set_alpha(0.4)
+                bar.set_edgecolor('#999999')
+            else:
+                bar.set_alpha(1.0)
+                bar.set_color('red' if i == max_idx else '#00BFFF')
+                bar.set_edgecolor('black')
 
     def _update_twist_plot(self, snap):
         v_h = snap['v_h']
