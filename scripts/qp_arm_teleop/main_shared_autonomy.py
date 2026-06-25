@@ -259,12 +259,23 @@ class SharedControlNode(Node):
         self.pub_ignore_cbf = self.create_publisher(String, '/shared_autonomy/target_ignore', 10)
         self.pub_grasp_margin = self.create_publisher(String, '/shared_autonomy/grasp_margin', 10)
 
-        # Publisher selection driven by the test flag
-        if self.POLICY_BELIEF_TEST:
-            self.pub_blend_right = self.create_publisher(Float64MultiArray, '/arm_right/cartesian_reference', 10)
-            self.pub_blend_left = self.create_publisher(Float64MultiArray, '/arm_left/cartesian_reference', 10)
-        # else: normal-operation assistive_reference publisher intentionally omitted
-        # (deprecated topic in the original script).
+        # Cartesian-reference publishers. Created in BOTH modes now:
+        #  - In test mode: the node is the sole reference source (virtual cursor).
+        #  - In teleop mode: the node only publishes here DURING autonomous grasp
+        #    execution (approach/close/lift), when it takes authority from the
+        #    Haption clutch. See section 6 and /shared_autonomy/grasp_active.
+        self.pub_blend_right = self.create_publisher(Float64MultiArray, '/arm_right/cartesian_reference', 10)
+        self.pub_blend_left = self.create_publisher(Float64MultiArray, '/arm_left/cartesian_reference', 10)
+
+        # Authority-handover flag: True while the node drives the arm autonomously
+        # (grasp approach/close/lift). teleop_triago_clutch freezes and re-anchors
+        # on the falling edge so teleop resumes cleanly from the post-grasp pose.
+        self.pub_grasp_active = self.create_publisher(Bool, '/shared_autonomy/grasp_active', 10)
+
+        # Active goal pose + confidence for the haptic position virtual fixture.
+        # [x, y, z, roll, pitch, yaw, confidence] in base_footprint.
+        self.pub_active_goal_pose = self.create_publisher(
+            Float64MultiArray, '/shared_autonomy/active_goal_pose', 10)
 
         self.sub_wrench = self.create_subscription(
             WrenchStamped, '/ft_sensor_right_controller/wrench', self.wrench_callback, 10)
@@ -787,6 +798,22 @@ class SharedControlNode(Node):
         else:
             target_twist = tick_output.target_twist
 
+        # --- AUTHORITY HANDOVER + HAPTIC FIXTURE STATE ---
+        # During autonomous grasp execution (approach/close/lift) the node DRIVES
+        # the arm directly (see section 6) and the Haption teleop must yield.
+        grasp_exec = self.grasp_sm.state in ("GRASP_APPROACH", "GRASP_CLOSE", "LIFT")
+        self.pub_grasp_active.publish(Bool(data=grasp_exec))
+
+        # Active goal pose + confidence for the haptic position virtual fixture.
+        # Confidence is forced to 0 during grasp execution so the fixture releases
+        # while the arm is being driven autonomously.
+        fix_conf = 0.0 if grasp_exec else float(b_max)
+        gp = T_active_goal[:3, 3]
+        grpy = R.from_matrix(T_active_goal[:3, :3]).as_euler('xyz')
+        self.pub_active_goal_pose.publish(Float64MultiArray(
+            data=[float(gp[0]), float(gp[1]), float(gp[2]),
+                  float(grpy[0]), float(grpy[1]), float(grpy[2]), fix_conf]))
+
         # --- 5. LOCAL INTEGRATION & VISUALIZATION ---
         # Visualization is meaningful whenever the shared-autonomy loop is driving
         # toward goals: SHARED_AUTONOMY, PRE_GRASP and (now) HOLDING. During the
@@ -848,8 +875,12 @@ class SharedControlNode(Node):
             # Float64MultiArray traffic — keep it at the full control rate.
             self.publish_inference_state(ee_policies, user_policies)
 
-        # --- 6. PUBLISH COMMAND TO ROBOT IN TEST MODE ---
-        if self.POLICY_BELIEF_TEST and not np.allclose(self.current_T_EE, np.eye(4)):
+        # --- 6. PUBLISH COMMAND TO ROBOT ---
+        # Test mode: the node is the sole reference source (always publishes).
+        # Teleop mode: the node ONLY publishes during autonomous grasp execution,
+        # taking authority from the Haption clutch (which freezes on grasp_active).
+        publish_cmd = self.POLICY_BELIEF_TEST or grasp_exec
+        if publish_cmd and not np.allclose(self.current_T_EE, np.eye(4)):
             # Virtual Haptic Cursor: integrate the optimal policy twist a short
             # distance into the future so the QP's CLF always has a moving,
             # reachable carrot to track (sending current pose stalls tracking;
@@ -1063,12 +1094,12 @@ class SharedControlNode(Node):
         m.pose.position.y = float(T_EE[1, 3])
         m.pose.position.z = float(T_EE[2, 3])
         m.pose.orientation.w = 1.0
-        m.scale.x = 0.12
-        m.scale.y = 0.12
-        m.scale.z = 0.12
-        m.color.r = 0.2
+        m.scale.x = 0.20
+        m.scale.y = 0.20
+        m.scale.z = 0.20
+        m.color.r = 0.1
         m.color.g = 1.0
-        m.color.b = 0.2
+        m.color.b = 0.1
         m.color.a = float(pulse)
         m.lifetime.sec = 0
         m.lifetime.nanosec = 200000000  # 200 ms — auto-expires if we stop publishing
