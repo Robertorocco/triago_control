@@ -147,7 +147,7 @@ class SharedControlNode(Node):
         self.W = np.diag([10.0, 10.0, 10.0, 1.0, 1.0, 1.0])
         self.plot_lock = threading.Lock()
         self.belief_estimator = BeliefEstimator(
-            target_keys=self.target_keys, W=self.W, beta=0.02, ema_alpha=0.999)
+            target_keys=self.target_keys, W=self.W, beta=0.04, ema_alpha=0.995)
         # The Platform placement goal only becomes demandable once something is
         # actually held — exclude it while the gripper is empty.
         self.belief_estimator.set_excluded_goals({self.goal_set.PLATFORM_KEY})
@@ -588,7 +588,7 @@ class SharedControlNode(Node):
         # HOLDING is intentionally NOT here: it drives toward goals via the QP and
         # therefore needs fresh collision data, like SHARED_AUTONOMY / PRE_GRASP.
         in_grasp_state = self.grasp_sm.state in (
-            "PRE_GRASP", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT")
+            "PRE_GRASP", "GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT")
 
         if not in_grasp_state:
             if self.J_c is None or self.h_c is None:
@@ -691,7 +691,7 @@ class SharedControlNode(Node):
         # The Haption input is disconnected: the grasp state machine drives the
         # arm autonomously through approach, close and lift. Teleoperation
         # resumes automatically once HOLDING is reached.
-        if self.grasp_sm.state in ("GRASP_APPROACH", "GRASP_CLOSE", "LIFT"):
+        if self.grasp_sm.state in ("GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT"):
             self.current_v_h = np.zeros(6)
 
         # --- 4. THE GRASPING STATE MACHINE (delegated) ---
@@ -765,7 +765,7 @@ class SharedControlNode(Node):
         # --- AUTHORITY HANDOVER + HAPTIC FIXTURE STATE ---
         # During autonomous grasp execution (approach/close/lift) the node DRIVES
         # the arm directly (see section 6) and the Haption teleop must yield.
-        grasp_exec = self.grasp_sm.state in ("GRASP_APPROACH", "GRASP_CLOSE", "LIFT")
+        grasp_exec = self.grasp_sm.state in ("GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT")
         self.pub_grasp_active.publish(Bool(data=grasp_exec))
 
         # Active goal pose + confidence for the haptic position virtual fixture.

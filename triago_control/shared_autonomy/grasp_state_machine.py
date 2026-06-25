@@ -165,6 +165,7 @@ class GraspStateMachine:
         return {
             "SHARED_AUTONOMY": self._shared_autonomy,
             "PRE_GRASP": self._pre_grasp,
+            "GRASP_ALIGN": self._grasp_align,
             "GRASP_APPROACH": self._grasp_approach,
             "GRASP_CLOSE": self._grasp_close,
             "LIFT": self._lift,
@@ -195,7 +196,7 @@ class GraspStateMachine:
         between PRE_GRASP and SHARED_AUTONOMY is re-evaluated every tick based on
         belief + alignment.
         """
-        if self._state in ("GRASP_CLOSE", "GRASP_APPROACH", "LIFT", "HOLDING"):
+        if self._state in ("GRASP_CLOSE", "GRASP_APPROACH", "LIFT", "HOLDING", "GRASP_ALIGN"):
             # GRASP_* and LIFT are pure run-to-completion phases. HOLDING is
             # special: while an object is in the gripper the PRE_GRASP branch is
             # deliberately UNREACHABLE (you cannot commit a second grasp with the
@@ -273,31 +274,20 @@ class GraspStateMachine:
 
         if inp.trigger_pulled:
             log_lines.append(
-                ("info", f"[GRASP] CLOSE received in PRE_GRASP. Committing to grasp of "
-                         f"{color} cylinder with {inp.active_arm} arm."))
+                ("info", f"[GRASP] CLOSE received in PRE_GRASP. Aligning precisely before approach "
+                         f"({color} cylinder, {inp.active_arm} arm)."))
 
-            # Straight-line insertion from the stable, perfectly-aligned standoff
-            # pose (inp.T_active_goal). We FREEZE that orientation and advance
-            # purely along the gripper approach axis (+X), so the gripper goes
-            # straight in without any rotation or radial re-projection — this is
-            # what keeps both fingers symmetric about the cylinder axis during
-            # the advance. GRASP_INSERTION_TRAVEL sets how far past the standoff
-            # to drive (depth knob).
-            T_base = np.asarray(inp.T_active_goal, dtype=float).copy()
-            R_base = T_base[:3, :3]
-            approach_axis = R_base[:, 0]  # gripper +X = approach direction (toward cylinder)
-            locked = np.eye(4)
-            locked[:3, :3] = R_base
-            locked[:3, 3] = T_base[:3, 3] + approach_axis * self.GRASP_INSERTION_TRAVEL
-            self.locked_grasp_pose = locked
-
-            self._transition("GRASP_APPROACH")
-            self.grasp_timer = time.time()
-            log_lines.append(
-                ("info", f"[GRASP] Gripper-{color} CBF margin relaxed to "
-                         f"{self.GRASP_CBF_MARGIN:+.3f} m (barrier still active). "
-                         f"Approaching controlled contact..."))
-
+            # Before committing the blind straight-line insertion, first drive to
+            # the EXACT standoff goal (T_active_goal) with a tighter tolerance
+            # than the PRE_GRASP entry condition. This re-centers the gripper
+            # perfectly on the cylinder axis so the approach doesn't nudge the
+            # object sideways and knock it over. The locking step uses v_geo
+            # toward the standoff — but since we're already very close (~4-6 cm,
+            # ~0.15 rad) this converges in <1 s. Once pos < 0.015 m and ang <
+            # 0.08 rad, the approach starts.
+            self._align_target = np.asarray(inp.T_active_goal, dtype=float).copy()
+            self._align_start = None  # reset align timer
+            self._transition("GRASP_ALIGN")
             return TickOutput(
                 target_twist=target_twist,
                 new_state=self._state,
@@ -311,6 +301,90 @@ class GraspStateMachine:
             target_twist=target_twist,
             new_state=self._state,
             ignore_cbf="None",   # Shield stays UP while we hover
+            grasp_margin=None,
+            log_lines=log_lines,
+        )
+
+    # ------------------------------------------------------------------
+    # PHASE 1.5: GRASP_ALIGN (precise centering before the blind insertion)
+    # ------------------------------------------------------------------
+    ALIGN_POS_TOL = 0.015   # m — must be within 1.5 cm of the exact standoff
+    ALIGN_ANG_TOL = 0.08    # rad — must be within ~5° of the goal orientation
+    ALIGN_TIMEOUT_S = 5.0   # if alignment doesn't converge in 5 s, abort
+
+    def _grasp_align(self, inp: TickInput) -> TickOutput:
+        """Drive precisely to the standoff pose before committing the blind insertion.
+
+        The PRE_GRASP entry tolerances are generous (6 cm / 0.20 rad) so the user
+        can trigger the grasp comfortably. But the straight-line insertion requires
+        near-perfect centering on the cylinder axis; otherwise the fingers push the
+        object sideways. This sub-phase uses v_geo toward the frozen standoff to
+        converge to tight tolerances, then transitions into GRASP_APPROACH.
+        """
+        self._transition("GRASP_ALIGN")
+        log_lines = []
+        color = inp.active_goal_key.split('_')[0]
+
+        # Drive toward the exact standoff (using the raw geometric velocity, NOT
+        # the QP-constrained pi_max which decelerates near the CBF and may stall).
+        # The gripper CBF margin will be relaxed in GRASP_APPROACH; here we keep
+        # the nominal safety so the arm approaches naturally to the standoff.
+        target_twist = inp.compute_v_geo(inp.current_T_EE, self._align_target)
+
+        # Check tight alignment
+        pos_err = np.linalg.norm(inp.current_T_EE[:3, 3] - self._align_target[:3, 3])
+        ang_err = np.linalg.norm(
+            np.cross(inp.current_T_EE[:3, :3][:, 0], self._align_target[:3, :3][:, 0]))
+
+        if pos_err < self.ALIGN_POS_TOL and ang_err < self.ALIGN_ANG_TOL:
+            log_lines.append(
+                ("info", f"[GRASP] Alignment converged (pos={pos_err:.4f}m, ang={ang_err:.4f}). "
+                         f"Starting straight-line approach."))
+
+            # Compute the locked insertion target (same logic as the old trigger path)
+            T_base = self._align_target.copy()
+            R_base = T_base[:3, :3]
+            approach_axis = R_base[:, 0]
+            locked = np.eye(4)
+            locked[:3, :3] = R_base
+            locked[:3, 3] = T_base[:3, 3] + approach_axis * self.GRASP_INSERTION_TRAVEL
+            self.locked_grasp_pose = locked
+
+            self._transition("GRASP_APPROACH")
+            self.grasp_timer = time.time()
+            log_lines.append(
+                ("info", f"[GRASP] Gripper-{color} CBF margin relaxed to "
+                         f"{self.GRASP_CBF_MARGIN:+.3f} m. Approaching controlled contact..."))
+            return TickOutput(
+                target_twist=target_twist,
+                new_state=self._state,
+                ignore_cbf="None",
+                grasp_margin=None,
+                log_lines=log_lines,
+            )
+
+        # Timeout guard
+        if not hasattr(self, '_align_start') or self._align_start is None:
+            self._align_start = time.time()
+        if time.time() - self._align_start > self.ALIGN_TIMEOUT_S:
+            log_lines.append(
+                ("warn", f"[GRASP] Alignment timeout (pos={pos_err:.4f}m, ang={ang_err:.4f}). "
+                         f"Aborting grasp."))
+            self._transition("SHARED_AUTONOMY")
+            self._align_start = None
+            return TickOutput(
+                target_twist=np.zeros(6),
+                new_state=self._state,
+                ignore_cbf="None",
+                grasp_margin=None,
+                reset_trigger=True,
+                log_lines=log_lines,
+            )
+
+        return TickOutput(
+            target_twist=target_twist,
+            new_state=self._state,
+            ignore_cbf="None",
             grasp_margin=None,
             log_lines=log_lines,
         )
