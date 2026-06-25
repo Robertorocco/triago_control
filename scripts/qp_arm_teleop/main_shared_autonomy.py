@@ -698,21 +698,24 @@ class SharedControlNode(Node):
 
             if not grasp_exec_now:
                 # engagement: how actively the user is moving (linear speed).
+                # When moving strongly -> full learning rate (beta, ema_alpha as tuned).
+                # When nearly still -> learning slows down but does NOT stop: the
+                # proximity/direction signal is weaker but still informative (the
+                # nearest goal slowly climbs). This fixes the "50/50 deadlock near
+                # aligned goals" where the user is stationary but clearly closer to
+                # one goal than the other.
                 speed = float(np.linalg.norm(self.current_v_h[0:3]))
-                if speed > self.BELIEF_V_LOW:
-                    # User actively moving -> update belief, resuming SMOOTHLY from
-                    # the held history. Below the threshold the belief is FROZEN
-                    # (the update is skipped entirely — no EMA decay either), so the
-                    # intent inferred from past motion is preserved verbatim until
-                    # the user decides to move again.
-                    engagement = float(np.clip(
-                        (speed - self.BELIEF_V_LOW) / max(self.BELIEF_V_HIGH - self.BELIEF_V_LOW, 1e-6),
-                        0.0, 1.0))
-                    warmup = float(np.clip(
-                        (time.time() - self._belief_warmup_start) / self.BELIEF_WARMUP_S,
-                        self.BELIEF_WARMUP_FLOOR, 1.0))
-                    self.belief_estimator.update(
-                        self.current_v_h, user_policies, gain=engagement * warmup)
+                engagement = float(np.clip(
+                    (speed - self.BELIEF_V_LOW) / max(self.BELIEF_V_HIGH - self.BELIEF_V_LOW, 1e-6),
+                    0.0, 1.0))
+                # Floor the engagement at a small but nonzero value so the belief
+                # never fully freezes — a slow trickle of evidence keeps flowing.
+                engagement = max(engagement, 0.05)
+                warmup = float(np.clip(
+                    (time.time() - self._belief_warmup_start) / self.BELIEF_WARMUP_S,
+                    self.BELIEF_WARMUP_FLOOR, 1.0))
+                self.belief_estimator.update(
+                    self.current_v_h, user_policies, gain=engagement * warmup)
                 # else: user still -> FREEZE belief (hold history, no decay)
 
             self.plot_manager.push_beliefs(
