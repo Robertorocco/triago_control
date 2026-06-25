@@ -157,6 +157,29 @@ All tunable parameters live in `triago_control/qp_controller/config.py`:
 - **Control loop**: `CONTROL_FREQ_DEFAULT` (Hz), `PUBLISH_EVERY_N`
 - **Workspace geometry**: obstacle positions, capsule radius, wall dimensions
 
+## Simulation vs. Real Hardware (Auto-Detection)
+
+The system **automatically detects** whether it is running on real hardware or in Gazebo simulation — no manual flag or configuration change required.
+
+**Detection method**: At startup, `main_qp_controller.py` fetches the URDF from `robot_state_publisher` and checks for the presence of `gripper_right_grasping_link` and `gripper_left_grasping_link`:
+
+| Condition | Environment | `REAL_HARDWARE` |
+|-----------|-------------|-----------------|
+| Both frames present in URDF | Gazebo simulation | `False` |
+| One or both frames missing | Real TIAGo Pro | `True` |
+
+**Behavioral differences when `REAL_HARDWARE = True`**:
+
+1. **Grasping frame injection**: The missing `gripper_*_grasping_link` frames are injected into the Pinocchio model at runtime (offset: `[0, 0, 0.157]`, Ry(-90°) from `gripper_*_base_link`) and broadcast as static TFs for RViz and other nodes.
+
+2. **Direct joint velocity**: Joint velocities are read directly from `/joint_states` `msg.velocity` instead of being reconstructed via position differentiation + EMA filtering. The real TIAGo Pro velocity sensors are reliable (unlike Gazebo's corrupted encoder simulation).
+
+A colored startup banner in the console announces the detected environment:
+```
+[ENV] REAL HARDWARE detected (URDF lacks grasping frames). Using direct joint velocities + injecting TCP frames.
+[ENV] SIMULATION detected (URDF contains grasping frames). Using EMA-filtered velocity from position differentiation.
+```
+
 ## ROS 2 Interface
 
 ### Subscribed Topics

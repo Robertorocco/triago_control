@@ -5,16 +5,25 @@ The Digital Twin.
 Thin wrapper around Pinocchio's model/data that owns everything kinematic:
     * loads the URDF and builds `pin.Model` / `pin.Data`,
     * caches the right/left arm joint indices and the neutral posture,
-    * derives a SMOOTHED joint velocity from raw positions (hardware quirk),
+    * derives a SMOOTHED joint velocity from raw positions (simulation mode),
+    * OR uses direct sensor velocities from /joint_states (real hardware mode),
     * runs forward kinematics / frame placements / joint Jacobians each tick,
     * optionally evolves a mathematically-perfect "ideal" digital twin.
 
-HARDWARE QUIRK PRESERVED:
-    The TRIAGo encoders report corrupted joint velocities, so we never trust
-    `msg.velocity`. Instead we differentiate position on the Lie manifold and
-    pass it through a First-Order Low-Pass Filter (Exponential Moving Average)
-    governed by `cfg.ALPHA_FILTER`. This suppresses the noise that would
-    otherwise make the CBF predictive margins chatter.
+VELOCITY PIPELINE (environment-dependent):
+    SIMULATION (Gazebo): The TRIAGo encoders report corrupted joint velocities,
+    so we differentiate position on the Lie manifold and pass it through a
+    First-Order Low-Pass Filter (EMA, governed by `cfg.ALPHA_FILTER`).
+
+    REAL HARDWARE: The real TIAGo Pro joint velocity sensors work correctly.
+    We read `msg.velocity` directly from /joint_states — no differentiation
+    or filtering needed.
+
+DETECTION METHOD:
+    The `real_hardware` flag is set by the orchestrator (`main_qp_controller.py`)
+    based on whether the URDF contains `gripper_*_grasping_link` frames:
+        - Present  → Gazebo simulation (URDF is complete)
+        - Absent   → Real hardware (URDF lacks grasping frames)
 """
 
 import pinocchio as pin
@@ -25,11 +34,12 @@ import triago_control.qp_controller.config as cfg
 class RobotKinematics:
     """Owns the Pinocchio model/data and all kinematic + filtering operations."""
 
-    def __init__(self, urdf_path):
+    def __init__(self, urdf_path, real_hardware=False):
         # Build the full TRIAGo model (WARNING: this includes EVERY joint).
         self.model = pin.buildModelFromUrdf(urdf_path)
         self.data = self.model.createData()
         self.urdf_path = urdf_path
+        self.real_hardware = real_hardware
 
         # --- KINEMATIC BYPASS (DIGITAL TWIN) ---
         self.q_sim = None              # Mathematically perfect joint state
@@ -119,9 +129,14 @@ class RobotKinematics:
         # Rebuild data to account for new frames
         self.data = self.model.createData()
 
-    def update_from_joint_state(self, q_physical, time_stamp):
-        # Derive + EMA-filter joint velocity from positions, bypassing corrupted encoders.
-        if self.last_q_meas is not None and self.last_msg_time is not None:
+    def update_from_joint_state(self, q_physical, time_stamp, v_direct=None):
+        """Update joint state. If v_direct is provided (real hardware), use it directly.
+        Otherwise, derive + EMA-filter joint velocity from positions (simulation)."""
+
+        if v_direct is not None and self.real_hardware:
+            # REAL HARDWARE: trust the sensor velocities directly (no EMA filtering needed)
+            v_physical = v_direct
+        elif self.last_q_meas is not None and self.last_msg_time is not None:
             dt = time_stamp - self.last_msg_time
             if dt > 1e-5:  # Guard against duplicate / zero-dt messages
                 # Raw velocity on the Lie manifold (safe for quaternion floating base)

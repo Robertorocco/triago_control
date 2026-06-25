@@ -480,13 +480,23 @@ from triago_control.shared_autonomy.belief_estimator import BeliefEstimator
 
 ## 8. Critical Hardware Quirks
 
-1. **Corrupted encoder velocities**: TRIAGo's joint_states `velocity` field is unreliable. The controller derives velocity from position differences and filters with a first-order EMA (`ALPHA_FILTER = 0.15`, ~60ms window). Never trust `msg.velocity` directly.
+1. **Corrupted encoder velocities (SIMULATION ONLY)**: In Gazebo, TRIAGo's joint_states `velocity` field is unreliable. The controller derives velocity from position differences and filters with a first-order EMA (`ALPHA_FILTER = 0.5`). On **real hardware**, the velocity sensors work correctly and are used directly — no differentiation or filtering.
 
-2. **Meshcat thread safety**: Meshcat's WebSocket is NOT thread-safe. ROS callbacks must NEVER call the viewer. Only the dedicated `_run_viz` thread (in `visualization_engine.py`) owns Meshcat WebSocket calls. Callbacks mutate `meshColor` under a `threading.Lock` and set `meshcat_reload_pending = True`.
+2. **REAL_HARDWARE auto-detection**: The system automatically detects whether it is running on real hardware or in simulation by inspecting the URDF fetched from `robot_state_publisher`:
+   - **Gazebo URDF** contains `gripper_right_grasping_link` and `gripper_left_grasping_link` natively → `REAL_HARDWARE = False`
+   - **Real TIAGo Pro URDF** does NOT contain these frames → `REAL_HARDWARE = True`
+   
+   This detection happens at startup in `main_qp_controller.py` before building the Pinocchio model. When `REAL_HARDWARE = True`:
+   - The missing grasping frames are **injected** into the Pinocchio model (via `robot_kinematics._ensure_grasping_frames()`) and **broadcast as static TFs** (so RViz and other nodes see them too).
+   - Joint velocities are read **directly** from `/joint_states` `msg.velocity` (no EMA differentiation).
+   
+   A colored console banner announces the detected environment at startup:
+   - Cyan: `[ENV] REAL HARDWARE detected`
+   - Green: `[ENV] SIMULATION detected`
 
-3. **Controller switching**: TRIAGo requires explicit activation of velocity controllers (`arm_right_joint_space_controller_vel`, `arm_left_joint_space_controller_vel`) and deactivation of conflicting trajectory controllers before the QP can command the arms.
+3. **Meshcat thread safety**: Meshcat's WebSocket is NOT thread-safe. ROS callbacks must NEVER call the viewer. Only the dedicated `_run_viz` thread (in `visualization_engine.py`) owns Meshcat WebSocket calls. Callbacks mutate `meshColor` under a `threading.Lock` and set `meshcat_reload_pending = True`.
 
-4. **URDF source**: The URDF is fetched at runtime from `/robot_state_publisher/get_parameters` (parameter `robot_description`). A static copy exists at `triago_extracted.urdf` for offline development/testing.
+4. **Controller switching**: TRIAGo requires explicit activation of velocity controllers (`arm_right_joint_space_controller_vel`, `arm_left_joint_space_controller_vel`) and deactivation of conflicting trajectory controllers before the QP can command the arms.
 
 ---
 

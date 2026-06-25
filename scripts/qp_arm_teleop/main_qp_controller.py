@@ -58,16 +58,35 @@ class SafetyQPController(Node):
         self.tf_buffer = Buffer()
         self.tf_listener = TransformListener(self.tf_buffer, self)
 
-        # --- STATIC TF: publish grasping frames if missing from URDF ---
-        self._publish_grasping_link_tfs()
-
         # --- BUILD MODEL + SUB-MODULES ---
         urdf_str = self.get_urdf()
         with tempfile.NamedTemporaryFile(mode='w+', delete=False, suffix='.urdf') as f:
             f.write(urdf_str)
             self.urdf_path = f.name
 
-        self.kin = RobotKinematics(self.urdf_path)
+        # =====================================================================
+        # REAL_HARDWARE DETECTION
+        # =====================================================================
+        # The Gazebo URDF contains gripper_*_grasping_link frames natively.
+        # The real TIAGo Pro URDF does NOT — this is the discriminator.
+        # Detection happens BEFORE building the Pinocchio model so we can
+        # inject the missing frames and adapt the velocity pipeline.
+        self.REAL_HARDWARE = ('gripper_right_grasping_link' not in urdf_str or
+                             'gripper_left_grasping_link' not in urdf_str)
+        if self.REAL_HARDWARE:
+            self.get_logger().info(
+                "\033[96m[ENV] REAL HARDWARE detected (URDF lacks grasping frames). "
+                "Using direct joint velocities + injecting TCP frames.\033[0m")
+        else:
+            self.get_logger().info(
+                "\033[92m[ENV] SIMULATION detected (URDF contains grasping frames). "
+                "Using EMA-filtered velocity from position differentiation.\033[0m")
+
+        # --- STATIC TF: publish grasping frames ONLY on real hardware ---
+        if self.REAL_HARDWARE:
+            self._publish_grasping_link_tfs()
+
+        self.kin = RobotKinematics(self.urdf_path, real_hardware=self.REAL_HARDWARE)
         self.col = CollisionManager(self.kin.model, self.kin.data)
 
         right_offsets = self.col.calculate_offsets(cfg.RIGHT_CHAIN, 'gripper_right_base_link')
@@ -275,13 +294,21 @@ class SafetyQPController(Node):
         if self.kin.model is None:
             return
         q_physical = pin.neutral(self.kin.model)
+        v_measured = np.zeros(self.kin.model.nv)  # direct velocity (real hardware only)
         for i, name in enumerate(msg.name):
             if self.kin.model.existJointName(name):
-                idx_q = self.kin.model.joints[self.kin.model.getJointId(name)].idx_q
+                jid = self.kin.model.getJointId(name)
+                idx_q = self.kin.model.joints[jid].idx_q
+                idx_v = self.kin.model.joints[jid].idx_v
                 if idx_q >= 0:
                     q_physical[idx_q] = msg.position[i]
+                if self.REAL_HARDWARE and idx_v >= 0 and i < len(msg.velocity):
+                    v_measured[idx_v] = msg.velocity[i]
         time_stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        self.kin.update_from_joint_state(q_physical, time_stamp)
+        if self.REAL_HARDWARE:
+            self.kin.update_from_joint_state(q_physical, time_stamp, v_direct=v_measured)
+        else:
+            self.kin.update_from_joint_state(q_physical, time_stamp)
 
     def ref_cb_right(self, msg):
         # Right-arm cartesian reference (12+ float protocol, 6-float fallback).
