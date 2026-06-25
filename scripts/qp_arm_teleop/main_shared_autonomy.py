@@ -69,7 +69,7 @@ import rclpy
 from rclpy.node import Node
 
 from std_msgs.msg import String, Bool, Float64MultiArray
-from geometry_msgs.msg import Point, TransformStamped, WrenchStamped
+from geometry_msgs.msg import Point, TransformStamped
 from tf2_ros import TransformBroadcaster
 from visualization_msgs.msg import Marker, MarkerArray
 import matplotlib.pyplot as plt
@@ -240,15 +240,6 @@ class SharedControlNode(Node):
         # --- Trajectory Buffer: 500 steps (5s at 100Hz) of human input history ---
         self.trajectory_data = deque(maxlen=500)
 
-        # --- Hybrid Admittance State Machine support variables ---
-        self.baseline_force = None
-        self.current_force_local = np.zeros(3)
-        self.current_force_mag = 0.0  # |F| (N) after baseline subtraction
-
-        # --- Grasp debug & force-based confirmation ---
-        self.GRASP_DEBUG = True
-        self.GRASP_FORCE_THRESHOLD = GraspStateMachine.GRASP_FORCE_THRESHOLD
-
         # --- ROS2 TOPICS ---
         self.sub_human_reference = self.create_subscription(
             Float64MultiArray, '/arm_right/cartesian_reference', self.human_reference_callback, 10)
@@ -277,8 +268,7 @@ class SharedControlNode(Node):
         self.pub_active_goal_pose = self.create_publisher(
             Float64MultiArray, '/shared_autonomy/active_goal_pose', 10)
 
-        self.sub_wrench = self.create_subscription(
-            WrenchStamped, '/ft_sensor_right_controller/wrench', self.wrench_callback, 10)
+        self.sub_wrench_removed = None  # Force sensor removed — not used in this architecture.
 
         # --- Visualization Infrastructure ---
         self.pub_markers = self.create_publisher(MarkerArray, '/shared_policy_markers', 10)
@@ -533,32 +523,6 @@ class SharedControlNode(Node):
         msg_ee.data = ee_array
         self.pub_ee_policy.publish(msg_ee)
 
-    def wrench_callback(self, msg):
-        """Reads the local wrist forces and subtracts the initial gravity baseline."""
-        raw_force = np.array([msg.wrench.force.x, msg.wrench.force.y, msg.wrench.force.z])
-
-        if self.baseline_force is None:
-            self.baseline_force = raw_force
-            self.get_logger().info(f"F/T Sensor Tared: {self.baseline_force}")
-
-        self.current_force_local = raw_force - self.baseline_force
-        self.current_force_mag = float(np.linalg.norm(self.current_force_local))
-
-        # Push RAW force to the plot (matches ros2 topic echo, no baseline subtraction)
-        self.plot_manager.push_force(raw_force)
-
-        if self.GRASP_DEBUG:
-            log_msg = (f"[F/T] |F|={self.current_force_mag:5.2f} N  "
-                       f"Fxyz=[{self.current_force_local[0]:6.2f},"
-                       f"{self.current_force_local[1]:6.2f},{self.current_force_local[2]:6.2f}] N")
-
-            # Only print when meaningful force contact is detected (>1.5 N)
-            if self.current_force_mag > 1.5:
-                if self.grasp_sm.state in ("GRASP_APPROACH", "GRASP_CLOSE"):
-                    self.get_logger().info(log_msg, throttle_duration_sec=0.25)
-                else:
-                    self.get_logger().info(log_msg, throttle_duration_sec=2.0)
-
     def active_arm_callback(self, msg):
         """Switches the actively controlled arm (left/right) when the user presses the haption button."""
         if msg.data in ['right', 'left'] and self.active_arm != msg.data:
@@ -742,8 +706,8 @@ class SharedControlNode(Node):
             active_goal_key=self.active_goal_key,
             active_arm=self.active_arm,
             trigger_pulled=trigger_pulled,
-            current_force_mag=self.current_force_mag,
-            current_force_local=self.current_force_local.copy(),
+            current_force_mag=0.0,
+            current_force_local=np.zeros(3),
             grasp_contact=dict(self.grasp_contact),
             compute_v_geo=self.compute_v_geo,
             get_dynamic_goal_pose=self.goal_set.get_dynamic_goal_pose,
@@ -885,7 +849,11 @@ class SharedControlNode(Node):
             # distance into the future so the QP's CLF always has a moving,
             # reachable carrot to track (sending current pose stalls tracking;
             # sending the final goal causes a jerk).
-            dt_virtual = 0.1
+            # NOTE: 0.02s is conservative. Larger values (e.g. 0.1) cause the
+            # reference to fling far when the twist reverses (CBF repulsion), which
+            # made the green gripper fly away from the goal. 0.02s = 2mm lead at
+            # 0.1 m/s — just enough for the CLF to track smoothly.
+            dt_virtual = 0.02
             T_virtual_ref = self.integrate_twist(self.current_T_EE, target_twist, dt_virtual)
 
             p_ref = T_virtual_ref[:3, 3]
@@ -1073,15 +1041,23 @@ class SharedControlNode(Node):
         self.pub_markers.publish(marker_array)
 
     def publish_grasp_ready_cue(self, T_EE):
-        """Publish a pulsing green sphere around the EE when PRE_GRASP is active.
+        """Publish a pulsing green sphere above the active-goal cylinder when PRE_GRASP is active.
 
-        The sphere pulses between opacity 0.3 and 0.7 at ~2 Hz, signalling to the
-        operator that the grasp is available (left button commits). Disappears
-        automatically when the state leaves PRE_GRASP.
+        Positioned at the TOP of the target cylinder (not the EE), so it's clearly
+        visible and not occluded by the gripper mesh. Pulses between opacity 0.3
+        and 0.8 at ~1 Hz.
         """
         import math
-        self._grasp_cue_phase += 0.05  # ~20 Hz viz rate * 0.05 ≈ 1 full cycle/s
-        pulse = 0.5 + 0.2 * math.sin(self._grasp_cue_phase * 2.0 * math.pi)
+        self._grasp_cue_phase += 0.05
+        pulse = 0.55 + 0.25 * math.sin(self._grasp_cue_phase * 2.0 * math.pi)
+
+        # Place the sphere at the top of the cylinder being grasped.
+        color = self.active_goal_key.split('_')[0]
+        if color in self.goal_set.cylinders:
+            cyl = self.goal_set.cylinders[color]
+            cue_pos = cyl['pos'] + np.array([0.0, 0.0, cyl['height'] / 2.0 + 0.08])
+        else:
+            cue_pos = T_EE[:3, 3]
 
         m = Marker()
         m.header.frame_id = "base_footprint"
@@ -1090,13 +1066,13 @@ class SharedControlNode(Node):
         m.id = 0
         m.type = Marker.SPHERE
         m.action = Marker.ADD
-        m.pose.position.x = float(T_EE[0, 3])
-        m.pose.position.y = float(T_EE[1, 3])
-        m.pose.position.z = float(T_EE[2, 3])
+        m.pose.position.x = float(cue_pos[0])
+        m.pose.position.y = float(cue_pos[1])
+        m.pose.position.z = float(cue_pos[2])
         m.pose.orientation.w = 1.0
-        m.scale.x = 0.06
-        m.scale.y = 0.06
-        m.scale.z = 0.06
+        m.scale.x = 0.10
+        m.scale.y = 0.10
+        m.scale.z = 0.10
         m.color.r = 0.1
         m.color.g = 1.0
         m.color.b = 0.1
