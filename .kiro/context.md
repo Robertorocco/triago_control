@@ -717,7 +717,7 @@ manager is the **consumer** that turns it into a guidance wrench on the device:
 |-------|------|------------------|
 | `/shared_autonomy/goal_names` | String | comma-joined keys, e.g. `Red_Top,Red_Side,Blue_Top,Blue_Side,Platform_Place` |
 | `/shared_autonomy/goal_probabilities` | Float64MultiArray | belief simplex aligned to `goal_names` (excluded goals = 0) |
-| `/shared_autonomy/user_policy` | Float64MultiArray | `n_goals × 6` flattened optimal twists (anchored at the real EE) |
+| `/shared_autonomy/user_policy` | Float64MultiArray | `n_goals × 6` flattened QP-constrained twists, **anchored at the reference pose** (`current_T_user`, from `/arm_right/cartesian_reference`) — "from where the handle/reference is, the velocity toward each goal". This is what F_guide renders. In test mode the reference == real EE, so it matches the EE-anchored policy |
 | `/shared_autonomy/active_goal_pose` | Float64MultiArray | `[x,y,z,roll,pitch,yaw,confidence]` in base_footprint (confidence forced 0 during grasp execution) |
 | `/shared_autonomy/grasp_active` | Bool | True while the SM autonomously drives the arm (approach/close/lift/release-lift) |
 
@@ -763,6 +763,19 @@ path were diagnosed and fixed:
    (`width_ratios=[1,2]`, `height_ratios=[2,1]`) — radar left full-height, the
    deviation plot top-right, and the **frequency monitor directly under it**;
    radar legend moved below the radar.
+
+4. **User policy re-anchored at the reference pose (this iteration).** Previously
+   `user_policies[key]` was a copy of the EE-anchored `ee_policies[key]` (a prior
+   attempt had abandoned reference-anchoring). Since F_guide drives the *handle*
+   (which maps to the reference), the policy that feeds F_guide is now evaluated
+   from `current_T_user` (the `/arm_right/cartesian_reference` pose):
+   `T_goal_user = get_dynamic_goal_pose(current_T_user, key, update_memory=False)`
+   → `v_geo_user = compute_v_geo(current_T_user, T_goal_user)` →
+   `solve_local_policy(v_geo_user, J_c, h_c)`. The belief tiebreaker `pos_costs`
+   is likewise anchored at `current_T_user` so the inference frame is consistent
+   with the reference twist `current_v_h`. `ee_policies` (which commands the robot
+   in test/grasp mode and draws the green gripper) stays anchored at the real EE.
+   In test mode `current_T_user == current_T_EE`, so behaviour is unchanged there.
 
 ---
 

@@ -680,14 +680,20 @@ class SharedControlNode(Node):
                 ee_policies[key] = self.solve_local_policy(v_geo_robot, self.J_c, self.h_c)
 
                 if self.PREDICTION or self.POLICY_BELIEF_TEST:
-                    # User policies anchored at T_EE (same as ee_policies). Using
-                    # T_user caused physically wrong twists when the Haption
-                    # reference diverged from the real EE (the policy from a far-away
-                    # pose points in a strange direction and demands huge forces).
-                    # Both the belief cost and the haptic F_guide need the policy
-                    # "what velocity would bring the robot (from where it IS) toward
-                    # this goal" — not from where the user's reference drifted to.
-                    user_policies[key] = ee_policies[key].copy()
+                    # User policy anchored at the REFERENCE pose (current_T_user,
+                    # from /arm_right/cartesian_reference): "what velocity, from
+                    # where the handle/reference currently is, drives toward this
+                    # goal". This is the policy F_guide renders onto the device, so
+                    # anchoring it at the reference makes the guidance respond to
+                    # the operator's hand. update_memory=False so this evaluation
+                    # does not perturb the EE-anchored goal memory. In test mode
+                    # current_T_user == current_T_EE, so it reduces to the
+                    # EE-anchored policy automatically.
+                    T_goal_user = self.goal_set.get_dynamic_goal_pose(
+                        self.current_T_user, key, update_memory=False)
+                    v_geo_user = self.compute_v_geo(self.current_T_user, T_goal_user)
+                    user_policies[key] = self.solve_local_policy(
+                        v_geo_user, self.J_c, self.h_c)
         else:
             # FALLBACK: grasping, or matrices stale -- don't solve the QP.
             for key in self.target_keys:
@@ -735,19 +741,21 @@ class SharedControlNode(Node):
                 warmup = float(np.clip(
                     (time.time() - self._belief_warmup_start) / self.BELIEF_WARMUP_S,
                     self.BELIEF_WARMUP_FLOOR, 1.0))
-                # Compute position-distance cost for each active goal: squared
-                # distance from the user pose to the goal. This breaks the
-                # degeneracy when policies are aligned (e.g. Red_Side / Blue_Side
-                # from the same side) — the nearest goal always has a lower cost
-                # and its belief slowly climbs even when the user is still.
+                # Position-distance cost for each active goal, anchored at the
+                # REFERENCE pose (current_T_user) to match the reference-anchored
+                # user policy and the reference twist (current_v_h). Breaks the
+                # degeneracy when policies are aligned (e.g. Red_Side / Blue_Side):
+                # the goal nearest the reference has the lower cost and its belief
+                # slowly climbs even when the user is still. (Test mode:
+                # current_T_user == current_T_EE, so this is unchanged there.)
                 pos_costs = {}
                 for key in self.target_keys:
                     if key in excluded:
                         continue
                     T_g = self.goal_set.get_dynamic_goal_pose(
-                        self.current_T_EE, key, update_memory=False)
+                        self.current_T_user, key, update_memory=False)
                     pos_costs[key] = float(np.sum(
-                        (self.current_T_EE[:3, 3] - T_g[:3, 3]) ** 2))
+                        (self.current_T_user[:3, 3] - T_g[:3, 3]) ** 2))
                 self.belief_estimator.update(
                     self.current_v_h, user_policies,
                     gain=engagement * warmup, pos_costs=pos_costs)
