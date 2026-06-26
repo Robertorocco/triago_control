@@ -882,14 +882,12 @@ class SharedControlNode(Node):
                   float(grpy[0]), float(grpy[1]), float(grpy[2]), fix_conf]))
 
         # --- 5. LOCAL INTEGRATION & VISUALIZATION ---
-        # Visualization is meaningful whenever the shared-autonomy loop is driving
-        # toward goals: SHARED_AUTONOMY, PRE_GRASP and (now) HOLDING. During the
-        # blind grasp/lift phases (GRASP_APPROACH/GRASP_CLOSE/LIFT) we publish
-        # nothing. Goal frames are broadcast only for demandable (non-excluded)
-        # goals, so the grasped cylinder's grasp goals vanish and the Platform
-        # placement goal appears the moment something is held.
-        viz_active = self.grasp_sm.state in ("SHARED_AUTONOMY", "PRE_GRASP", "HOLDING")
-        if viz_active and not np.allclose(self.current_T_EE, np.eye(4)):
+        # Visualization is published on every non-idle tick. During grasp execution
+        # the target_twist is the SM's command (approach/lift), so the green gripper
+        # shows the autonomous motion. Markers have 500ms lifetime so they auto-
+        # expire if the node truly stops — no manual gating needed.
+        viz_active = not np.allclose(self.current_T_EE, np.eye(4))
+        if viz_active:
             # Heavy RViz drawing (gripper markers + goal TF) is throttled to ~20 Hz.
             # Markers persist (no lifetime / no DELETEALL), so a lower refresh rate
             # is smooth and flicker-free, and keeps the 100 Hz control loop light.

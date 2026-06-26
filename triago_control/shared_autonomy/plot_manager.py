@@ -78,8 +78,8 @@ class PlotManager:
         plt.tight_layout()
 
     def _build_twist_figure(self):
-        self.fig2, (self.ax_radar, self.ax_diff) = plt.subplots(
-            1, 2, figsize=(13, 5), gridspec_kw={'width_ratios': [1, 2]})
+        self.fig2, (self.ax_radar, self.ax_diff, self.ax_freq) = plt.subplots(
+            1, 3, figsize=(16, 5), gridspec_kw={'width_ratios': [1, 2, 1]})
         self.fig2.patch.set_facecolor('#0f0f1a')
         self.fig2.canvas.manager.set_window_title('Twist Command Monitor')
 
@@ -146,6 +146,22 @@ class PlotManager:
             bbox=dict(boxstyle='round,pad=0.3', facecolor='#1a1a2e',
                       edgecolor='#4ecdc4', alpha=0.8))
 
+        # -- Frequency monitor (own node, 100 Hz target) --
+        self.ax_freq.set_facecolor('#0f0f1a')
+        self.ax_freq.tick_params(colors='#aaa')
+        for spine in self.ax_freq.spines.values():
+            spine.set_edgecolor('#334')
+        self.ax_freq.set_title('Inference Freq (Hz)', color='white', fontsize=9)
+        self.ax_freq.set_ylim(0, 120)
+        self.ax_freq.axhline(100, color='#4ecdc4', linestyle='--', linewidth=1.0, alpha=0.6)
+        self.ax_freq.grid(color='#334', linewidth=0.6)
+        self._freq_line, = self.ax_freq.plot([], [], lw=1.5, color='#ff9f43', label='SA Hz')
+        self.ax_freq.legend(loc='upper left', fontsize=8, framealpha=0.2, labelcolor='white')
+
+        self._freq_data = deque(maxlen=self.HISTORY_LEN)
+        self._freq_last_time = None
+        self._freq_lpf = 0.0
+
         self.fig2.tight_layout(pad=2.0)
 
     # ------------------------------------------------------------------
@@ -158,13 +174,23 @@ class PlotManager:
             self._excluded_goals = set(excluded) if excluded else set()
 
     def push_twist_snapshot(self, v_h, pi_star, goal_key):
-        """Thread-safe write of the latest (v_h, pi*, goal_key) sample for the twist plot."""
+        """Thread-safe write of the latest (v_h, pi*, goal_key) sample for the twist plot.
+        Also tracks the inference frequency (call rate of this method = control Hz).
+        """
+        now = time.time()
+        if self._freq_last_time is not None:
+            dt = now - self._freq_last_time
+            if dt > 1e-6:
+                self._freq_lpf = 0.9 * self._freq_lpf + 0.1 * (1.0 / dt)
+        self._freq_last_time = now
+
         with self.plot_lock:
             self._twist_snapshot = {
                 'v_h': np.asarray(v_h).copy(),
                 'pi_star': np.asarray(pi_star).copy(),
                 'goal_key': goal_key,
             }
+            self._freq_data.append(self._freq_lpf)
 
     # ------------------------------------------------------------------
     # Consumer-side API (called from the main/UI thread)
@@ -252,4 +278,13 @@ class PlotManager:
         self.ax_diff.set_xlim(t_axis[0], 0)
 
         self._diff_goal_text.set_text(f'pi* goal: {goal_key}')
+
+        # -- Update frequency subplot --
+        with self.plot_lock:
+            freq_list = list(self._freq_data)
+        if freq_list:
+            n_f = len(freq_list)
+            t_freq = np.linspace(-(n_f - 1) * 0.1, 0.0, n_f)
+            self._freq_line.set_data(t_freq, freq_list)
+            self.ax_freq.set_xlim(t_freq[0], 0)
 
