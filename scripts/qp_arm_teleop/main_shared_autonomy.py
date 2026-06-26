@@ -924,7 +924,7 @@ class SharedControlNode(Node):
                 self.publish_goal_pose_markers(beliefs)
 
                 # Keep a single precise TF frame on the active goal for pose debugging.
-                self.broadcast_goal_frame(self.active_goal_key, T_active_goal)
+                # (REMOVED: was adding bandwidth; the colored grippers are enough)
 
                 # PRE_GRASP visual cue: pulsing green sphere + one-shot console msg
                 if self.grasp_sm.state == "PRE_GRASP":
@@ -1102,30 +1102,14 @@ class SharedControlNode(Node):
         return arrow
 
     def publish_visualizations(self, trajectory_data, T_EE, v_geo):
-        """Publishes the fading Prediction Grippers, Command Arrows, and v_geo arrow."""
+        """Publishes the fading Prediction Grippers (green) only — arrows removed for bandwidth."""
         marker_array = MarkerArray()
         now = self.get_clock().now().to_msg()
-        visual_scale = 0.1
 
         for i, (T_cube, v_cmd) in enumerate(trajectory_data):
             opacity = max(0.2, 0.8 - (i * 0.3))
-
             gripper_markers = self.create_gripper_markers(T_cube, opacity, i, now)
             marker_array.markers.extend(gripper_markers)
-
-            cube_pos = T_cube[:3, 3]
-            cmd_end = cube_pos + v_cmd[:3] * visual_scale
-            arrow_cmd = self._make_arrow(
-                "local_policy_arrows", i, cube_pos, cmd_end,
-                (1.0, 1.0, 0.0, opacity), now)
-            marker_array.markers.append(arrow_cmd)
-
-        ee_pos = T_EE[:3, 3]
-        geo_end = ee_pos + v_geo[:3] * visual_scale
-        arrow_geo = self._make_arrow(
-            "v_geo_direction", 100, ee_pos, geo_end,
-            (0.5, 0.0, 0.5, 0.8), now)
-        marker_array.markers.append(arrow_geo)
 
         self.pub_markers.publish(marker_array)
 
