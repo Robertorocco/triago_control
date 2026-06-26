@@ -800,6 +800,26 @@ path were diagnosed and fixed:
    real robot has actually been steered into the target config. Do not unify
    these two anchors.
 
+6. **Tame the "exploding" guidance far from the goal (this iteration).** Two
+   complementary changes, since far away the goal pose is ill-determined and the
+   velocity-field policy is large (tanh-saturated), so F_guide would chase a
+   swinging target:
+   - **Proximity gate on F_guide** (`haptic_force_manager_tutorial.py`):
+     `guidance = belief_confidence × proximity`, where proximity is a smoothstep
+     of the distance from the reference (`pos_target`) to the active goal
+     (`fix_goal_pos`): **0 beyond `GUIDE_PROX_FAR=0.50 m` (device free)**, full by
+     `GUIDE_PROX_NEAR=0.10 m`. Also bumped the guidance gains 1.2× (`D_guide_lin
+     33.6`, `D_guide_ang 0.54`, `MAX_GUIDE_FORCE 4.2`, `MAX_GUIDE_TORQUE 0.30`)
+     because near the goal the policy twist is small and the handle was hard to move.
+   - **Distance-locked orientation choice** (`goal_set._pick_orientation` /
+     `_orientation_hysteresis`): the 180°-apart Top/Side candidate switch margin is
+     now distance-scaled — nominal `0.05 rad` at/below `0.12 m` anchor→cylinder
+     distance, ramping to an effectively infinite `10 rad` (locked) by `0.30 m`.
+     This stops the goal orientation flipping 180° while the user is still far and
+     uncommitted (the spike that whipped the guidance), while still letting the
+     user choose/change the approach side up close. Benefits guidance, belief, and
+     the green-gripper marker together.
+
 ---
 
 ## 14. Coding Conventions

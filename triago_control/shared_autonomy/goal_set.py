@@ -269,7 +269,8 @@ class GoalSet:
             return np.linalg.norm(R_candidate - R_anchor, ord='fro')
         return np.linalg.norm(pin.log3(R_rel))
 
-    def _pick_orientation(self, goal_key, R_primary, R_flipped, R_anchor, update_memory=True):
+    def _pick_orientation(self, goal_key, R_primary, R_flipped, R_anchor,
+                          update_memory=True, hysteresis=None):
         """Chooses between two orientation candidates with hysteresis (sticky choice).
 
         Without memory, this choice is recomputed from scratch every tick by
@@ -290,7 +291,16 @@ class GoalSet:
                 overwrite the real sticky choice, and the next real control
                 tick would inherit a decision based on a pose that was never
                 actually reached.
+            hysteresis: switch margin (rad). When None, uses the nominal
+                _ORIENTATION_HYSTERESIS. get_dynamic_goal_pose passes a
+                DISTANCE-SCALED value here: huge when the anchor is far from the
+                object (so the choice LOCKS and the goal orientation cannot flip
+                180° while the user is still far and uncommitted -- the cause of
+                the "exploding" guidance), relaxing to the nominal margin only
+                near the object where the user is committing to an approach side.
         """
+        if hysteresis is None:
+            hysteresis = self._ORIENTATION_HYSTERESIS
         dist_primary = self._rotation_distance(R_primary, R_anchor)
         dist_flipped = self._rotation_distance(R_flipped, R_anchor)
 
@@ -299,10 +309,10 @@ class GoalSet:
         if last_choice == 'flipped':
             # Currently committed to R_flipped: only switch back to R_primary
             # if it is clearly better, not just marginally.
-            switch = dist_primary < (dist_flipped - self._ORIENTATION_HYSTERESIS)
+            switch = dist_primary < (dist_flipped - hysteresis)
             choice = 'primary' if switch else 'flipped'
         elif last_choice == 'primary':
-            switch = dist_flipped < (dist_primary - self._ORIENTATION_HYSTERESIS)
+            switch = dist_flipped < (dist_primary - hysteresis)
             choice = 'flipped' if switch else 'primary'
         else:
             # First time this goal key is evaluated: no prior choice to be
@@ -312,6 +322,26 @@ class GoalSet:
         if update_memory:
             self._last_orientation_choice[goal_key] = choice
         return R_primary if choice == 'primary' else R_flipped
+
+    # Distance-scaled orientation-lock thresholds (see _orientation_hysteresis).
+    _ORIENT_LOCK_NEAR = 0.12   # m: at/below this anchor->object distance, nominal hysteresis
+    _ORIENT_LOCK_FAR = 0.30    # m: at/above this, the choice is effectively locked
+    _ORIENT_LOCK_HYST = 10.0   # rad: "locked" margin (>> max rotation distance pi)
+
+    def _orientation_hysteresis(self, d_obj):
+        """Distance-scaled switch margin for _pick_orientation.
+
+        d_obj is the anchor->object distance. Returns the nominal margin near the
+        object and ramps (smoothstep) to a very large margin far away, so the
+        180°-apart orientation candidate cannot flip while the user is still far
+        and uncommitted (which would whip the guidance), yet the user can still
+        choose / change the approach side once close.
+        """
+        lo, hi = self._ORIENT_LOCK_NEAR, self._ORIENT_LOCK_FAR
+        x = float(np.clip((d_obj - lo) / max(hi - lo, 1e-6), 0.0, 1.0))
+        s = 3.0 * x ** 2 - 2.0 * x ** 3   # smoothstep 0->1
+        return self._ORIENTATION_HYSTERESIS + s * (self._ORIENT_LOCK_HYST
+                                                   - self._ORIENTATION_HYSTERESIS)
 
     def get_dynamic_goal_pose(self, T_anchor, goal_key, approach_offset=0.05, update_memory=True):
         """Dynamically computes the target SE(3) pose for a given goal key.
@@ -349,6 +379,11 @@ class GoalSet:
         p_anchor = T_anchor[:3, 3]
         R_anchor = T_anchor[:3, :3]  # Extract current user/EE orientation
 
+        # Distance-scaled orientation-lock margin: anchor->cylinder distance drives
+        # how willing _pick_orientation is to flip between the two 180°-apart
+        # candidates. Far away (uncommitted) it locks; near the object it relaxes.
+        hyst = self._orientation_hysteresis(float(np.linalg.norm(p_anchor - p_cyl)))
+
         if grasp_type == 'Top':
             p_target = p_cyl + np.array([0, 0, h / 2 + approach_offset])
 
@@ -364,7 +399,7 @@ class GoalSet:
                        R.from_euler('x', 180, degrees=True)).as_matrix()
 
             R_target = self._pick_orientation(goal_key, R_top_a, R_top_b, R_anchor,
-                                               update_memory=update_memory)
+                                               update_memory=update_memory, hysteresis=hyst)
 
         elif grasp_type == 'Side':
             # 1. Z-Height Tracking (user controls grasp height)
@@ -412,7 +447,7 @@ class GoalSet:
             # flips, with hysteresis so the choice doesn't chatter near the
             # bisector between the two candidates (see _pick_orientation).
             R_target = self._pick_orientation(goal_key, R_candidate, R_flipped, R_anchor,
-                                               update_memory=update_memory)
+                                               update_memory=update_memory, hysteresis=hyst)
 
             # 4. Target Position
             standoff = r + approach_offset
