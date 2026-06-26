@@ -786,17 +786,24 @@ class SharedControlNode(Node):
             b_max = 1.0
             pi_max = ee_policies[self.active_goal_key]
 
-        # --- 3. ERROR EVALUATION ---
-        # Active goal resolved at the reference too (same manifold anchor as the
-        # policy loop). update_memory=False: the loop above already committed the
-        # sticky choice for this key this tick, so this only reads it.
+        # --- 3. ERROR EVALUATION (grasp condition) ---
+        # Two deliberately DIFFERENT anchors here, do not "unify" them:
+        #   * The GOAL is defined w.r.t. the REFERENCE (current_T_user) — it is the
+        #     user's intention. Defining it from the robot EE instead would let the
+        #     goal chase the lagging robot and the user's intent would not be met.
+        #   * The CONDITION is checked on the REAL ROBOT pose (current_T_EE) vs that
+        #     goal. So the operator can ONLY trigger a grasp once the real robot has
+        #     actually been steered (via the reference) into the target config —
+        #     i.e. they must hold the reference so the robot converges to it.
+        # update_memory=False: the policy loop already committed the sticky choice
+        # for this key this tick, so this only reads it.
         T_active_goal = self.goal_set.get_dynamic_goal_pose(
             self.current_T_user, self.active_goal_key, approach_offset=0.05,
             update_memory=False)
-        p_EE = self.current_T_EE[:3, 3]
+        p_EE = self.current_T_EE[:3, 3]        # REAL robot — grasp condition anchor
         p_goal = T_active_goal[:3, 3]
         pos_error = np.linalg.norm(p_goal - p_EE)
-        R_EE = self.current_T_EE[:3, :3]
+        R_EE = self.current_T_EE[:3, :3]       # REAL robot — grasp condition anchor
         R_goal = T_active_goal[:3, :3]
 
         if self.TASK_DIM == 5:

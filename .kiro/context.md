@@ -793,6 +793,13 @@ path were diagnosed and fixed:
    (`get_dynamic_goal_pose(sim_T_EE, ...)`, `update_memory=False`) is intentionally
    left EE-anchored. Test mode unchanged (`current_T_user == current_T_EE`).
 
+   **Grasp condition is intentionally split across two anchors:** the goal is
+   reference-defined (user intent), but `pos_error`/`ang_error` (which gate
+   `PRE_GRASP` and therefore the grasp trigger) are computed from the REAL EE
+   (`current_T_EE`) vs that goal — so a grasp can only be triggered once the
+   real robot has actually been steered into the target config. Do not unify
+   these two anchors.
+
 ---
 
 ## 14. Coding Conventions
