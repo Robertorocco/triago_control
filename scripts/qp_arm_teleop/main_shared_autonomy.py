@@ -665,7 +665,14 @@ class SharedControlNode(Node):
                 ee_policies[key] = self.solve_local_policy(v_geo_robot, self.J_c, self.h_c)
 
                 if self.PREDICTION or self.POLICY_BELIEF_TEST:
-                    T_goal_user = self.goal_set.get_dynamic_goal_pose(self.current_T_user, key)
+                    # update_memory=False: MUST NOT overwrite the orientation/azimuth
+                    # sticky memory — that belongs to the ee_policies anchor (T_EE).
+                    # Using the user anchor with update_memory=True caused the goal
+                    # pose to flip orientation every tick when T_user ≠ T_EE (which
+                    # is always the case under adaptive sync), producing huge policy
+                    # jumps that crashed the haptic guidance.
+                    T_goal_user = self.goal_set.get_dynamic_goal_pose(
+                        self.current_T_user, key, update_memory=False)
                     v_geo_user = self.compute_v_geo(self.current_T_user, T_goal_user)
                     user_policies[key] = self.solve_local_policy(v_geo_user, self.J_c, self.h_c)
         else:
@@ -767,7 +774,12 @@ class SharedControlNode(Node):
         if self.TASK_DIM == 5:
             ang_error = np.linalg.norm(np.cross(R_EE[:, 0], R_goal[:, 0]))
         else:
-            ang_error = np.linalg.norm(pin.log3(R_goal @ R_EE.T))
+            R_rel = R_goal @ R_EE.T
+            trace = np.trace(R_rel)
+            if trace <= -1.0 + 1e-4:
+                ang_error = np.pi
+            else:
+                ang_error = np.linalg.norm(pin.log3(R_rel))
 
         # Capture and consume the trigger event
         trigger_pulled = self.trigger_cmd
@@ -1340,13 +1352,28 @@ class SharedControlNode(Node):
             v_linear = np.zeros(3)
 
         # Rotation: dynamic task dimension (SO(3) vs S^2)
-        # Bug fix: the original used getattr(self, 'TASK_DIM', 6), which was
-        # unnecessary defensive code since TASK_DIM is unconditionally set in
-        # __init__. Uses self.TASK_DIM directly.
         if self.TASK_DIM == 5:
             error_ang = np.cross(R_EE[:, 0], R_goal[:, 0])
         else:
-            error_ang = pin.log3(R_goal @ R_EE.T)
+            # pin.log3 is undefined (NaN) when the relative rotation is exactly π
+            # (trace(R_rel) = -1). Detect this from the trace and fall back to a
+            # safe approximation (the cross-product of an arbitrary column pair,
+            # which gives the correct axis and is bounded).
+            R_rel = R_goal @ R_EE.T
+            trace = np.trace(R_rel)
+            if trace <= -1.0 + 1e-4:
+                # Near-π singularity: use the first non-degenerate column cross
+                error_ang = np.cross(R_EE[:, 0], R_goal[:, 0])
+                n = np.linalg.norm(error_ang)
+                if n < 1e-6:
+                    error_ang = np.cross(R_EE[:, 1], R_goal[:, 1])
+                    n = np.linalg.norm(error_ang)
+                if n > 1e-6:
+                    error_ang = error_ang / n * np.pi  # magnitude = π
+                else:
+                    error_ang = np.zeros(3)
+            else:
+                error_ang = pin.log3(R_rel)
 
         ang_dist = np.linalg.norm(error_ang)
 
