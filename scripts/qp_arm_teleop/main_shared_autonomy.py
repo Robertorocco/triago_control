@@ -938,41 +938,35 @@ class SharedControlNode(Node):
             if self._viz_counter >= self.VIZ_DECIM:
                 self._viz_counter = 0
 
-                # GREEN GRIPPER: "where the policy would drive the robot".
-                # In test mode (POLICY_BELIEF_TEST=True), the node IS the reference
-                # source, so we integrate the policy twist from the EE to show the
-                # near-future position (the robot actually goes there).
-                # In teleop mode, the node does NOT command the robot — the green
-                # gripper instead shows the ACTIVE GOAL POSE (where the guidance
-                # wants the user to go). Drawing EE + pi_max*dt was problematic:
-                # when pi_max→0 near the goal or during stale-data moments, it
-                # collapses ONTO the robot model and appears invisible. The goal
-                # pose is always a distinct, stable point visible in the scene.
+                visual_dt = 0.5
                 trajectory_data = []
-                if self.POLICY_BELIEF_TEST:
-                    # Test mode: integrate forward as before
-                    visual_dt = 0.5
-                    T_cube_1 = self.integrate_twist(self.current_T_EE, target_twist, visual_dt)
-                    trajectory_data.append((T_cube_1, target_twist))
-
-                    sim_T_EE = T_cube_1
-                    if in_free_space and valid_matrices:
-                        for _ in range(1):
-                            visual_dt = visual_dt + 0.3
-                            T_sim_goal = self.goal_set.get_dynamic_goal_pose(
-                                sim_T_EE, self.active_goal_key, update_memory=False)
-                            sim_v_geo = self.compute_v_geo(sim_T_EE, T_sim_goal)
-                            sim_twist = self.solve_local_policy(sim_v_geo, self.J_c, self.h_c)
-                            sim_T_next = self.integrate_twist(sim_T_EE, sim_twist, visual_dt)
-                            trajectory_data.append((sim_T_next, sim_twist))
-                            sim_T_EE = sim_T_next
-                else:
-                    # Teleop mode: show the ACTIVE GOAL at full opacity (the
-                    # beacon the guidance is driving toward). This is always a
-                    # distinct point in space and never collapses onto the robot.
-                    trajectory_data.append((T_active_goal, target_twist))
-
                 active_v_geo = self.compute_v_geo(self.current_T_EE, T_active_goal)
+                T_cube_1 = self.integrate_twist(self.current_T_EE, target_twist, visual_dt)
+                trajectory_data.append((T_cube_1, target_twist))
+
+                sim_T_EE = T_cube_1
+                if in_free_space and valid_matrices:
+                    for _ in range(1):
+                        visual_dt = visual_dt + 0.3
+                        T_sim_goal = self.goal_set.get_dynamic_goal_pose(
+                            sim_T_EE, self.active_goal_key, update_memory=False)
+                        sim_v_geo = self.compute_v_geo(sim_T_EE, T_sim_goal)
+                        sim_twist = self.solve_local_policy(sim_v_geo, self.J_c, self.h_c)
+                        sim_T_next = self.integrate_twist(sim_T_EE, sim_twist, visual_dt)
+                        trajectory_data.append((sim_T_next, sim_twist))
+                        sim_T_EE = sim_T_next
+
+                # Diagnostic: detect when the green gripper would collapse onto
+                # the robot (target_twist ≈ 0 → offset < 5mm). This is the reason
+                # it "disappears" — it's drawn but hidden behind the robot mesh.
+                offset = np.linalg.norm(T_cube_1[:3, 3] - self.current_T_EE[:3, 3])
+                if offset < 0.005:
+                    self.get_logger().warn(
+                        f"[VIZ] Green gripper overlaps robot (offset={offset*1000:.1f}mm, "
+                        f"target_twist_norm={np.linalg.norm(target_twist):.4f}). "
+                        f"Cause: pi_max≈0 (stale data or near goal).",
+                        throttle_duration_sec=2.0)
+
                 self.publish_visualizations(trajectory_data, self.current_T_EE, active_v_geo)
 
                 # Goal poses as belief-opacity gripper markers (replaces the per-goal
