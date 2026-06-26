@@ -111,11 +111,11 @@ class GraspStateMachine:
     #     would kick the robot out of PRE_GRASP even while perfectly aligned.
 
     GRASP_CBF_MARGIN = -0.08
-    GRASP_CONTACT_DEPTH = -0.04      # gripper-box↔cylinder overlap to trigger close (deeper = goes further in)
+    GRASP_CONTACT_DEPTH = -0.038     # gripper-box↔cylinder overlap to trigger close (slightly relaxed from -0.04)
     GRASP_INSERTION_TRAVEL = 0.09    # m, straight-line advance from standoff along approach axis (DEPTH knob)
     GRASP_FORCE_THRESHOLD = 2.0
     GRASP_CLOSE_HOLD_S = 4.0
-    GRASP_APPROACH_TIMEOUT_S = 20.0
+    GRASP_APPROACH_TIMEOUT_S = 30.0  # increased from 20s — approach can be slow with relaxed CBF
 
     # Force-controlled closure parameters
     GRIP_CLOSE_VELOCITY = 0.01   # rad/s — very slow closure (~13s to close)
