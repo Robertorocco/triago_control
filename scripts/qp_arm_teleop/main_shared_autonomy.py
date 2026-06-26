@@ -132,7 +132,7 @@ class SharedControlNode(Node):
         # The control loop runs at 100 Hz, but RViz marker/TF drawing does not need
         # that rate — republishing every gripper marker at 100 Hz floods the marker
         # topic and causes stutter/blink. Throttle the heavy drawing to ~20 Hz.
-        self.VIZ_DECIM = 5            # 100 Hz / 5 = 20 Hz marker refresh
+        self.VIZ_DECIM = 2            # 100 Hz / 2 = 50 Hz marker refresh
         self._viz_counter = 0
 
         # --- Bimanual Toggling ---
