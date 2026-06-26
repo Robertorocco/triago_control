@@ -665,16 +665,14 @@ class SharedControlNode(Node):
                 ee_policies[key] = self.solve_local_policy(v_geo_robot, self.J_c, self.h_c)
 
                 if self.PREDICTION or self.POLICY_BELIEF_TEST:
-                    # update_memory=False: MUST NOT overwrite the orientation/azimuth
-                    # sticky memory — that belongs to the ee_policies anchor (T_EE).
-                    # Using the user anchor with update_memory=True caused the goal
-                    # pose to flip orientation every tick when T_user ≠ T_EE (which
-                    # is always the case under adaptive sync), producing huge policy
-                    # jumps that crashed the haptic guidance.
-                    T_goal_user = self.goal_set.get_dynamic_goal_pose(
-                        self.current_T_user, key, update_memory=False)
-                    v_geo_user = self.compute_v_geo(self.current_T_user, T_goal_user)
-                    user_policies[key] = self.solve_local_policy(v_geo_user, self.J_c, self.h_c)
+                    # User policies anchored at T_EE (same as ee_policies). Using
+                    # T_user caused physically wrong twists when the Haption
+                    # reference diverged from the real EE (the policy from a far-away
+                    # pose points in a strange direction and demands huge forces).
+                    # Both the belief cost and the haptic F_guide need the policy
+                    # "what velocity would bring the robot (from where it IS) toward
+                    # this goal" — not from where the user's reference drifted to.
+                    user_policies[key] = ee_policies[key].copy()
         else:
             # FALLBACK: grasping, or matrices stale -- don't solve the QP.
             for key in self.target_keys:
@@ -994,6 +992,11 @@ class SharedControlNode(Node):
         quat = R.from_matrix(R_mat).as_quat()
         cr, cg, cb = rgb
 
+        # 500ms auto-expiry: survives the ~50ms refresh jitter, but auto-clears
+        # if the node stops publishing (no stale ghosts, no blink).
+        lifetime_sec = 0
+        lifetime_nsec = 500000000  # 500 ms
+
         base = Marker()
         base.header.frame_id = "base_footprint"
         base.header.stamp = now
@@ -1001,6 +1004,8 @@ class SharedControlNode(Node):
         base.id = step_index * 3
         base.type = Marker.CUBE
         base.action = Marker.ADD
+        base.lifetime.sec = lifetime_sec
+        base.lifetime.nanosec = lifetime_nsec
         base.pose.position.x, base.pose.position.y, base.pose.position.z = p_center[0], p_center[1], p_center[2]
         base.pose.orientation.x, base.pose.orientation.y, base.pose.orientation.z, base.pose.orientation.w = quat[0], quat[1], quat[2], quat[3]
         base.scale.x, base.scale.y, base.scale.z = 0.02, 0.08, 0.03
@@ -1016,6 +1021,7 @@ class SharedControlNode(Node):
         left.id = step_index * 3 + 1
         left.type = Marker.CUBE
         left.action = Marker.ADD
+        left.lifetime = base.lifetime
         left.pose.position.x, left.pose.position.y, left.pose.position.z = p_left[0], p_left[1], p_left[2]
         left.pose.orientation = base.pose.orientation
         left.scale.x, left.scale.y, left.scale.z = 0.06, 0.01, 0.02
@@ -1031,6 +1037,7 @@ class SharedControlNode(Node):
         right.id = step_index * 3 + 2
         right.type = Marker.CUBE
         right.action = Marker.ADD
+        right.lifetime = base.lifetime
         right.pose.position.x, right.pose.position.y, right.pose.position.z = p_right[0], p_right[1], p_right[2]
         right.pose.orientation = base.pose.orientation
         right.scale.x, right.scale.y, right.scale.z = 0.06, 0.01, 0.02
@@ -1084,6 +1091,8 @@ class SharedControlNode(Node):
         arrow.id = marker_id
         arrow.type = Marker.ARROW
         arrow.action = Marker.ADD
+        arrow.lifetime.sec = 0
+        arrow.lifetime.nanosec = 500000000  # 500 ms auto-expiry
         arrow.points = [
             Point(x=start[0], y=start[1], z=start[2]),
             Point(x=end[0], y=end[1], z=end[2]),
@@ -1194,7 +1203,7 @@ class SharedControlNode(Node):
         m.color.b = 0.1
         m.color.a = float(pulse)
         m.lifetime.sec = 0
-        m.lifetime.nanosec = 200000000  # 200 ms — auto-expires if we stop publishing
+        m.lifetime.nanosec = 500000000  # 500 ms — auto-expires if we stop publishing
 
         ma = MarkerArray()
         ma.markers.append(m)
