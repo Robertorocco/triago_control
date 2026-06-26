@@ -129,11 +129,13 @@ class SharedControlNode(Node):
         self.max_data_age = 0.05
 
         # --- Visualization rate decoupling ---
-        # The control loop runs at 100 Hz, but RViz marker/TF drawing does not need
-        # that rate — republishing every gripper marker at 100 Hz floods the marker
-        # topic and causes stutter/blink. Throttle the heavy drawing to ~20 Hz.
-        self.VIZ_DECIM = 2            # 100 Hz / 2 = 50 Hz marker refresh
+        # The control loop runs at 100 Hz. Publish markers at EVERY tick (no
+        # decimation) to guarantee the green policy gripper never disappears in
+        # RViz — a lower rate combined with even brief stalls caused it to blink.
+        # The marker traffic is small (a handful of CUBE markers per publish).
+        self.VIZ_DECIM = 1            # 100 Hz / 1 = full rate marker refresh
         self._viz_counter = 0
+        self._viz_miss_count = 0      # diagnostic: counts consecutive skipped viz ticks
 
         # --- Bimanual Toggling ---
         self.active_arm = 'right'
@@ -919,37 +921,58 @@ class SharedControlNode(Node):
                   float(grpy[0]), float(grpy[1]), float(grpy[2]), fix_conf]))
 
         # --- 5. LOCAL INTEGRATION & VISUALIZATION ---
-        # Visualization is published on every non-idle tick. During grasp execution
-        # the target_twist is the SM's command (approach/lift), so the green gripper
-        # shows the autonomous motion. Markers have 500ms lifetime so they auto-
-        # expire if the node truly stops — no manual gating needed.
         viz_active = not np.allclose(self.current_T_EE, np.eye(4))
-        if viz_active:
-            # Heavy RViz drawing (gripper markers + goal TF) is throttled to ~20 Hz.
-            # Markers persist (no lifetime / no DELETEALL), so a lower refresh rate
-            # is smooth and flicker-free, and keeps the 100 Hz control loop light.
+        if not viz_active:
+            self._viz_miss_count += 1
+            if self._viz_miss_count == 50:  # print once after 0.5s of missed viz
+                self.get_logger().warn(
+                    "[VIZ] Markers NOT publishing: EE pose is still identity "
+                    "(robot_state_callback not yet received?).")
+        else:
+            if self._viz_miss_count > 0:
+                self.get_logger().info(
+                    f"[VIZ] Resumed after {self._viz_miss_count} missed ticks.")
+                self._viz_miss_count = 0
+
             self._viz_counter += 1
             if self._viz_counter >= self.VIZ_DECIM:
                 self._viz_counter = 0
 
-                visual_dt = 0.5
+                # GREEN GRIPPER: "where the policy would drive the robot".
+                # In test mode (POLICY_BELIEF_TEST=True), the node IS the reference
+                # source, so we integrate the policy twist from the EE to show the
+                # near-future position (the robot actually goes there).
+                # In teleop mode, the node does NOT command the robot — the green
+                # gripper instead shows the ACTIVE GOAL POSE (where the guidance
+                # wants the user to go). Drawing EE + pi_max*dt was problematic:
+                # when pi_max→0 near the goal or during stale-data moments, it
+                # collapses ONTO the robot model and appears invisible. The goal
+                # pose is always a distinct, stable point visible in the scene.
                 trajectory_data = []
+                if self.POLICY_BELIEF_TEST:
+                    # Test mode: integrate forward as before
+                    visual_dt = 0.5
+                    T_cube_1 = self.integrate_twist(self.current_T_EE, target_twist, visual_dt)
+                    trajectory_data.append((T_cube_1, target_twist))
+
+                    sim_T_EE = T_cube_1
+                    if in_free_space and valid_matrices:
+                        for _ in range(1):
+                            visual_dt = visual_dt + 0.3
+                            T_sim_goal = self.goal_set.get_dynamic_goal_pose(
+                                sim_T_EE, self.active_goal_key, update_memory=False)
+                            sim_v_geo = self.compute_v_geo(sim_T_EE, T_sim_goal)
+                            sim_twist = self.solve_local_policy(sim_v_geo, self.J_c, self.h_c)
+                            sim_T_next = self.integrate_twist(sim_T_EE, sim_twist, visual_dt)
+                            trajectory_data.append((sim_T_next, sim_twist))
+                            sim_T_EE = sim_T_next
+                else:
+                    # Teleop mode: show the ACTIVE GOAL at full opacity (the
+                    # beacon the guidance is driving toward). This is always a
+                    # distinct point in space and never collapses onto the robot.
+                    trajectory_data.append((T_active_goal, target_twist))
+
                 active_v_geo = self.compute_v_geo(self.current_T_EE, T_active_goal)
-                T_cube_1 = self.integrate_twist(self.current_T_EE, target_twist, visual_dt)
-                trajectory_data.append((T_cube_1, target_twist))
-
-                sim_T_EE = T_cube_1
-                if in_free_space and valid_matrices:
-                    for _ in range(1):
-                        visual_dt = visual_dt + 0.3
-                        T_sim_goal = self.goal_set.get_dynamic_goal_pose(
-                            sim_T_EE, self.active_goal_key, update_memory=False)
-                        sim_v_geo = self.compute_v_geo(sim_T_EE, T_sim_goal)
-                        sim_twist = self.solve_local_policy(sim_v_geo, self.J_c, self.h_c)
-                        sim_T_next = self.integrate_twist(sim_T_EE, sim_twist, visual_dt)
-                        trajectory_data.append((sim_T_next, sim_twist))
-                        sim_T_EE = sim_T_next
-
                 self.publish_visualizations(trajectory_data, self.current_T_EE, active_v_geo)
 
                 # Goal poses as belief-opacity gripper markers (replaces the per-goal
