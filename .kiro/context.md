@@ -1,7 +1,7 @@
 # AI Agent Context — triago_control
 
 > **This file is maintained by the AI agent. Do not edit manually.**
-> Last updated: 2026-06-22 (added head_controller architecture — vision-based independent head servoing)
+> Last updated: 2026-06-26 (added §13.5 simulation flow; fixed F_guide → velocity-field guidance, green-gripper marker viz robustness, and SA frequency-plot layout)
 
 ---
 
@@ -187,13 +187,18 @@ Implements **clutch-indexing** (mouse-mode) teleoperation:
 
 ### 4.5 Key Script: haptic_force_manager.py
 
+> **Active script name**: the running force-feedback node is
+> **`haptic_force_manager_tutorial.py`** (see §13.5). The description below
+> documents the multi-layer force architecture; the tutorial variant currently
+> runs with `DEBUG_ONLY_GUIDE = True`, emitting only `F_guide`.
+
 Multi-layer force-feedback superposition node. Computes and sums:
 
 | Layer | Symbol | Description |
 |-------|--------|-------------|
 | Sync | F_sync | Spring-damper (Kp=10, Kd=0) tethering user to robot tracking error |
 | CBF | F_cbf | Repulsive force from collision barrier gradient × λ_cbf, tanh-saturated, LPF'd (α=0.15) |
-| Guide | F_guide | Belief-weighted blend of all leaf policies (continuous, entropy-gated confidence, viscous B=90 N/(m/s)) |
+| Guide | F_guide | Belief-weighted policy rendered as a **velocity field** the handle should follow: `F = D·(map(pi_blend) − v_handle)·confidence`, entropy-gated, tanh-saturated (`D_lin=28`, `D_ang=0.45`, `MAX 3.5N/0.25Nm`), LPF'd. Intrinsically damped → no runaway |
 | Limit | F_limit | 75 Hz square-wave vibration when Haption joints approach mechanical limits |
 | Clutch align | — | Rotational spring (K=10 Nm/rad) pulling handle toward target orientation during clutch |
 | Global damping | — | Viscous Kd_lin=0.7, Kd_ang=0.1 for stability |
@@ -643,6 +648,121 @@ ros2 run triago_control trajectory_generator.py --ros-args -p config_file:=/abs/
 # Run plotter dashboard
 ros2 run triago_control plotter.py
 ```
+
+---
+
+## 13.5 Full Simulation Launch Sequence (typical session)
+
+This is the exact, ordered set of commands the user runs for a normal Gazebo
+teleoperation session. Two sides: the **robot/control side** (triago_control +
+Gazebo + controllers) and the **teleoperation side** (haption_teleoperation).
+Each command runs in its own terminal (all need the workspace sourced).
+
+### Robot / control side
+
+```bash
+# 1. World: TRIAGo + table + two cylinders + yellow placement zone ("tutorial" world)
+ros2 launch triago_gazebo triago_gazebo.launch.py \
+    end_effector_right:=pal-pro-gripper \
+    end_effector_left:=pal-pro-gripper \
+    world_name:=tutorial
+
+# 2. Load the default controllers (joint-space velocity controllers, etc.)
+ros2 launch triago_controller_configuration tsid_default_controllers.launch.py \
+    use_sim_time:=True
+
+# 3. QP CLF-CBF safety controller (tracks /arm_*/cartesian_reference, owns CBF)
+ros2 run triago_control main_qp_controller.py
+
+# 4. Shared autonomy + belief evaluation (intent inference, grasp FSM,
+#    publishes /shared_autonomy/* consumed by the haptic force manager)
+ros2 run triago_control main_shared_autonomy.py
+
+# 5. RViz visualization (markers, goal grippers, guidance cues)
+ros2 launch triago_control visualize.launch.py
+```
+
+### Teleoperation side (haption_teleoperation)
+
+```bash
+# 6. Haption device server (150 Hz C++ node, talks to the VirtuoseAPI)
+ros2 run haption_teleoperation virtuose_server_node
+
+# 7. Clutch-indexing teleop (owns /arm_right/cartesian_reference)
+ros2 run haption_teleoperation teleop_triago_clutch.py
+
+# 8. Force feedback to the operator (Virtual-Fixture guidance forces)
+ros2 run haption_teleoperation haptic_force_manager_tutorial.py
+```
+
+### Active-script note (naming)
+
+The **active** force-feedback node is **`haptic_force_manager_tutorial.py`**
+(NOT `haptic_force_manager.py`, which no longer exists). Sibling variants in
+`haption_teleoperation/scripts/`:
+- `haptic_force_manager_tutorial.py` — ★ active node used in the tutorial-world flow.
+- `haptic_force_manager_battery.py` — alternate/experimental variant.
+
+`haptic_force_manager_tutorial.py` currently runs with **`DEBUG_ONLY_GUIDE = True`**,
+which means it outputs **only `F_guide`** (the belief-weighted Virtual-Fixture
+guidance wrench) — `F_sync`, `F_cbf`, `F_fixture`, clutch-align and global damping
+are all bypassed while this debug flag is set.
+
+### main_shared_autonomy ↔ haptic_force_manager_tutorial interface
+
+The shared-autonomy node is the **producer** of the inference state; the force
+manager is the **consumer** that turns it into a guidance wrench on the device:
+
+| Topic | Type | Layout / meaning |
+|-------|------|------------------|
+| `/shared_autonomy/goal_names` | String | comma-joined keys, e.g. `Red_Top,Red_Side,Blue_Top,Blue_Side,Platform_Place` |
+| `/shared_autonomy/goal_probabilities` | Float64MultiArray | belief simplex aligned to `goal_names` (excluded goals = 0) |
+| `/shared_autonomy/user_policy` | Float64MultiArray | `n_goals × 6` flattened optimal twists (anchored at the real EE) |
+| `/shared_autonomy/active_goal_pose` | Float64MultiArray | `[x,y,z,roll,pitch,yaw,confidence]` in base_footprint (confidence forced 0 during grasp execution) |
+| `/shared_autonomy/grasp_active` | Bool | True while the SM autonomously drives the arm (approach/close/lift/release-lift) |
+
+- `F_guide` = `Σ P(k)·π_k` integrated over a lookahead → position spring toward
+  that offset, gated by belief confidence (entropy-based). This is the only
+  layer active under `DEBUG_ONLY_GUIDE`.
+- `F_fixture` = position/orientation spring toward `active_goal_pose`, gated by
+  confidence (silent unless `DEBUG_ONLY_GUIDE=False`).
+- When `grasp_active=True`, the manager normally switches to a strong pure
+  EE-following sync so the operator feels the autonomous grasp (also bypassed
+  under `DEBUG_ONLY_GUIDE`).
+
+### Fixes — 2026-06-26 (F_guide guidance, viz, plot layout)
+
+Three issues in the teleop (`POLICY_BELIEF_TEST=False`) + `DEBUG_ONLY_GUIDE=True`
+path were diagnosed and fixed:
+
+1. **F_guide too strong / handle drifted instead of being driven to the goal.**
+   Root cause: the old `compute_F_guide` turned the tanh-saturated policy
+   velocity into a position offset (`pi_blend·lookahead`, capped at 5 cm) → a
+   near-constant ~4.5 N push that only faded when the *robot EE* (not the hand)
+   reached the goal. With `DEBUG_ONLY_GUIDE` bypassing all damping, a constant
+   undamped force just accelerates a lightly-held handle. **Fix:** F_guide is now
+   a **velocity-field guidance** force `F = D·(v_field − v_handle)·confidence`,
+   where `v_field = map(pi_blend)` (180° Z-flip into the Haption frame). It pushes
+   when the handle is still, is intrinsically damped (fades to zero as the handle
+   reaches `v_field` → no runaway), lets a passive hand cruise at exactly
+   `pi_blend` (so the teleop reference traces the SAME path the test mode commands
+   directly), and vanishes at the goal. Gains: `D_guide_lin=28`, `D_guide_ang=0.45`,
+   sat `MAX_GUIDE_FORCE=3.5 N` / `MAX_GUIDE_TORQUE=0.25 Nm`.
+
+2. **Green policy gripper marker disappeared in RViz.** Root cause: `timer_callback`
+   hard-`return`ed whenever `/collision_constraints` was older than 50 ms, halting
+   ALL marker publishing; with the 500 ms marker lifetime any QP-rate jitter
+   blinked the marker out. **Fix:** staleness now only WARNs and is folded into
+   `valid_matrices` (stale → zero policies = safe halt, which also stops the
+   test-mode command) while visualization keeps publishing; marker lifetime raised
+   to 1.5 s.
+
+3. **Shared-autonomy frequency plot overlapped / sat beside the twist plot.**
+   `PlotManager._build_twist_figure` was a 1×3 row `(radar | diff | freq)` and the
+   radar legend bled into the deviation plot. **Fix:** gridspec `2×2`
+   (`width_ratios=[1,2]`, `height_ratios=[2,1]`) — radar left full-height, the
+   deviation plot top-right, and the **frequency monitor directly under it**;
+   radar legend moved below the radar.
 
 ---
 

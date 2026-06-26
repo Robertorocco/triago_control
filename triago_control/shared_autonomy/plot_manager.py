@@ -78,14 +78,20 @@ class PlotManager:
         plt.tight_layout()
 
     def _build_twist_figure(self):
-        self.fig2, (self.ax_radar, self.ax_diff, self.ax_freq) = plt.subplots(
-            1, 3, figsize=(16, 5), gridspec_kw={'width_ratios': [1, 2, 1]})
+        # Layout: radar (spider) on the LEFT spanning the full height; on the
+        # RIGHT a vertical stack with the scrolling per-DoF deviation plot on TOP
+        # and the inference-frequency monitor directly UNDER it (previously the
+        # freq panel sat BESIDE the deviation plot in a 1x3 row and the radar
+        # legend bled into it — both fixed here).
+        self.fig2 = plt.figure(figsize=(15, 7))
         self.fig2.patch.set_facecolor('#0f0f1a')
         self.fig2.canvas.manager.set_window_title('Twist Command Monitor')
 
-        # -- Radar (spider) axes --
-        self.fig2.delaxes(self.ax_radar)
-        self.ax_radar = self.fig2.add_subplot(121, projection='polar')
+        gs = self.fig2.add_gridspec(2, 2, width_ratios=[1, 2],
+                                    height_ratios=[2, 1], hspace=0.38, wspace=0.22)
+        self.ax_radar = self.fig2.add_subplot(gs[:, 0], projection='polar')  # left, full height
+        self.ax_diff = self.fig2.add_subplot(gs[0, 1])                       # top right
+        self.ax_freq = self.fig2.add_subplot(gs[1, 1])                       # bottom right (UNDER diff)
         self.ax_radar.set_facecolor('#0f0f1a')
 
         angles = np.linspace(0, 2 * np.pi, self.N_COMP, endpoint=False).tolist()
@@ -117,8 +123,10 @@ class PlotManager:
         self._radar_fill_pi = self.ax_radar.fill(
             angles, empty, alpha=0.20, color='#4ecdc4')[0]
 
-        self.ax_radar.legend(loc='upper right', bbox_to_anchor=(1.35, 1.15),
-                              fontsize=8, framealpha=0.2, labelcolor='white')
+        # Legend placed BELOW the radar (not to its upper-right, where it used to
+        # bleed into the deviation plot in the old side-by-side layout).
+        self.ax_radar.legend(loc='upper center', bbox_to_anchor=(0.5, -0.06),
+                              ncol=2, fontsize=8, framealpha=0.2, labelcolor='white')
 
         # -- Scrolling difference axes --
         self.ax_diff.set_facecolor('#0f0f1a')
@@ -162,7 +170,9 @@ class PlotManager:
         self._freq_last_time = None
         self._freq_lpf = 0.0
 
-        self.fig2.tight_layout(pad=2.0)
+        # NOTE: no tight_layout() here — spacing is set explicitly via the
+        # gridspec (hspace/wspace) above, and tight_layout would override it and
+        # re-introduce the radar-legend / deviation-plot overlap.
 
     # ------------------------------------------------------------------
     # Producer-side API (called from the control loop thread)

@@ -115,6 +115,46 @@ export GAZEBO_PLUGIN_PATH=$GAZEBO_PLUGIN_PATH:~/ros2-ws/install/ros2_linkattache
 
 ## Run
 
+### Full Simulation Launch Sequence (typical session)
+
+Each command runs in its own terminal (workspace sourced). Robot/control side first, then the teleoperation side.
+
+**Robot / control side:**
+
+```bash
+# 1. World: TRIAGo + table + cylinders + yellow placement zone ("tutorial")
+ros2 launch triago_gazebo triago_gazebo.launch.py \
+    end_effector_right:=pal-pro-gripper end_effector_left:=pal-pro-gripper \
+    world_name:=tutorial
+
+# 2. Load default controllers (joint-space velocity controllers, etc.)
+ros2 launch triago_controller_configuration tsid_default_controllers.launch.py use_sim_time:=True
+
+# 3. QP CLF-CBF safety controller
+ros2 run triago_control main_qp_controller.py
+
+# 4. Shared autonomy + belief evaluation
+ros2 run triago_control main_shared_autonomy.py
+
+# 5. RViz visualization
+ros2 launch triago_control visualize.launch.py
+```
+
+**Teleoperation side (haption_teleoperation):**
+
+```bash
+# 6. Haption device server (150 Hz)
+ros2 run haption_teleoperation virtuose_server_node
+
+# 7. Clutch-indexing teleop (owns /arm_right/cartesian_reference)
+ros2 run haption_teleoperation teleop_triago_clutch.py
+
+# 8. Force feedback to the operator (Virtual-Fixture guidance)
+ros2 run haption_teleoperation haptic_force_manager_tutorial.py
+```
+
+> The active force-feedback node is `haptic_force_manager_tutorial.py`. It consumes `/shared_autonomy/{goal_names, goal_probabilities, user_policy, active_goal_pose, grasp_active}` published by `main_shared_autonomy.py` to compute the guidance wrench sent to the Haption device.
+
 ### QP Safety Controller (bimanual arms)
 
 ```bash

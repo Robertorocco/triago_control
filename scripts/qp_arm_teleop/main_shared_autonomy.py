@@ -628,10 +628,22 @@ class SharedControlNode(Node):
 
         if not in_grasp_state:
             if self.J_c is None or self.h_c is None:
+                # No collision data has EVER arrived yet — nothing to draw/solve.
                 return
+            # Bug fix (green gripper marker disappearing): the old code did a hard
+            # `return` here whenever the collision data was older than max_data_age,
+            # which halted the WHOLE callback — including marker publishing. With
+            # the 500 ms marker lifetime, any jitter in the QP's /collision_constraints
+            # rate then blinked the green policy gripper out of RViz. In teleop
+            # SHARED_AUTONOMY this node does not even command the arm, so halting
+            # viz is needless. Instead we just WARN here and let the loop continue:
+            # staleness is folded into `valid_matrices` below, so the policy QP is
+            # skipped (policies -> 0, a safe halt that also stops the test-mode
+            # command), but visualization keeps publishing and stays alive.
             if (time.time() - self.last_collision_time) > self.max_data_age:
-                self.get_logger().warn("Collision data stale. Halting.", throttle_duration_sec=1.0)
-                return
+                self.get_logger().warn(
+                    "Collision data stale — skipping policy solve (viz kept alive).",
+                    throttle_duration_sec=1.0)
 
         # In test mode (no haptic device), bind fake user pose to real robot pose.
         if self.POLICY_BELIEF_TEST:
@@ -642,7 +654,10 @@ class SharedControlNode(Node):
         user_policies = {}
 
         in_free_space = self.grasp_sm.state in ("SHARED_AUTONOMY", "PRE_GRASP", "HOLDING")
-        valid_matrices = self.J_c is not None and self.h_c is not None
+        # valid_matrices now also requires the collision data to be FRESH: stale
+        # data -> policies solved to zero (safe halt) but visualization continues.
+        valid_matrices = (self.J_c is not None and self.h_c is not None
+                          and (time.time() - self.last_collision_time) <= self.max_data_age)
         excluded = self.belief_estimator.get_excluded_goals()
 
         if in_free_space and valid_matrices:
@@ -990,10 +1005,11 @@ class SharedControlNode(Node):
         quat = R.from_matrix(R_mat).as_quat()
         cr, cg, cb = rgb
 
-        # 500ms auto-expiry: survives the ~50ms refresh jitter, but auto-clears
-        # if the node stops publishing (no stale ghosts, no blink).
-        lifetime_sec = 0
-        lifetime_nsec = 500000000  # 500 ms
+        # 1.5 s auto-expiry: long enough to ride out jitter in the publish rate
+        # (e.g. a brief /collision_constraints stall) so the policy gripper does
+        # NOT blink out of RViz, but still auto-clears if the node truly stops.
+        lifetime_sec = 1
+        lifetime_nsec = 500000000  # -> 1.5 s total
 
         base = Marker()
         base.header.frame_id = "base_footprint"
