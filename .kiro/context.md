@@ -777,6 +777,22 @@ path were diagnosed and fixed:
    in test/grasp mode and draws the green gripper) stays anchored at the real EE.
    In test mode `current_T_user == current_T_EE`, so behaviour is unchanged there.
 
+5. **Goal manifold anchored at the reference pose (this iteration).** The dynamic
+   goal pose `get_dynamic_goal_pose(T_anchor, key)` resolves the point on each
+   goal *manifold* from `T_anchor` (Side: approach azimuth + grasp height; Top:
+   roll; Platform: placement XY + yaw). All non-speculative callsites now pass
+   `current_T_user` instead of `current_T_EE`: the policy-loop resolution (one
+   shared `T_goal` per key, `update_memory=True`, feeding BOTH `ee_policies` and
+   `user_policies`), the active goal `T_active_goal` (`update_memory=False`), and
+   the RViz belief-opacity goal markers. Rationale: in teleop the QP-CLF tracks
+   the reference, so the reference — not the lagging EE — is the robot's intended
+   pose and the right anchor for selecting the manifold point. The robot policy's
+   *velocity* is still taken FROM the real EE (`compute_v_geo(current_T_EE, T_goal)`)
+   so it still commands the actual robot; only the manifold POINT is reference-
+   selected. The speculative one-step-lookahead used to draw the green gripper
+   (`get_dynamic_goal_pose(sim_T_EE, ...)`, `update_memory=False`) is intentionally
+   left EE-anchored. Test mode unchanged (`current_T_user == current_T_EE`).
+
 ---
 
 ## 14. Coding Conventions

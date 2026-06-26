@@ -675,25 +675,28 @@ class SharedControlNode(Node):
                 if not self.PREDICTION and key != self.active_goal_key:
                     continue
 
-                T_goal_robot = self.goal_set.get_dynamic_goal_pose(self.current_T_EE, key)
-                v_geo_robot = self.compute_v_geo(self.current_T_EE, T_goal_robot)
+                # Goal-manifold point resolved w.r.t. the REFERENCE pose
+                # (current_T_user, from /arm_right/cartesian_reference). In teleop
+                # the QP-CLF tracks the reference, so the reference — NOT the
+                # lagging real EE — is the robot's intended pose and the correct
+                # anchor for picking the point on the goal manifold (Side azimuth
+                # + grasp height, Top roll, Platform XY + yaw). This single
+                # resolution owns the sticky orientation/azimuth memory
+                # (update_memory=True) and is shared by BOTH policies below, so the
+                # robot and the haptic guidance always aim at the SAME point.
+                # Test mode: current_T_user == current_T_EE → identical to before.
+                T_goal = self.goal_set.get_dynamic_goal_pose(self.current_T_user, key)
+
+                # EE policy: velocity FROM the real EE toward that goal (commands
+                # the robot in test/grasp mode, feeds pi_max and the green gripper).
+                v_geo_robot = self.compute_v_geo(self.current_T_EE, T_goal)
                 ee_policies[key] = self.solve_local_policy(v_geo_robot, self.J_c, self.h_c)
 
                 if self.PREDICTION or self.POLICY_BELIEF_TEST:
-                    # User policy anchored at the REFERENCE pose (current_T_user,
-                    # from /arm_right/cartesian_reference): "what velocity, from
-                    # where the handle/reference currently is, drives toward this
-                    # goal". This is the policy F_guide renders onto the device, so
-                    # anchoring it at the reference makes the guidance respond to
-                    # the operator's hand. update_memory=False so this evaluation
-                    # does not perturb the EE-anchored goal memory. In test mode
-                    # current_T_user == current_T_EE, so it reduces to the
-                    # EE-anchored policy automatically.
-                    T_goal_user = self.goal_set.get_dynamic_goal_pose(
-                        self.current_T_user, key, update_memory=False)
-                    v_geo_user = self.compute_v_geo(self.current_T_user, T_goal_user)
-                    user_policies[key] = self.solve_local_policy(
-                        v_geo_user, self.J_c, self.h_c)
+                    # User policy: velocity FROM the reference toward the SAME
+                    # goal — this is the policy F_guide renders onto the handle.
+                    v_geo_user = self.compute_v_geo(self.current_T_user, T_goal)
+                    user_policies[key] = self.solve_local_policy(v_geo_user, self.J_c, self.h_c)
         else:
             # FALLBACK: grasping, or matrices stale -- don't solve the QP.
             for key in self.target_keys:
@@ -784,8 +787,12 @@ class SharedControlNode(Node):
             pi_max = ee_policies[self.active_goal_key]
 
         # --- 3. ERROR EVALUATION ---
+        # Active goal resolved at the reference too (same manifold anchor as the
+        # policy loop). update_memory=False: the loop above already committed the
+        # sticky choice for this key this tick, so this only reads it.
         T_active_goal = self.goal_set.get_dynamic_goal_pose(
-            self.current_T_EE, self.active_goal_key, approach_offset=0.05)
+            self.current_T_user, self.active_goal_key, approach_offset=0.05,
+            update_memory=False)
         p_EE = self.current_T_EE[:3, 3]
         p_goal = T_active_goal[:3, 3]
         pos_error = np.linalg.norm(p_goal - p_EE)
@@ -1164,8 +1171,11 @@ class SharedControlNode(Node):
             family = goal_key.split('_')[0]
             rgb = self.GOAL_FAMILY_RGB.get(family, (0.0, 1.0, 0.0))
             opacity = self._belief_to_opacity(beliefs.get(goal_key, 0.0))
+            # Draw each goal at the manifold point selected by the REFERENCE pose
+            # (same anchor as the policy loop), so the RViz goal grippers match
+            # where the system is actually steering. update_memory=False (read-only).
             T_goal = self.goal_set.get_dynamic_goal_pose(
-                self.current_T_EE, goal_key, update_memory=False)
+                self.current_T_user, goal_key, update_memory=False)
             marker_array.markers.extend(
                 self.create_gripper_markers(T_goal, opacity, i, now,
                                             ns="goal_poses", rgb=rgb))
