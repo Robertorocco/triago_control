@@ -40,7 +40,8 @@ ORIENTATION_CTRL = True         # True = control Pos+Ori (6DOF), False = Pos onl
 ALPHA_SOFTMIN = 50.0            # Sharpness of the SoftMin collision aggregation
 GAMMA_CBF = 0.75               # CBF class-K gain [scaled down from 1.5 for 300Hz]
 D_SAFE_BASE = 0.015            # Base safety distance for the collision barrier
-K_V_SAFE = 0.1                 # Predictive velocity horizon for margin expansion
+K_V_SAFE = 0.2                 # Predictive velocity horizon [0.1 -> 0.2: brake earlier
+                               #   at high speed so fast unsafe motion cannot penetrate]
 ALPHA_FILTER = 0.5            # EMA coefficient for hardware velocity filtering (~20ms window)
 DAMP = 10.0                    # Joint velocity regularization (Lambda) in the QP cost
 KP_POSTURE = 0.1               # Stiffness of the posture-hold "virtual spring"
@@ -48,7 +49,19 @@ P_GAIN_LIMITS = 2.5            # Joint-limit CBF gamma (braking aggressiveness) 
 JOINT_LIMIT_BUFFER_BASE = 0.15  # Base joint-limit braking buffer [expanded from 0.1]
 JOINT_LIMIT_K_V = 0.1          # Joint-limit velocity horizon (seconds to look ahead)
 LOCK_THRESHOLD = 0.001         # Below this input energy, the posture lock engages
-W_CENTER = 0.01                # Posture centering weight in the QP cost
+W_CENTER = 0.03                # Posture/limit-avoidance weight in the QP cost [0.01 -> 0.03
+                               #   for more nullspace authority to reconfigure away from limits]
+
+# --- Joint-limit avoidance secondary task (augmented posture, Chan & Dubey style) ---
+# A velocity added to the posture target that pushes each active joint AWAY from
+# its nearer limit, growing quadratically once past LIMIT_AVOID_THRESH of its
+# range and ZERO in the comfortable mid-range. It exploits the 7-DOF redundancy
+# to reconfigure so the EE can reach poses that the hard limit-CBF would
+# otherwise block. Lives entirely in the COST — the hard limit constraints and
+# the CLF/CBF math are untouched.
+JOINT_LIMIT_AVOID = True
+KP_LIMIT_AVOID = 2.0           # rad/s avoidance velocity at the limit
+LIMIT_AVOID_THRESH = 0.5       # start avoiding past 50% of the half-range toward a limit
 
 # =============================================================================
 # 3. DYNAMIC SCALING BOUNDARIES
@@ -56,7 +69,10 @@ W_CENTER = 0.01                # Posture centering weight in the QP cost
 # --- Decoupled dynamic slack weighting ---
 BASE_WEIGHT_SLACK = 15.0        # Standard slack weight (active against an obstacle)
 MAX_WEIGHT_SLACK = 50.0        # Maximum slack weight (in free space)
-BETA = 1.0                     # How fast slack weights return to baseline as lambda grows
+BETA = 0.4                     # How fast slack weights return to baseline as lambda grows
+                               #   [1.0 -> 0.4: gentler curve, less abrupt swing near lambda~1]
+SLACK_FILTER_TAU = 0.15        # LPF time constant on the shadow prices feeding the slack
+                               #   scheduler (smooths the noisy raw lambda -> no weight jumps)
 # --- Dynamic gamma (CLF) scheduling ---
 GAMMA_CLF_DEFAULT = 1.5        # Static / initial CLF convergence rate (Vdot <= -gamma*V)
 GAMMA_MIN = 0.5                # Lower bound of the scheduled CLF gamma

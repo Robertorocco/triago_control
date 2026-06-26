@@ -53,6 +53,12 @@ class QPFormulator:
         self.last_lambda_joints_right = 0.0
         self.last_lambda_joints_left = 0.0
 
+        # Low-pass-filtered shadow prices used by the slack scheduler (the raw
+        # multipliers are noisy tick-to-tick and made the slack weight jump).
+        self._lam_col_f = 0.0
+        self._lam_jr_f = 0.0
+        self._lam_jl_f = 0.0
+
         # CLF convergence rate (updated by the dynamic scheduler)
         self.gamma_clf = cfg.GAMMA_CLF_DEFAULT
 
@@ -83,13 +89,20 @@ class QPFormulator:
 
     def _schedule_weights(self, dt):
         # Update per-arm slack weights and the shared CLF gamma from last loop's shadow prices.
-        # Decoupled dynamic slack weighting (per arm)
+        # Smooth the (noisy) shadow prices with a first-order LPF before they drive
+        # the slack weights — this is what removes the abrupt weight jumps.
+        filter_alpha = np.exp(-dt / cfg.SLACK_FILTER_TAU)
+        self._lam_col_f = filter_alpha * self._lam_col_f + (1.0 - filter_alpha) * self.last_lambda_col
+        self._lam_jr_f = filter_alpha * self._lam_jr_f + (1.0 - filter_alpha) * self.last_lambda_joints_right
+        self._lam_jl_f = filter_alpha * self._lam_jl_f + (1.0 - filter_alpha) * self.last_lambda_joints_left
+
+        # Decoupled dynamic slack weighting (per arm), driven by the SMOOTHED prices
         if cfg.DYNAMIC_SLACK_WEIGHT:
-            max_shadow_r = max(self.last_lambda_col, self.last_lambda_joints_right)
+            max_shadow_r = max(self._lam_col_f, self._lam_jr_f)
             alpha_r = np.exp(-cfg.BETA * (max_shadow_r ** 2))
             weight_slack_r = cfg.BASE_WEIGHT_SLACK + alpha_r * (cfg.MAX_WEIGHT_SLACK - cfg.BASE_WEIGHT_SLACK)
 
-            max_shadow_l = max(self.last_lambda_col, self.last_lambda_joints_left)
+            max_shadow_l = max(self._lam_col_f, self._lam_jl_f)
             alpha_l = np.exp(-cfg.BETA * (max_shadow_l ** 2))
             weight_slack_l = cfg.BASE_WEIGHT_SLACK + alpha_l * (cfg.MAX_WEIGHT_SLACK - cfg.BASE_WEIGHT_SLACK)
         else:
@@ -98,10 +111,10 @@ class QPFormulator:
 
         # Dynamic gamma (CLF) scheduling with a time-explicit low-pass filter
         if cfg.DYNAMIC_GAMMA_CLF:
-            alpha_gamma = np.exp(-cfg.BETA_GAMMA * self.last_lambda_col)
+            alpha_gamma = np.exp(-cfg.BETA_GAMMA * self._lam_col_f)
             target_gamma = cfg.GAMMA_MIN + alpha_gamma * (cfg.GAMMA_MAX - cfg.GAMMA_MIN)
-            filter_alpha = np.exp(-dt / cfg.GAMMA_FILTER_TAU)
-            self.gamma_clf = (filter_alpha * self.gamma_clf) + ((1.0 - filter_alpha) * target_gamma)
+            filter_alpha_g = np.exp(-dt / cfg.GAMMA_FILTER_TAU)
+            self.gamma_clf = (filter_alpha_g * self.gamma_clf) + ((1.0 - filter_alpha_g) * target_gamma)
         else:
             self.gamma_clf = cfg.GAMMA_CLF_DEFAULT
 
@@ -136,6 +149,37 @@ class QPFormulator:
             mask_center[kin.idx_left] = 1.0
         error_center = pin.difference(self.model, kin.q_neutral, kin.current_q)
         v_ref_center = -cfg.KP_POSTURE * error_center
+
+        # --- Joint-limit avoidance secondary task (augmented posture) ---
+        # Add a velocity that pushes each ACTIVE joint away from its nearer limit,
+        # growing quadratically once past LIMIT_AVOID_THRESH of its half-range and
+        # zero in the comfortable mid-range (Chan & Dubey 1995 spirit). This uses
+        # the 7-DOF redundancy to reconfigure away from limits so the EE can reach
+        # poses the hard limit-CBF would otherwise block. COST-only: the hard
+        # constraints and the CLF/CBF math are untouched.
+        if cfg.JOINT_LIMIT_AVOID:
+            active_v = set(kin.idx_right + kin.idx_left)
+            for joint in self.model.joints:
+                if joint.id == 0 or joint.nq != 1:
+                    continue
+                idx_v = joint.idx_v
+                if idx_v not in active_v:
+                    continue
+                idx_q = joint.idx_q
+                q_u = self.model.upperPositionLimit[idx_q]
+                q_l = self.model.lowerPositionLimit[idx_q]
+                if not (q_u < 1e10 and q_l > -1e10):
+                    continue
+                rng = q_u - q_l
+                if rng < 1e-6:
+                    continue
+                mid = 0.5 * (q_u + q_l)
+                p = 2.0 * (kin.current_q[idx_q] - mid) / rng   # normalized pos in [-1, 1]
+                ap = abs(p)
+                if ap > cfg.LIMIT_AVOID_THRESH:
+                    s = (ap - cfg.LIMIT_AVOID_THRESH) / (1.0 - cfg.LIMIT_AVOID_THRESH)
+                    v_ref_center[idx_v] += -cfg.KP_LIMIT_AVOID * np.sign(p) * (s * s)
+
         H_center = np.diag(mask_center * cfg.W_CENTER)
         g_center = -(mask_center * cfg.W_CENTER) * v_ref_center
 
