@@ -66,6 +66,10 @@ V_MAX_POSTURE = 1.0            # rad/s hard clamp on the posture reference (solv
 W_CENTER = 1.0                 # posture-task weight in the QP cost (vs DAMP=10): ~0 authority
                                #   in mid-range (v_ref ~ 0), meaningful near limits, never
                                #   overrides the CLF (which is a hard slack-penalised constraint)
+POSTURE_GRASP_SCALE = 0.05     # posture weight is scaled to this (×W_CENTER) during autonomous
+                               #   precision phases (grasp/align/approach/close/lift) so the QP
+                               #   spends the redundancy on precise tracking, not posture
+POSTURE_SCALE_TAU = 0.2        # s — first-order ramp time-constant for the posture-scale switch
 
 # =============================================================================
 # 3. DYNAMIC SCALING BOUNDARIES

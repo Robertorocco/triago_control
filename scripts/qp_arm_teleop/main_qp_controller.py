@@ -24,7 +24,7 @@ Responsibilities:
 import rclpy
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Float64MultiArray, Float64, String
+from std_msgs.msg import Float64MultiArray, Float64, String, Bool
 from controller_manager_msgs.srv import SwitchController, ListControllers
 from rcl_interfaces.srv import GetParameters
 from tf2_ros import Buffer, TransformListener
@@ -145,6 +145,11 @@ class SafetyQPController(Node):
         self.create_subscription(JointState, '/joint_states', self.joint_callback, 10)
         self.create_subscription(Float64MultiArray, '/arm_right/cartesian_reference', self.ref_cb_right, 10)
         self.create_subscription(Float64MultiArray, '/arm_left/cartesian_reference', self.ref_cb_left, 10)
+        # Grasp-phase flag from shared autonomy: drops the posture-task weight
+        # during autonomous precision phases (grasp/lift) for tighter tracking.
+        self.grasp_active = False
+        self._posture_scale = 1.0
+        self.create_subscription(Bool, '/shared_autonomy/grasp_active', self.grasp_active_cb, 10)
 
         # Services for controller switching
         self.switch_srv = self.create_client(SwitchController, '/controller_manager/switch_controller')
@@ -311,6 +316,10 @@ class SafetyQPController(Node):
         else:
             self.kin.update_from_joint_state(q_physical, time_stamp)
 
+    def grasp_active_cb(self, msg):
+        """Tracks whether shared autonomy is autonomously driving a grasp/lift."""
+        self.grasp_active = bool(msg.data)
+
     def ref_cb_right(self, msg):
         # Right-arm cartesian reference (12+ float protocol, 6-float fallback).
         if len(msg.data) >= 12:
@@ -431,6 +440,12 @@ class SafetyQPController(Node):
 
         # --- 3. Build + solve the CLF-CBF-QP ---
         dt = 1.0 / self._control_freq
+        # Smoothly ramp the posture-task weight scale: drop toward POSTURE_GRASP_SCALE
+        # during autonomous precision phases (grasp/lift), restore to 1.0 otherwise.
+        target_scale = cfg.POSTURE_GRASP_SCALE if self.grasp_active else 1.0
+        a_ps = dt / (cfg.POSTURE_SCALE_TAU + dt)
+        self._posture_scale += a_ps * (target_scale - self._posture_scale)
+        self.qp.posture_scale = self._posture_scale
         q_dot_safe, slack_r, slack_l, b_col, lambda_joints_total = self.qp.build_and_solve(
             self.kin, J_soft, h_soft, d_safe_dynamic,
             self.right_imposed_motion, self.left_imposed_motion,

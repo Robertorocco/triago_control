@@ -56,6 +56,11 @@ class QPFormulator:
         # Lazy cache for the posture-field joint indexing (built on first solve).
         self._posture_cache = None
 
+        # Live scale on the posture-task weight (1.0 = nominal). Dropped toward
+        # POSTURE_GRASP_SCALE during autonomous precision phases (grasp/lift) so
+        # the QP devotes the redundancy to precise tracking instead of posture.
+        self.posture_scale = 1.0
+
         # Soft-task cost decomposition at the last solution (telemetry):
         # [E_damp, E_posture, E_slack] weighted squared energies. See build_and_solve.
         self.task_energies = np.zeros(3)
@@ -211,8 +216,11 @@ class QPFormulator:
             mask_center[v_idx] = 1.0
             v_ref_center[v_idx] = v
 
-        H_center = np.diag(mask_center * cfg.W_CENTER)
-        g_center = -(mask_center * cfg.W_CENTER) * v_ref_center
+        # Effective posture weight (scaled down during autonomous precision phases
+        # via self.posture_scale, set by the controller from the grasp state).
+        w_center = cfg.W_CENTER * self.posture_scale
+        H_center = np.diag(mask_center * w_center)
+        g_center = -(mask_center * w_center) * v_ref_center
 
         # Top-left (joint) block
         self.H[:self.n_joints, :self.n_joints] = H_brake + H_center
@@ -366,7 +374,7 @@ class QPFormulator:
         # authority is the KKT dual (shadow prices) already published separately.
         dq_post = (q_dot_safe - v_ref_center) * mask_center
         e_damp = cfg.DAMP * float(q_dot_safe @ q_dot_safe)
-        e_posture = cfg.W_CENTER * float(dq_post @ dq_post)
+        e_posture = w_center * float(dq_post @ dq_post)
         e_slack = float(weight_slack_r * slack_r ** 2 + weight_slack_l * slack_l ** 2)
         self.task_energies = np.array([e_damp, e_posture, e_slack])
 

@@ -516,6 +516,10 @@ Decision vector: `x = [q_dot (nv), delta_right, delta_left]`
   `H(p)=1/(1-p)²+1/(1+p)²` on the normalized position `p=(q-mid)/half_range`; clamped to
   ±`V_MAX_POSTURE`, denominators guarded inside (-1,1). ~0 in mid-range (CLF keeps tracking
   priority), explodes near a limit (cost-only, never overrides constraints). Weighted by `W_CENTER`.
+  During autonomous precision phases (`grasp_active`: align/approach/close/lift/abort/release-lift)
+  the posture weight is smoothly scaled down to `POSTURE_GRASP_SCALE`×`W_CENTER` (default 0.05×) so
+  the QP spends the redundancy on precise tracking instead of posture. `main_qp_controller`
+  subscribes to `/shared_autonomy/grasp_active` and ramps `qp.posture_scale` (τ=`POSTURE_SCALE_TAU`).
 - Slack penalty (adaptive per-arm weighting)
 - Telemetry: the QP publishes its soft-task cost decomposition `[E_damp, E_posture, E_slack]`
   on `/qp_debug/task_authority`; the plotter's "Task Authority" window shows each one's
