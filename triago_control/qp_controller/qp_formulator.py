@@ -53,6 +53,13 @@ class QPFormulator:
         self.last_lambda_joints_right = 0.0
         self.last_lambda_joints_left = 0.0
 
+        # Lazy cache for the posture-field joint indexing (built on first solve).
+        self._posture_cache = None
+
+        # Soft-task cost decomposition at the last solution (telemetry):
+        # [E_damp, E_posture, E_slack] weighted squared energies. See build_and_solve.
+        self.task_energies = np.zeros(3)
+
         # Low-pass-filtered shadow prices used by the slack scheduler (the raw
         # multipliers are noisy tick-to-tick and made the slack weight jump).
         self._lam_col_f = 0.0
@@ -86,6 +93,38 @@ class QPFormulator:
         except Exception as e:
             print(f"\033[91m[QP Error] No solution: {e}\033[0m")
             return None, None
+
+    def _posture_indices(self, kin):
+        """Lazily build & cache the per-joint arrays for the posture field.
+
+        Returns (v_idx, q_idx, mids, half_ranges) over the ACTIVE arm joints that
+        are single-DOF and have finite limits. Cached after the first call since
+        the model topology and active arm-joint set are static.
+        """
+        if self._posture_cache is not None:
+            return self._posture_cache
+        v_idx, q_idx, mids, half_ranges = [], [], [], []
+        active_v = set(kin.idx_right + kin.idx_left)
+        for joint in self.model.joints:
+            if joint.id == 0 or joint.nq != 1:
+                continue
+            if joint.idx_v not in active_v:
+                continue
+            q_u = self.model.upperPositionLimit[joint.idx_q]
+            q_l = self.model.lowerPositionLimit[joint.idx_q]
+            if not (q_u < 1e10 and q_l > -1e10):
+                continue
+            rng = q_u - q_l
+            if rng < 1e-6:
+                continue
+            v_idx.append(joint.idx_v)
+            q_idx.append(joint.idx_q)
+            mids.append(0.5 * (q_u + q_l))
+            half_ranges.append(0.5 * rng)
+        self._posture_cache = (
+            np.array(v_idx, dtype=int), np.array(q_idx, dtype=int),
+            np.array(mids, dtype=float), np.array(half_ranges, dtype=float))
+        return self._posture_cache
 
     def _schedule_weights(self, dt):
         # Update per-arm slack weights and the shared CLF gamma from last loop's shadow prices.
@@ -141,44 +180,36 @@ class QPFormulator:
         # =========================================================
         H_brake = np.eye(self.n_joints) * cfg.DAMP
 
-        # Posture centering term: a soft virtual spring toward q_neutral on the arm joints
+        # Posture / joint-limit avoidance: repulsive POTENTIAL-FIELD reference.
+        # ------------------------------------------------------------------
+        # Replaces the old q_neutral spring + Chan&Dubey piecewise ramp. The
+        # reference velocity is the negative gradient of a barrier potential that
+        # diverges at each joint limit, evaluated on the NORMALIZED position
+        # p = (q - mid)/half_range in [-1, 1] (range-independent, so every joint
+        # is defended equally at the same fraction of its travel):
+        #     H(p)       = 1/(1-p)^2 + 1/(1+p)^2
+        #     dH/dp      = 2/(1-p)^3 - 2/(1+p)^3
+        #     v_ref      = -K_GRADIENT * dH/dp        (clamped to +/- V_MAX_POSTURE)
+        # Near-zero in the comfortable mid-range (CLF keeps tracking priority) and
+        # explodes (clamped) only near a limit, reconfiguring the redundant DOF.
+        # COST-only: the hard CLF/CBF/limit constraints are untouched.
         mask_center = np.zeros(self.n_joints)
-        if kin.idx_right:
-            mask_center[kin.idx_right] = 1.0
-        if kin.idx_left:
-            mask_center[kin.idx_left] = 1.0
-        error_center = pin.difference(self.model, kin.q_neutral, kin.current_q)
-        v_ref_center = -cfg.KP_POSTURE * error_center
-
-        # --- Joint-limit avoidance secondary task (augmented posture) ---
-        # Add a velocity that pushes each ACTIVE joint away from its nearer limit,
-        # growing quadratically once past LIMIT_AVOID_THRESH of its half-range and
-        # zero in the comfortable mid-range (Chan & Dubey 1995 spirit). This uses
-        # the 7-DOF redundancy to reconfigure away from limits so the EE can reach
-        # poses the hard limit-CBF would otherwise block. COST-only: the hard
-        # constraints and the CLF/CBF math are untouched.
-        if cfg.JOINT_LIMIT_AVOID:
-            active_v = set(kin.idx_right + kin.idx_left)
-            for joint in self.model.joints:
-                if joint.id == 0 or joint.nq != 1:
-                    continue
-                idx_v = joint.idx_v
-                if idx_v not in active_v:
-                    continue
-                idx_q = joint.idx_q
-                q_u = self.model.upperPositionLimit[idx_q]
-                q_l = self.model.lowerPositionLimit[idx_q]
-                if not (q_u < 1e10 and q_l > -1e10):
-                    continue
-                rng = q_u - q_l
-                if rng < 1e-6:
-                    continue
-                mid = 0.5 * (q_u + q_l)
-                p = 2.0 * (kin.current_q[idx_q] - mid) / rng   # normalized pos in [-1, 1]
-                ap = abs(p)
-                if ap > cfg.LIMIT_AVOID_THRESH:
-                    s = (ap - cfg.LIMIT_AVOID_THRESH) / (1.0 - cfg.LIMIT_AVOID_THRESH)
-                    v_ref_center[idx_v] += -cfg.KP_LIMIT_AVOID * np.sign(p) * (s * s)
+        v_ref_center = np.zeros(self.n_joints)
+        v_idx, q_idx, mids, half_ranges = self._posture_indices(kin)
+        if v_idx.size > 0:
+            # Normalized position, GUARDED strictly inside (-1, 1). This guard is
+            # essential: at/over a limit the raw cube would flip sign and PUSH the
+            # joint further out (runaway). Clamping p keeps the gradient finite and
+            # correctly-signed; the output clamp below bounds the magnitude.
+            EPS = 1e-3
+            p = (kin.current_q[q_idx] - mids) / half_ranges
+            p = np.clip(p, -1.0 + EPS, 1.0 - EPS)
+            gap_hi = 1.0 - p     # > 0 by the clamp
+            gap_lo = 1.0 + p     # > 0 by the clamp
+            grad = 2.0 / gap_hi**3 - 2.0 / gap_lo**3      # dH/dp
+            v = np.clip(-cfg.K_GRADIENT * grad, -cfg.V_MAX_POSTURE, cfg.V_MAX_POSTURE)
+            mask_center[v_idx] = 1.0
+            v_ref_center[v_idx] = v
 
         H_center = np.diag(mask_center * cfg.W_CENTER)
         g_center = -(mask_center * cfg.W_CENTER) * v_ref_center
@@ -301,6 +332,7 @@ class QPFormulator:
         if sol is None:
             # Infeasible: halt motion and reset the collision shadow-price memory
             self.last_lambda_col = 0.0
+            self.task_energies = np.zeros(3)
             return np.zeros(self.n_joints), 0.0, 0.0, b_col, np.zeros(self.n_joints)
 
         q_dot_safe = sol[:self.n_joints]
@@ -323,5 +355,19 @@ class QPFormulator:
             self.last_lambda_joints_left = float(np.max(lambda_joints_total[kin.idx_left]))
         else:
             self.last_lambda_joints_left = 0.0
+
+        # Soft-task cost decomposition (telemetry / authority plot). Weighted
+        # squared energies actually realised at the QP solution:
+        #   E_damp    = DAMP * ||q_dot||^2                  (regularisation effort)
+        #   E_posture = W_CENTER * ||q_dot_arm - v_ref||^2  (posture/limit task)
+        #   E_slack   = w_r*delta_r^2 + w_l*delta_l^2        (CLF task relaxation)
+        # Their normalised shares (computed in the plotter) show where the QP's
+        # objective effort/conflict concentrates each tick. The HARD-constraint
+        # authority is the KKT dual (shadow prices) already published separately.
+        dq_post = (q_dot_safe - v_ref_center) * mask_center
+        e_damp = cfg.DAMP * float(q_dot_safe @ q_dot_safe)
+        e_posture = cfg.W_CENTER * float(dq_post @ dq_post)
+        e_slack = float(weight_slack_r * slack_r ** 2 + weight_slack_l * slack_l ** 2)
+        self.task_energies = np.array([e_damp, e_posture, e_slack])
 
         return q_dot_safe, slack_r, slack_l, b_col, lambda_joints_total

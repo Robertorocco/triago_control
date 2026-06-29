@@ -511,8 +511,15 @@ Decision vector: `x = [q_dot (nv), delta_right, delta_left]`
 
 **Cost** (minimize):
 - Joint velocity regularization (damping λ = 10.0)
-- Posture centering spring toward neutral (Kp = 0.1)
+- Posture / joint-limit avoidance: **repulsive potential-field** reference (replaced the
+  old q_neutral spring + Chan&Dubey ramp). `v_ref = -K_GRADIENT·dH/dp` where
+  `H(p)=1/(1-p)²+1/(1+p)²` on the normalized position `p=(q-mid)/half_range`; clamped to
+  ±`V_MAX_POSTURE`, denominators guarded inside (-1,1). ~0 in mid-range (CLF keeps tracking
+  priority), explodes near a limit (cost-only, never overrides constraints). Weighted by `W_CENTER`.
 - Slack penalty (adaptive per-arm weighting)
+- Telemetry: the QP publishes its soft-task cost decomposition `[E_damp, E_posture, E_slack]`
+  on `/qp_debug/task_authority`; the plotter's "Task Authority" window shows each one's
+  normalized share (hard-constraint authority = the λ_CBF / λ_Joints shadow prices).
 
 **Constraints** (C'x >= b):
 - **CLF (task tracking)**: Perfect Scalar Inequality CLF with diagonal task weights [pos=10, ori=1]. Two formulations available (`COMPARISON_CLF` flag): normalized (unit-error) or raw.

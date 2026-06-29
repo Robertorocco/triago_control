@@ -138,6 +138,7 @@ class SafetyQPController(Node):
         self.pub_dynamic_weights = self.create_publisher(Float64MultiArray, '/qp_debug/dynamic_weights', 10)
         self.pub_d_safe_dynamic = self.create_publisher(Float64, '/qp_debug/d_safe_dynamic', 10)
         self.pub_qdot_cmd = self.create_publisher(Float64MultiArray, '/qp_debug/qdot_cmd', 10)
+        self.pub_task_authority = self.create_publisher(Float64MultiArray, '/qp_debug/task_authority', 10)
         self.pub_shared_col = self.create_publisher(Float64MultiArray, '/collision_constraints', 10)
 
         # --- SUBSCRIBERS ---
@@ -529,6 +530,11 @@ class SafetyQPController(Node):
         self.pub_min_dist.publish(Float64(data=abs_min_distance))
         self.pub_dynamic_weights.publish(Float64MultiArray(data=[float(self.qp.weight_slack), float(self.qp.gamma_clf)]))
         self.pub_d_safe_dynamic.publish(Float64(data=float(d_safe_dynamic)))
+        # Soft-task cost decomposition [E_damp, E_posture, E_slack] for the
+        # task-authority panel in the plotter (hard-constraint authority is the
+        # shadow prices published above).
+        self.pub_task_authority.publish(
+            Float64MultiArray(data=[float(e) for e in self.qp.task_energies]))
 
         # Top-3 actually-enabled collision pairs (for the debug plot)
         top = getattr(self.col, 'top_active_pairs', [])

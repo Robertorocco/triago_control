@@ -78,6 +78,12 @@ class TriagoDashboard(Node):
         self.lambda_joints_buffer = deque(maxlen=self.history_len)
         self.lambda_joints_time = deque(maxlen=self.history_len)
 
+        # --- NEW: Task-authority buffers (soft-task QP cost decomposition) ---
+        # Each entry is [E_damp, E_posture, E_slack] — the weighted squared
+        # energies the QP actually spent on each soft objective at the solution.
+        self.task_auth_buffer = deque(maxlen=self.history_len)
+        self.task_auth_time = deque(maxlen=self.history_len)
+
         # Commanded joint velocity buffers from QP solver
         self.qdot_cmd_time = deque(maxlen=self.history_len)
         self.qdot_cmd_r_buffer = deque(maxlen=self.history_len)
@@ -158,6 +164,8 @@ class TriagoDashboard(Node):
         # --- NEW: Lagrangian Subscribers ---
         self.create_subscription(Float64, '/qp_debug/lambda_cbf', self.lambda_cbf_callback, qos_profile)
         self.create_subscription(Float64MultiArray, '/qp_debug/lambda_joints', self.lambda_joints_callback, qos_profile)
+        # --- NEW: Task-authority (soft-task cost decomposition) ---
+        self.create_subscription(Float64MultiArray, '/qp_debug/task_authority', self.task_authority_callback, qos_profile)
 
         self.sub_qdot_cmd = self.create_subscription(
             Float64MultiArray,
@@ -329,6 +337,12 @@ class TriagoDashboard(Node):
         t = self.get_time()
         self.lambda_joints_time.append(t)
         self.lambda_joints_buffer.append(list(msg.data))
+
+    def task_authority_callback(self, msg):
+        """[E_damp, E_posture, E_slack] soft-task cost energies from the QP."""
+        if len(msg.data) >= 3:
+            self.task_auth_time.append(self.get_time())
+            self.task_auth_buffer.append(list(msg.data[:3]))
 
     def listener_callback(self, msg):
         t = self.get_time()
@@ -620,6 +634,25 @@ def update_plot(frame, node, lines_map, axs1, axs2, axs3, ax_pairs, dyn_plots, f
         ax_pairs.autoscale_view(scalex=False, scaley=True)
         figs[3].canvas.draw_idle()
 
+    # --- PART 7: Task authority (soft-task cost shares, figs[4]) ---
+    if node.task_auth_time:
+        t_a = list(node.task_auth_time)
+        data_a = list(node.task_auth_buffer)
+        m = min(len(t_a), len(data_a))
+        if m > 0:
+            arr = np.array(data_a[:m], dtype=float)         # (m, 3)
+            total = arr.sum(axis=1, keepdims=True)
+            total[total < 1e-12] = 1.0                       # avoid /0 when fully idle
+            shares = arr / total                             # normalised to [0,1]
+            t_view = t_a[:m]
+            lines_map['auth_damp'].set_data(t_view, shares[:, 0])
+            lines_map['auth_post'].set_data(t_view, shares[:, 1])
+            lines_map['auth_slack'].set_data(t_view, shares[:, 2])
+            max_t = t_view[-1]
+            for ax in [lines_map['auth_damp'].axes]:
+                ax.set_xlim(max(0, max_t - window), max_t + 0.1)
+            figs[4].canvas.draw_idle()
+
     return artists
 
 
@@ -874,14 +907,44 @@ def main(args=None):
     lines_map['pair_colors'] = pair_colors
 
     # ===================================================================
+    # WINDOW 5: "Task Authority" — soft-task QP cost decomposition
+    # ===================================================================
+    # The QP minimises a sum of weighted squared objectives. At the optimum the
+    # soft part decomposes into three energies (published on /qp_debug/task_authority):
+    #   E_damp    = DAMP * ||q_dot||^2                  (joint regularisation effort)
+    #   E_posture = W_CENTER * ||q_dot_arm - v_ref||^2  (posture / limit-avoidance)
+    #   E_slack   = w_r*delta_r^2 + w_l*delta_l^2        (CLF task relaxation)
+    # We plot each one's SHARE  E_i / sum_j E_j  in [0,1]: a normalised, unitless
+    # measure of where the solver's objective effort/conflict concentrates each
+    # tick. A high slack share => the CLF task is being sacrificed (e.g. near an
+    # obstacle/limit); a high posture share => the redundant DOF is busy fleeing a
+    # limit. (The HARD-constraint authority is the KKT dual / shadow prices in the
+    # "QP Data" window: lambda_CBF and lambda_Joints.)
+    fig5, ax_auth = plt.subplots(1, 1, figsize=(7, 4))
+    fig5.canvas.manager.set_window_title('Task Authority (soft-task cost shares)')
+    fig5.suptitle('Soft-task QP cost shares (objective decomposition)')
+    l_auth_damp, = ax_auth.plot([], [], color='#888888', linewidth=1.6, label='Damping')
+    l_auth_post, = ax_auth.plot([], [], color='#2a9d8f', linewidth=1.8, label='Posture / limit')
+    l_auth_slack, = ax_auth.plot([], [], color='#e63946', linewidth=1.8, label='Slack (CLF give)')
+    ax_auth.set_ylim(-0.02, 1.02)
+    ax_auth.set_ylabel('Authority share [-]')
+    ax_auth.set_xlabel('Time [s]')
+    ax_auth.grid(True, alpha=0.3)
+    ax_auth.legend(loc='upper left', fontsize='x-small', ncol=3)
+    lines_map['auth_damp'] = l_auth_damp
+    lines_map['auth_post'] = l_auth_post
+    lines_map['auth_slack'] = l_auth_slack
+
+    # ===================================================================
     # WINDOW PLACEMENT (from wmctrl, slightly aligned)
     # ===================================================================
-    figs = [fig1, fig2, fig3, fig4]
+    figs = [fig1, fig2, fig3, fig4, fig5]
 
     place_window(fig1, 86, 126, 851, 1131)    # Left: Joint Data
     place_window(fig2, 893, 118, 542, 1131)   # Center: QP Data
     place_window(fig3, 1436, 118, 498, 1131)  # Right: Task Error
     place_window(fig4, 300, 300, 700, 380)    # Debug: CBF active pairs (floats on top)
+    place_window(fig5, 350, 350, 700, 380)    # Debug: Task authority (floats on top)
 
     # ===================================================================
     # ANIMATION

@@ -44,24 +44,28 @@ K_V_SAFE = 0.1                 # Predictive velocity horizon [0.1 -> 0.2: brake 
                                #   at high speed so fast unsafe motion cannot penetrate]
 ALPHA_FILTER = 0.5            # EMA coefficient for hardware velocity filtering (~20ms window)
 DAMP = 10.0                    # Joint velocity regularization (Lambda) in the QP cost
-KP_POSTURE = 0.1               # Stiffness of the posture-hold "virtual spring"
 P_GAIN_LIMITS = 2.5            # Joint-limit CBF gamma (braking aggressiveness) [scaled from 5.0]
 JOINT_LIMIT_BUFFER_BASE = 0.15  # Base joint-limit braking buffer [expanded from 0.1]
 JOINT_LIMIT_K_V = 0.1          # Joint-limit velocity horizon (seconds to look ahead)
 LOCK_THRESHOLD = 0.001         # Below this input energy, the posture lock engages
-W_CENTER = 0.03                # Posture/limit-avoidance weight in the QP cost [0.01 -> 0.03
-                               #   for more nullspace authority to reconfigure away from limits]
 
-# --- Joint-limit avoidance secondary task (augmented posture, Chan & Dubey style) ---
-# A velocity added to the posture target that pushes each active joint AWAY from
-# its nearer limit, growing quadratically once past LIMIT_AVOID_THRESH of its
-# range and ZERO in the comfortable mid-range. It exploits the 7-DOF redundancy
-# to reconfigure so the EE can reach poses that the hard limit-CBF would
-# otherwise block. Lives entirely in the COST — the hard limit constraints and
-# the CLF/CBF math are untouched.
-JOINT_LIMIT_AVOID = True
-KP_LIMIT_AVOID = 2.0           # rad/s avoidance velocity at the limit
-LIMIT_AVOID_THRESH = 0.5       # start avoiding past 50% of the half-range toward a limit
+# --- Posture / joint-limit avoidance: repulsive potential field ---
+# The posture reference velocity is the NEGATIVE GRADIENT of a barrier potential
+# that diverges at each joint's limits. It is evaluated on the NORMALIZED joint
+# position p = 2*(q - mid) / range  in [-1, 1], so EVERY joint is defended equally
+# at the same FRACTION of its travel (range-independent):
+#     H(p)       = 1/(1 - p)^2 + 1/(1 + p)^2
+#     dH/dp      = 2/(1 - p)^3 - 2/(1 + p)^3
+#     q_dot_post = -K_GRADIENT * dH/dp           (clamped to +/- V_MAX_POSTURE)
+# Near-zero in the comfortable mid-range (so the CLF keeps tracking priority) and
+# grows sharply (clamped) only as a joint nears a limit, using the arm redundancy
+# to reconfigure away from it. Replaces the old q_neutral spring (KP_POSTURE) and
+# the Chan & Dubey ramp (KP_LIMIT_AVOID / LIMIT_AVOID_THRESH / JOINT_LIMIT_AVOID).
+K_GRADIENT = 0.05              # gain on the negative potential gradient
+V_MAX_POSTURE = 1.0            # rad/s hard clamp on the posture reference (solver safety)
+W_CENTER = 1.0                 # posture-task weight in the QP cost (vs DAMP=10): ~0 authority
+                               #   in mid-range (v_ref ~ 0), meaningful near limits, never
+                               #   overrides the CLF (which is a hard slack-penalised constraint)
 
 # =============================================================================
 # 3. DYNAMIC SCALING BOUNDARIES
