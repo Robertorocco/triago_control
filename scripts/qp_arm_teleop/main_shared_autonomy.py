@@ -640,7 +640,7 @@ class SharedControlNode(Node):
         # HOLDING is intentionally NOT here: it drives toward goals via the QP and
         # therefore needs fresh collision data, like SHARED_AUTONOMY / PRE_GRASP.
         in_grasp_state = self.grasp_sm.state in (
-            "PRE_GRASP", "GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT", "RELEASE_LIFT")
+            "PRE_GRASP", "GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT", "RELEASE_LIFT", "ABORT_LIFT")
 
         if not in_grasp_state:
             if self.J_c is None or self.h_c is None:
@@ -740,7 +740,7 @@ class SharedControlNode(Node):
             # twist is zeroed, and the belief should stay FROZEN until the grasp
             # ends — otherwise the distribution evolves on meaningless data.
             grasp_exec_now = self.grasp_sm.state in (
-                "GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT", "RELEASE_LIFT")
+                "GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT", "RELEASE_LIFT", "ABORT_LIFT")
             # Falling edge (grasp just finished) -> restart the warm-up so the
             # post-grasp navigation does not instantly lock onto a goal.
             if self._prev_grasp_exec and not grasp_exec_now:
@@ -845,7 +845,7 @@ class SharedControlNode(Node):
         # The Haption input is disconnected: the grasp state machine drives the
         # arm autonomously through approach, close and lift. Teleoperation
         # resumes automatically once HOLDING is reached.
-        if self.grasp_sm.state in ("GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT", "RELEASE_LIFT"):
+        if self.grasp_sm.state in ("GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT", "RELEASE_LIFT", "ABORT_LIFT"):
             self.current_v_h = np.zeros(6)
 
         # --- 4. THE GRASPING STATE MACHINE (delegated) ---
@@ -920,7 +920,7 @@ class SharedControlNode(Node):
         # During autonomous grasp execution (approach/close/lift) the node DRIVES
         # the arm directly (see section 6) and the Haption teleop must yield.
         grasp_exec = self.grasp_sm.state in (
-            "GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT", "RELEASE_LIFT")
+            "GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT", "RELEASE_LIFT", "ABORT_LIFT")
         self.pub_grasp_active.publish(Bool(data=grasp_exec))
 
         # Active goal pose + confidence for the haptic position virtual fixture.
@@ -975,16 +975,9 @@ class SharedControlNode(Node):
                         trajectory_data.append((sim_T_next, sim_twist))
                         sim_T_EE = sim_T_next
 
-                # Diagnostic: detect when the green gripper would collapse onto
-                # the robot (target_twist ≈ 0 → offset < 5mm). This is the reason
-                # it "disappears" — it's drawn but hidden behind the robot mesh.
-                offset = np.linalg.norm(T_cube_1[:3, 3] - self.current_T_EE[:3, 3])
-                if offset < 0.005:
-                    self.get_logger().warn(
-                        f"[VIZ] Green gripper overlaps robot (offset={offset*1000:.1f}mm, "
-                        f"target_twist_norm={np.linalg.norm(target_twist):.4f}). "
-                        f"Cause: pi_max≈0 (stale data or near goal).",
-                        throttle_duration_sec=2.0)
+                # (Diagnostic removed: offset < 5mm warning was spamming the console
+                # without actionable info — the green gripper simply overlaps the
+                # robot mesh when the policy twist is small/rotational-only.)
 
                 # --- SINGLE CONSOLIDATED MARKER PUBLISH ---
                 # All marker types are collected into ONE MarkerArray and published

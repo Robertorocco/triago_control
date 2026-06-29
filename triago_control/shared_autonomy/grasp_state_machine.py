@@ -151,6 +151,8 @@ class GraspStateMachine:
         self.grip_force_stable_since = None
         self._lift_start_time = None  # reset for LIFT phase
         self._release_lift_start = None  # reset for RELEASE_LIFT (post-OPEN) phase
+        self._abort_lift_start = None  # reset for ABORT_LIFT (failed grasp retreat) phase
+        self._abort_lift_color = None  # color of the cylinder being retreated from
         self._align_start = None  # reset for GRASP_ALIGN timeout
         self._holding_entered = False  # latch so the HOLDING banner prints once per grasp
 
@@ -173,6 +175,7 @@ class GraspStateMachine:
             "LIFT": self._lift,
             "HOLDING": self._holding,
             "RELEASE_LIFT": self._release_lift,
+            "ABORT_LIFT": self._abort_lift,
         }
 
     def _transition(self, new_state):
@@ -199,7 +202,7 @@ class GraspStateMachine:
         between PRE_GRASP and SHARED_AUTONOMY is re-evaluated every tick based on
         belief + alignment.
         """
-        if self._state in ("GRASP_CLOSE", "GRASP_APPROACH", "LIFT", "HOLDING", "GRASP_ALIGN", "RELEASE_LIFT"):
+        if self._state in ("GRASP_CLOSE", "GRASP_APPROACH", "LIFT", "HOLDING", "GRASP_ALIGN", "RELEASE_LIFT", "ABORT_LIFT"):
             # GRASP_* and LIFT are pure run-to-completion phases. HOLDING is
             # special: while an object is in the gripper the PRE_GRASP branch is
             # deliberately UNREACHABLE (you cannot commit a second grasp with the
@@ -381,13 +384,16 @@ class GraspStateMachine:
             log_lines.append(
                 ("warn", f"[GRASP] Alignment timeout after {self.ALIGN_TIMEOUT_S:.0f}s — aborting. "
                          f"Reason(s): {'; '.join(reasons)}."))
-            self._transition("SHARED_AUTONOMY")
+            self._abort_lift_start = None
+            self._abort_lift_color = color
+            self._transition("ABORT_LIFT")
             self._align_start = None
             return TickOutput(
                 target_twist=np.zeros(6),
                 new_state=self._state,
-                ignore_cbf="None",
-                grasp_margin=CLEAR_MARGIN,   # restore full CBF safety on abort
+                ignore_cbf=f"+{cbf_name}",  # keep bypass active during retreat
+                grasp_margin=CLEAR_MARGIN,
+                gripper_cmd=f"OPEN_{inp.active_arm.upper()}",
                 reset_trigger=True,
                 log_lines=log_lines,
             )
@@ -458,13 +464,16 @@ class GraspStateMachine:
             log_lines.append(
                 ("warn", f"[GRASP] Approach timeout — contact_d={contact_d:.4f}m "
                          f"(never reached {self.GRASP_CONTACT_DEPTH}m). Aborting grasp."))
-            self._transition("SHARED_AUTONOMY")
+            self._abort_lift_start = None
+            self._abort_lift_color = color
+            self._transition("ABORT_LIFT")
             return TickOutput(
-                target_twist=target_twist,
+                target_twist=np.zeros(6),
                 new_state=self._state,
-                ignore_cbf="None",
-                grasp_margin=None,    # original does not touch the margin topic on timeout abort
-                reset_trigger=True,   # mirrors the original's self.trigger_cmd = False
+                ignore_cbf=f"+{self.cylinders[color]['cbf_name']}",  # keep bypass active during retreat
+                grasp_margin=None,
+                gripper_cmd=f"OPEN_{inp.active_arm.upper()}",
+                reset_trigger=True,
                 log_lines=log_lines,
             )
 
@@ -673,5 +682,53 @@ class GraspStateMachine:
             new_state=self._state,
             ignore_cbf=None,
             grasp_margin=None,
+            log_lines=log_lines,
+        )
+
+    # ------------------------------------------------------------------
+    # PHASE 7: ABORT_LIFT (failed grasp retreat — lift clear before restoring CBF)
+    # ------------------------------------------------------------------
+    def _abort_lift(self, inp: TickInput) -> TickOutput:
+        """Retreat after a failed grasp (approach/align timeout).
+
+        The gripper is still overlapping the cylinder (CBF bypass active). We
+        lift vertically for LIFT_DURATION with the gripper OPEN, moving clear of
+        the object, then restore the CBF (ignore_cbf="None") and return to
+        SHARED_AUTONOMY. The bypass stays active DURING the lift so no barrier
+        spike occurs while overlapping.
+        """
+        self._transition("ABORT_LIFT")
+        log_lines = []
+
+        if self._abort_lift_start is None:
+            self._abort_lift_start = time.time()
+            log_lines.append(
+                ("info", f"[ABORT-LIFT] Moving ~{self.LIFT_HEIGHT * 100:.0f} cm clear of the "
+                         f"cylinder (gripper open) before restoring CBF."))
+
+        elapsed = time.time() - self._abort_lift_start
+        color = self._abort_lift_color or inp.active_goal_key.split('_')[0]
+        cbf_name = self.cylinders[color]['cbf_name'] if color in self.cylinders else ""
+
+        if elapsed < self.LIFT_DURATION:
+            target_twist = np.array([0.0, 0.0, self.LIFT_VELOCITY, 0.0, 0.0, 0.0])
+            return TickOutput(
+                target_twist=target_twist,
+                new_state=self._state,
+                ignore_cbf=f"+{cbf_name}",  # keep bypass active while retreating
+                grasp_margin=None,
+                log_lines=log_lines,
+            )
+
+        # Lift complete → safe to restore CBF and hand control back.
+        self._transition("SHARED_AUTONOMY")
+        self._abort_lift_start = None
+        self._abort_lift_color = None
+        log_lines.append(("info", "[ABORT-LIFT] Clear. CBF restored. Teleoperation resumed."))
+        return TickOutput(
+            target_twist=np.zeros(6),
+            new_state=self._state,
+            ignore_cbf="None",
+            grasp_margin=CLEAR_MARGIN,
             log_lines=log_lines,
         )
