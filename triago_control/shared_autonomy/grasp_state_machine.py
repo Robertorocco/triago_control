@@ -545,10 +545,11 @@ class GraspStateMachine:
     # PHASE 4: LIFT (raise the grasped object a few cm clear of the table)
     # ------------------------------------------------------------------
     # Slow, short vertical lift just to break contact with the table before the
-    # shared-autonomy placement phase takes over. Tuned per request: ~5 cm at a
-    # gentle speed (0.025 m/s * 2.0 s = 0.05 m).
-    LIFT_VELOCITY = 0.025   # m/s upward (slow)
-    LIFT_DURATION = 2.0     # s  -> 0.025 * 2.0 = 0.05 m = 5 cm lift
+    # shared-autonomy placement phase takes over. Raised per request so the lift
+    # is clearly felt on the handle and clears the object further:
+    # 0.03 m/s * 3.0 s = 0.09 m (~9 cm).
+    LIFT_VELOCITY = 0.03    # m/s upward (slow)
+    LIFT_DURATION = 3.0     # s  -> 0.03 * 3.0 = 0.09 m = 9 cm lift
     LIFT_HEIGHT = LIFT_VELOCITY * LIFT_DURATION  # for logging only
 
     def _lift(self, inp: TickInput) -> TickOutput:

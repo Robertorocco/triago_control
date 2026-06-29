@@ -208,8 +208,11 @@ class SharedControlNode(Node):
         # clutch-integration loop is slower and more compliant than direct robot
         # control. The robot-side ee_policies (green gripper, grasp execution)
         # still use the full v_max_lin / w_max_ang above.
-        self.v_max_lin_user = 0.07    # m/s   — comfortable hand tracking speed
-        self.w_max_ang_user = 0.15    # rad/s — comfortable hand rotation rate
+        # NOTE: far from the goal the tanh saturates the policy to EXACTLY this
+        # ceiling (constant cruise speed by design) — so this ceiling IS the
+        # "drag-too-fast-when-far" speed. Lowered to tame it.
+        self.v_max_lin_user = 0.04    # m/s   — comfortable hand tracking speed [was 0.07]
+        self.w_max_ang_user = 0.10    # rad/s — comfortable hand rotation rate  [was 0.15]
 
         # --- Grasping Interaction Topics & State ---
         self.pub_gripper_cmd = self.create_publisher(String, '/shared_autonomy/gripper_cmd', 10)
