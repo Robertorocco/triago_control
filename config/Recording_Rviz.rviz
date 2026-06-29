@@ -6,9 +6,6 @@ Panels:
       Expanded:
         - /Global Options1
         - /Status1
-        - /RobotModel1
-        - /QP_Debug_Markers1
-        - /TF1
         - /TF1/Frames1
         - /Marker1
         - /QP_Debug_Markers2
@@ -20,7 +17,7 @@ Panels:
         - /QP_Debug_Markers3/Namespaces1
         - /Marker4
       Splitter Ratio: 0.4910941421985626
-    Tree Height: 365
+    Tree Height: 1014
   - Class: rviz_common/Views
     Expanded:
       - /Current View1
@@ -794,7 +791,10 @@ Visualization Manager:
       Enabled: true
       Name: QP_Debug_Markers
       Namespaces:
-        {}
+        environment: true
+        qp_debug: true
+        qp_debug_gripper: true
+        task_environment: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -816,6 +816,7 @@ Visualization Manager:
         Value: /gripper_head_camera_rgbd/color/image_raw
       Value: false
       Visibility:
+        "": true
         Grid: true
         Image: true
         Marker: true
@@ -903,7 +904,10 @@ Visualization Manager:
       Enabled: true
       Name: QP_Debug_Markers
       Namespaces:
-        {}
+        goal_poses: true
+        grasp_guidance_pos: true
+        grasp_guidance_rot: true
+        policy_grippers: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -915,7 +919,7 @@ Visualization Manager:
       Enabled: true
       Name: Marker
       Namespaces:
-        {}
+        workspace: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -923,6 +927,18 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Reliable
         Value: /cylinder_obstacle_marker
+      Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: QP_Debug_Markers
+      Namespaces:
+        guidance_policy: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /guidance_policy_marker
       Value: true
   Enabled: true
   Global Options:
@@ -945,7 +961,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 1.9734605550765991
+      Distance: 1.603291630744934
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -1055,7 +1071,7 @@ Window Geometry:
   Hide Right Dock: false
   Image:
     collapsed: false
-  QMainWindow State: 000000ff00000000fd00000002000000000000018b00000415fc0200000003fb000000100044006900730070006c006100790073000000003b0000036f000000c700fffffffb0000000a0056006900650077007300000003b0000000a0000000a000fffffffb0000000c00430061006d00650072006100000003c30000008d0000002800ffffff000000020000050000000106fc0100000001fb0000000a0049006d0061006700650300000ad600000038000001a900000106000005000000052500000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd00000002000000000000018b00000525fc0200000003fb000000100044006900730070006c006100790073000000003b0000047f000000c700fffffffb0000000a0056006900650077007300000004c0000000a0000000a000fffffffb0000000c00430061006d00650072006100000003c30000008d0000002800ffffff000000020000050000000106fc0100000001fb0000000a0049006d0061006700650300000ad600000038000001a900000106000005000000052500000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Views:
     collapsed: true
   Width: 1280
