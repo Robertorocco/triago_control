@@ -253,6 +253,11 @@ class SharedControlNode(Node):
         self.trigger_cmd = False  # consumed event flag
         self._grasp_cue_phase = 0.0  # pulsing animation counter for PRE_GRASP sphere
 
+        # Double-click arm switch state (left button: single=grasp, double=switch arm)
+        self.DOUBLE_CLICK_WINDOW = 0.5  # seconds to detect the second press
+        self._btn_first_press_time = None
+        self._btn_timer = None
+
         # --- Grasp contact confirmation ---
         # Signed gripper<->cylinder collision distance published by teleop.
         # < 0 means the gripper volume actually overlaps the cylinder (true contact).
@@ -351,9 +356,49 @@ class SharedControlNode(Node):
     # --- Callbacks ---
 
     def trigger_callback(self, msg):
-        """Reads the Haption device trigger/button to initiate grasp."""
-        if msg.data:  # Only trigger on the rising edge
-            self.trigger_cmd = True
+        """Double-click detection on the Haption left button.
+
+        Single press (no second press within 0.5 s) → grasp trigger (original).
+        Double press (two presses within 0.5 s)     → arm switch (left ↔ right).
+
+        Implementation: on the first rising edge, record the time. On the second
+        rising edge within DOUBLE_CLICK_WINDOW, switch the arm. A ROS timer fires
+        after the window to commit the single-press action if no second press came.
+        """
+        if not msg.data:
+            return  # only rising edge
+
+        now = time.time()
+        if self._btn_first_press_time is not None and (now - self._btn_first_press_time) < self.DOUBLE_CLICK_WINDOW:
+            # --- DOUBLE PRESS: switch arm ---
+            self._btn_first_press_time = None
+            if self._btn_timer is not None:
+                self._btn_timer.cancel()
+                self._btn_timer = None
+            new_arm = 'left' if self.active_arm == 'right' else 'right'
+            self.active_arm = new_arm
+            self.get_logger().info(
+                f"\033[95m[ARM SWITCH] Double-click detected → active arm: {new_arm.upper()}\033[0m")
+            self.belief_estimator.reset()
+            self._ou_bias = np.zeros(6)
+            self._belief_warmup_start = time.time()
+        else:
+            # --- FIRST PRESS: start the window ---
+            self._btn_first_press_time = now
+            # Fire a one-shot timer to commit the single-press (grasp trigger)
+            # if no second press arrives within the window.
+            if self._btn_timer is not None:
+                self._btn_timer.cancel()
+            self._btn_timer = self.create_timer(
+                self.DOUBLE_CLICK_WINDOW, self._btn_single_press_commit, callback_group=None)
+
+    def _btn_single_press_commit(self):
+        """Called 0.5 s after the first press if no double-click occurred → grasp trigger."""
+        if self._btn_timer is not None:
+            self._btn_timer.cancel()
+            self._btn_timer = None
+        self._btn_first_press_time = None
+        self.trigger_cmd = True
 
     def grasp_contact_callback(self, msg):
         """Stores the signed gripper<->cylinder collision distance [red, blue] (m)."""
