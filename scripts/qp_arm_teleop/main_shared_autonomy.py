@@ -639,9 +639,9 @@ class SharedControlNode(Node):
             # rate then blinked the green policy gripper out of RViz. In teleop
             # SHARED_AUTONOMY this node does not even command the arm, so halting
             # viz is needless. Instead we just WARN here and let the loop continue:
-            # staleness is folded into `valid_matrices` below, so the policy QP is
-            # skipped (policies -> 0, a safe halt that also stops the test-mode
-            # command), but visualization keeps publishing and stays alive.
+            # in teleop mode the policies are pure v_geo (no QP solve needed), and
+            # in test mode staleness skips the policy QP (safe halt), but
+            # visualization keeps publishing and stays alive in both cases.
             if (time.time() - self.last_collision_time) > self.max_data_age:
                 self.get_logger().warn(
                     "Collision data stale — skipping policy solve (viz kept alive).",
@@ -656,13 +656,19 @@ class SharedControlNode(Node):
         user_policies = {}
 
         in_free_space = self.grasp_sm.state in ("SHARED_AUTONOMY", "PRE_GRASP", "HOLDING")
-        # valid_matrices now also requires the collision data to be FRESH: stale
-        # data -> policies solved to zero (safe halt) but visualization continues.
+        # In test mode: the policy QP needs fresh collision data (CBF-constrained).
+        # In teleop mode: policies are unconstrained v_geo (no QP solve), so only
+        # the grasp SM execution phases strictly need collision data (and those
+        # already bypass this block via in_grasp_state). We still gate on
+        # valid_matrices in test mode for safety.
         valid_matrices = (self.J_c is not None and self.h_c is not None
                           and (time.time() - self.last_collision_time) <= self.max_data_age)
+        # In teleop mode, policies are pure v_geo and don't need J_c/h_c, so
+        # we allow policy evaluation even without fresh collision data.
+        can_evaluate = in_free_space and (valid_matrices or not self.POLICY_BELIEF_TEST)
         excluded = self.belief_estimator.get_excluded_goals()
 
-        if in_free_space and valid_matrices:
+        if can_evaluate:
             for key in self.target_keys:
                 # Excluded goals (already-grasped cylinder, or Platform while
                 # empty) are NOT evaluated: their policy is a zero placeholder so
@@ -692,13 +698,36 @@ class SharedControlNode(Node):
                 # EE policy: velocity FROM the real EE toward that goal (commands
                 # the robot in test/grasp mode, feeds pi_max and the green gripper).
                 v_geo_robot = self.compute_v_geo(self.current_T_EE, T_goal)
-                ee_policies[key] = self.solve_local_policy(v_geo_robot, self.J_c, self.h_c)
+
+                if self.POLICY_BELIEF_TEST:
+                    # Test mode: this node IS the reference source and commands the
+                    # robot directly. The CBF constraint is essential to prevent
+                    # the reference from punching through obstacles (the real QP
+                    # controller's CLF would just track it blindly).
+                    ee_policies[key] = self.solve_local_policy(v_geo_robot, self.J_c, self.h_c)
+                else:
+                    # Teleop mode: the policy is a DIRECTION INDICATOR (for the
+                    # green gripper viz, belief, and grasp state machine). Safety
+                    # is guaranteed by the downstream real QP controller (7-DOF
+                    # joint-space redundancy). The Cartesian CBF projection is a
+                    # single half-plane that directly opposes the goal direction
+                    # (the goal IS near/on the obstacle), killing the linear
+                    # velocity entirely. Using v_geo unconstrained gives a clean
+                    # directional signal; the real QP ensures the robot never
+                    # actually hits the obstacle.
+                    ee_policies[key] = v_geo_robot
 
                 if self.PREDICTION or self.POLICY_BELIEF_TEST:
                     # User policy: velocity FROM the reference toward the SAME
                     # goal — this is the policy F_guide renders onto the handle.
                     v_geo_user = self.compute_v_geo(self.current_T_user, T_goal)
-                    user_policies[key] = self.solve_local_policy(v_geo_user, self.J_c, self.h_c)
+                    if self.POLICY_BELIEF_TEST:
+                        user_policies[key] = self.solve_local_policy(v_geo_user, self.J_c, self.h_c)
+                    else:
+                        # Same reasoning: in teleop the user_policy drives F_guide
+                        # on the haptic device; safety is downstream. The CBF
+                        # constraint would zero out the guidance direction.
+                        user_policies[key] = v_geo_user
         else:
             # FALLBACK: grasping, or matrices stale -- don't solve the QP.
             for key in self.target_keys:
@@ -945,13 +974,16 @@ class SharedControlNode(Node):
                 trajectory_data.append((T_cube_1, target_twist))
 
                 sim_T_EE = T_cube_1
-                if in_free_space and valid_matrices:
+                if in_free_space and (valid_matrices or not self.POLICY_BELIEF_TEST):
                     for _ in range(1):
                         visual_dt = visual_dt + 0.3
                         T_sim_goal = self.goal_set.get_dynamic_goal_pose(
                             sim_T_EE, self.active_goal_key, update_memory=False)
                         sim_v_geo = self.compute_v_geo(sim_T_EE, T_sim_goal)
-                        sim_twist = self.solve_local_policy(sim_v_geo, self.J_c, self.h_c)
+                        if self.POLICY_BELIEF_TEST and valid_matrices:
+                            sim_twist = self.solve_local_policy(sim_v_geo, self.J_c, self.h_c)
+                        else:
+                            sim_twist = sim_v_geo
                         sim_T_next = self.integrate_twist(sim_T_EE, sim_twist, visual_dt)
                         trajectory_data.append((sim_T_next, sim_twist))
                         sim_T_EE = sim_T_next
@@ -961,10 +993,12 @@ class SharedControlNode(Node):
                 # it "disappears" — it's drawn but hidden behind the robot mesh.
                 offset = np.linalg.norm(T_cube_1[:3, 3] - self.current_T_EE[:3, 3])
                 if offset < 0.005:
+                    lin_norm = np.linalg.norm(target_twist[:3])
+                    ang_norm = np.linalg.norm(target_twist[3:])
                     self.get_logger().warn(
                         f"[VIZ] Green gripper overlaps robot (offset={offset*1000:.1f}mm, "
-                        f"target_twist_norm={np.linalg.norm(target_twist):.4f}). "
-                        f"Cause: pi_max≈0 (stale data or near goal).",
+                        f"twist_lin={lin_norm:.4f} m/s, twist_ang={ang_norm:.4f} rad/s). "
+                        f"Cause: linear velocity near zero (angular only → no position offset).",
                         throttle_duration_sec=2.0)
 
                 self.publish_visualizations(trajectory_data, self.current_T_EE, active_v_geo)
