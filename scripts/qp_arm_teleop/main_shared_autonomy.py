@@ -203,6 +203,14 @@ class SharedControlNode(Node):
         self.w_max_ang = 0.3
         self.K_p_ang = 0.5
 
+        # Teleoperation-aware limits for user_policies (published to haptic manager).
+        # Lower than the robot-side limits because the operator + haptic device +
+        # clutch-integration loop is slower and more compliant than direct robot
+        # control. The robot-side ee_policies (green gripper, grasp execution)
+        # still use the full v_max_lin / w_max_ang above.
+        self.v_max_lin_user = 0.07    # m/s   — comfortable hand tracking speed
+        self.w_max_ang_user = 0.15    # rad/s — comfortable hand rotation rate
+
         # --- Grasping Interaction Topics & State ---
         self.pub_gripper_cmd = self.create_publisher(String, '/shared_autonomy/gripper_cmd', 10)
 
@@ -703,7 +711,12 @@ class SharedControlNode(Node):
                 if self.PREDICTION or self.POLICY_BELIEF_TEST:
                     # User policy: velocity FROM the reference toward the SAME
                     # goal — this is the policy F_guide renders onto the handle.
-                    v_geo_user = self.compute_v_geo(self.current_T_user, T_goal)
+                    # Uses the lower teleop-aware velocity limits so the guidance
+                    # field doesn't demand speeds the hand can't comfortably track.
+                    v_geo_user = self.compute_v_geo(
+                        self.current_T_user, T_goal,
+                        v_max_lin=self.v_max_lin_user,
+                        w_max_ang=self.w_max_ang_user)
                     user_policies[key] = self.solve_local_policy(v_geo_user, self.J_c, self.h_c)
         else:
             # FALLBACK: grasping, or matrices stale -- don't solve the QP.
@@ -1477,9 +1490,19 @@ class SharedControlNode(Node):
         ma.markers.extend(self._build_clear_grasp_guidance())
         self.pub_markers.publish(ma)
 
-    def compute_v_geo(self, T_EE, T_goal):
+    def compute_v_geo(self, T_EE, T_goal, v_max_lin=None, w_max_ang=None):
         """Computes the LOCAL_WORLD_ALIGNED decoupled spatial velocity error with
-        purely smooth saturation (no deadband)."""
+        purely smooth saturation (no deadband).
+
+        Optional v_max_lin / w_max_ang override the instance defaults, allowing
+        the user-policy path to use lower (teleop-friendly) velocity limits
+        without affecting the robot-policy path.
+        """
+        if v_max_lin is None:
+            v_max_lin = self.v_max_lin
+        if w_max_ang is None:
+            w_max_ang = self.w_max_ang
+
         p_EE = T_EE[:3, 3]
         p_goal = T_goal[:3, 3]
         R_EE = T_EE[:3, :3]
@@ -1490,7 +1513,7 @@ class SharedControlNode(Node):
         dist = np.linalg.norm(error_lin)
 
         if dist > 1e-5:
-            v_mag = self.v_max_lin * np.tanh((self.K_p_lin * dist) / self.v_max_lin)
+            v_mag = v_max_lin * np.tanh((self.K_p_lin * dist) / v_max_lin)
             v_linear = (error_lin / dist) * v_mag
         else:
             v_linear = np.zeros(3)
@@ -1522,7 +1545,7 @@ class SharedControlNode(Node):
         ang_dist = np.linalg.norm(error_ang)
 
         if ang_dist > 1e-5:
-            w_mag = self.w_max_ang * np.tanh((self.K_p_ang * ang_dist) / self.w_max_ang)
+            w_mag = w_max_ang * np.tanh((self.K_p_ang * ang_dist) / w_max_ang)
             v_angular = (error_ang / ang_dist) * w_mag
         else:
             v_angular = np.zeros(3)
