@@ -40,7 +40,7 @@ ORIENTATION_CTRL = True         # True = control Pos+Ori (6DOF), False = Pos onl
 ALPHA_SOFTMIN = 50.0            # Sharpness of the SoftMin collision aggregation
 GAMMA_CBF = 0.75               # CBF class-K gain [scaled down from 1.5 for 300Hz]
 D_SAFE_BASE = 0.015            # Base safety distance for the collision barrier
-K_V_SAFE = 0.2                 # Predictive velocity horizon [0.1 -> 0.2: brake earlier
+K_V_SAFE = 0.1                 # Predictive velocity horizon [0.1 -> 0.2: brake earlier
                                #   at high speed so fast unsafe motion cannot penetrate]
 ALPHA_FILTER = 0.5            # EMA coefficient for hardware velocity filtering (~20ms window)
 DAMP = 10.0                    # Joint velocity regularization (Lambda) in the QP cost

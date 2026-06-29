@@ -967,20 +967,27 @@ class SharedControlNode(Node):
                         f"Cause: pi_max≈0 (stale data or near goal).",
                         throttle_duration_sec=2.0)
 
-                self.publish_visualizations(trajectory_data, self.current_T_EE, active_v_geo)
+                # --- SINGLE CONSOLIDATED MARKER PUBLISH ---
+                # All marker types are collected into ONE MarkerArray and published
+                # in a single call. This halves the message rate on the topic
+                # (was ~100 msg/s with separate publishes) and eliminates RViz
+                # subscriber queue starvation that caused the green gripper to
+                # appear non-updating while goal markers refreshed fine.
+                combined_markers = MarkerArray()
 
-                # Goal poses as belief-opacity gripper markers (replaces the per-goal
-                # TF frames, which could not fade and went stale when excluded). Low /
-                # zero-belief goals fade toward 0.2 opacity, decluttering RViz.
+                # Green policy grippers (predictive trajectory)
+                combined_markers.markers.extend(
+                    self._build_policy_gripper_markers(trajectory_data))
+
+                # Goal poses as belief-opacity gripper markers
                 beliefs = self.belief_estimator.get_beliefs()
-                self.publish_goal_pose_markers(beliefs)
-
-                # Keep a single precise TF frame on the active goal for pose debugging.
-                # (REMOVED: was adding bandwidth; the colored grippers are enough)
+                combined_markers.markers.extend(
+                    self._build_goal_pose_markers(beliefs))
 
                 # PRE_GRASP visual cue: pulsing green sphere + one-shot console msg
                 if self.grasp_sm.state == "PRE_GRASP":
-                    self.publish_grasp_ready_cue(self.current_T_EE)
+                    combined_markers.markers.extend(
+                        self._build_grasp_ready_cue(self.current_T_EE))
                     if not getattr(self, '_pregrasp_cue_logged', False):
                         self._pregrasp_cue_logged = True
                         self.get_logger().info(
@@ -988,18 +995,22 @@ class SharedControlNode(Node):
                 else:
                     if getattr(self, '_pregrasp_cue_logged', False):
                         self._pregrasp_cue_logged = False
-                        self.clear_grasp_ready_cue()
+                        combined_markers.markers.extend(self._build_clear_grasp_ready_cue())
 
                 # Grasp-guidance arrows: how to move/rotate to satisfy the grasp
                 # condition. Only for cylinder grasp goals (not the Platform), and
                 # only while still free (SHARED_AUTONOMY / PRE_GRASP).
                 is_cylinder_goal = self.active_goal_key.split('_')[0] in self.goal_set.cylinders
                 if is_cylinder_goal and self.grasp_sm.state in ("SHARED_AUTONOMY", "PRE_GRASP"):
-                    self.publish_grasp_guidance(self.current_T_EE, T_active_goal, pos_error, ang_error)
+                    combined_markers.markers.extend(
+                        self._build_grasp_guidance(self.current_T_EE, T_active_goal, pos_error, ang_error))
                     self._guidance_shown = True
                 elif getattr(self, '_guidance_shown', False):
                     self._guidance_shown = False
-                    self.clear_grasp_guidance()
+                    combined_markers.markers.extend(self._build_clear_grasp_guidance())
+
+                # ONE publish per tick — all markers in a single message.
+                self.pub_markers.publish(combined_markers)
 
             # Inference state (consumed by the haptic force manager) is lightweight
             # Float64MultiArray traffic — keep it at the full control rate.
@@ -1154,16 +1165,22 @@ class SharedControlNode(Node):
         arrow.color.r, arrow.color.g, arrow.color.b, arrow.color.a = rgba
         return arrow
 
-    def publish_visualizations(self, trajectory_data, T_EE, v_geo):
-        """Publishes the fading Prediction Grippers (green) only — arrows removed for bandwidth."""
-        marker_array = MarkerArray()
+    def _build_policy_gripper_markers(self, trajectory_data):
+        """Builds the fading Prediction Grippers (green) — returns markers list."""
+        markers = []
         now = self.get_clock().now().to_msg()
 
         for i, (T_cube, v_cmd) in enumerate(trajectory_data):
             opacity = max(0.2, 0.8 - (i * 0.3))
             gripper_markers = self.create_gripper_markers(T_cube, opacity, i, now)
-            marker_array.markers.extend(gripper_markers)
+            markers.extend(gripper_markers)
 
+        return markers
+
+    def publish_visualizations(self, trajectory_data, T_EE, v_geo):
+        """Publishes the fading Prediction Grippers (green) only — arrows removed for bandwidth."""
+        marker_array = MarkerArray()
+        marker_array.markers.extend(self._build_policy_gripper_markers(trajectory_data))
         self.pub_markers.publish(marker_array)
 
     # Per-goal-family color (matches the world colors) for the belief-opacity markers.
@@ -1179,18 +1196,14 @@ class SharedControlNode(Node):
         b = max(0.0, min(1.0, float(belief)))
         return 0.2 + 0.6 * b
 
-    def publish_goal_pose_markers(self, beliefs, now=None):
-        """Draw every goal pose as a gripper marker whose opacity tracks its belief.
+    def _build_goal_pose_markers(self, beliefs, now=None):
+        """Build every goal pose as a gripper marker whose opacity tracks its belief.
 
-        Replaces the per-goal TF frames (which cannot fade and went stale when a
-        goal was excluded). Every goal is drawn every tick, so low/zero-belief
-        goals (e.g. the just-grasped cylinder, or the Platform while empty) simply
-        fade toward 0.2 opacity instead of cluttering RViz — no state-machine viz
-        logic, just a continuous function of the belief estimator's output.
+        Returns a list of Marker objects (not a MarkerArray).
         """
         if now is None:
             now = self.get_clock().now().to_msg()
-        marker_array = MarkerArray()
+        markers = []
         for i, goal_key in enumerate(self.target_keys):
             family = goal_key.split('_')[0]
             rgb = self.GOAL_FAMILY_RGB.get(family, (0.0, 1.0, 0.0))
@@ -1200,18 +1213,26 @@ class SharedControlNode(Node):
             # where the system is actually steering. update_memory=False (read-only).
             T_goal = self.goal_set.get_dynamic_goal_pose(
                 self.current_T_user, goal_key, update_memory=False)
-            marker_array.markers.extend(
+            markers.extend(
                 self.create_gripper_markers(T_goal, opacity, i, now,
                                             ns="goal_poses", rgb=rgb))
+        return markers
+
+    def publish_goal_pose_markers(self, beliefs, now=None):
+        """Draw every goal pose as a gripper marker whose opacity tracks its belief.
+
+        Replaces the per-goal TF frames (which cannot fade and went stale when a
+        goal was excluded). Every goal is drawn every tick, so low/zero-belief
+        goals (e.g. the just-grasped cylinder, or the Platform while empty) simply
+        fade toward 0.2 opacity instead of cluttering RViz — no state-machine viz
+        logic, just a continuous function of the belief estimator's output.
+        """
+        marker_array = MarkerArray()
+        marker_array.markers.extend(self._build_goal_pose_markers(beliefs, now))
         self.pub_markers.publish(marker_array)
 
-    def publish_grasp_ready_cue(self, T_EE):
-        """Publish a pulsing green sphere above the active-goal cylinder when PRE_GRASP is active.
-
-        Positioned at the TOP of the target cylinder (not the EE), so it's clearly
-        visible and not occluded by the gripper mesh. Pulses between opacity 0.3
-        and 0.8 at ~1 Hz.
-        """
+    def _build_grasp_ready_cue(self, T_EE):
+        """Build the pulsing green sphere marker — returns list of Marker."""
         import math
         self._grasp_cue_phase += 0.05
         pulse = 0.55 + 0.25 * math.sin(self._grasp_cue_phase * 2.0 * math.pi)
@@ -1244,25 +1265,51 @@ class SharedControlNode(Node):
         m.color.a = float(pulse)
         m.lifetime.sec = 0
         m.lifetime.nanosec = 500000000  # 500 ms — auto-expires if we stop publishing
+        return [m]
 
-        ma = MarkerArray()
-        ma.markers.append(m)
-        self.pub_markers.publish(ma)
-
-    def clear_grasp_ready_cue(self):
-        """Remove the pulsing sphere when leaving PRE_GRASP."""
+    def _build_clear_grasp_ready_cue(self):
+        """Build a DELETE marker for the pulsing sphere — returns list of Marker."""
         m = Marker()
         m.header.frame_id = "base_footprint"
         m.header.stamp = self.get_clock().now().to_msg()
         m.ns = "grasp_ready_cue"
         m.id = 0
         m.action = Marker.DELETE
+        return [m]
+
+    def publish_grasp_ready_cue(self, T_EE):
+        """Publish a pulsing green sphere above the active-goal cylinder when PRE_GRASP is active.
+
+        Positioned at the TOP of the target cylinder (not the EE), so it's clearly
+        visible and not occluded by the gripper mesh. Pulses between opacity 0.3
+        and 0.8 at ~1 Hz.
+        """
         ma = MarkerArray()
-        ma.markers.append(m)
+        ma.markers.extend(self._build_grasp_ready_cue(T_EE))
+        self.pub_markers.publish(ma)
+
+    def clear_grasp_ready_cue(self):
+        """Remove the pulsing sphere when leaving PRE_GRASP."""
+        ma = MarkerArray()
+        ma.markers.extend(self._build_clear_grasp_ready_cue())
         self.pub_markers.publish(ma)
 
     def publish_grasp_guidance(self, T_EE, T_goal, pos_error, ang_error, now=None):
-        """Draw 'how to move to satisfy the grasp condition' cues on the gripper.
+        """Draw 'how to move to satisfy the grasp condition' cues on the gripper (legacy wrapper)."""
+        ma = MarkerArray()
+        if now is None:
+            now = self.get_clock().now().to_msg()
+        ma.markers.extend(self._build_grasp_guidance_markers(T_EE, T_goal, pos_error, ang_error, now))
+        self.pub_markers.publish(ma)
+
+    def clear_grasp_guidance(self):
+        """Remove all grasp-guidance arrows (legacy wrapper)."""
+        ma = MarkerArray()
+        ma.markers.extend(self._build_clear_grasp_guidance())
+        self.pub_markers.publish(ma)
+
+    def _build_grasp_guidance_markers(self, T_EE, T_goal, pos_error, ang_error, now=None):
+        """Core builder for grasp guidance markers — returns list of Marker.
 
         Appears when within 2x the PRE_GRASP-ready range (and the target is a
         cylinder grasp goal):
@@ -1276,7 +1323,7 @@ class SharedControlNode(Node):
         """
         if now is None:
             now = self.get_clock().now().to_msg()
-        ma = MarkerArray()
+        markers = []
 
         pos_enter = self.grasp_sm.POS_ERR_ENTER
         ang_enter = self.grasp_sm.ANG_ERR_ENTER
@@ -1303,7 +1350,7 @@ class SharedControlNode(Node):
                 (0.2, 1.0, 0.2, 0.95) if within else (1.0, 0.9, 0.1, 0.95))
         else:
             a.action = Marker.DELETE
-        ma.markers.append(a)
+        markers.append(a)
 
         # --- ORIENTATION ARC (curved arrow around the rotation-error axis) ---
         R_ee = T_EE[:3, :3]
@@ -1365,13 +1412,19 @@ class SharedControlNode(Node):
             arc.action = Marker.DELETE
             head.action = Marker.DELETE
 
-        ma.markers.append(arc)
-        ma.markers.append(head)
-        self.pub_markers.publish(ma)
+        markers.append(arc)
+        markers.append(head)
+        return markers
 
-    def clear_grasp_guidance(self):
-        """Remove all grasp-guidance arrows."""
-        ma = MarkerArray()
+    def _build_grasp_guidance(self, T_EE, T_goal, pos_error, ang_error, now=None):
+        """Build grasp guidance markers — returns list of Marker."""
+        if now is None:
+            now = self.get_clock().now().to_msg()
+        return self._build_grasp_guidance_markers(T_EE, T_goal, pos_error, ang_error, now)
+
+    def _build_clear_grasp_guidance(self):
+        """Build DELETE markers for grasp guidance — returns list of Marker."""
+        markers = []
         for ns, mid in (("grasp_guidance_pos", 0), ("grasp_guidance_rot", 0), ("grasp_guidance_rot", 1)):
             m = Marker()
             m.header.frame_id = "base_footprint"
@@ -1379,7 +1432,21 @@ class SharedControlNode(Node):
             m.ns = ns
             m.id = mid
             m.action = Marker.DELETE
-            ma.markers.append(m)
+            markers.append(m)
+        return markers
+
+    def publish_grasp_guidance(self, T_EE, T_goal, pos_error, ang_error, now=None):
+        """Draw 'how to move to satisfy the grasp condition' cues on the gripper (legacy wrapper)."""
+        ma = MarkerArray()
+        if now is None:
+            now = self.get_clock().now().to_msg()
+        ma.markers.extend(self._build_grasp_guidance_markers(T_EE, T_goal, pos_error, ang_error, now))
+        self.pub_markers.publish(ma)
+
+    def clear_grasp_guidance(self):
+        """Remove all grasp-guidance arrows (legacy wrapper)."""
+        ma = MarkerArray()
+        ma.markers.extend(self._build_clear_grasp_guidance())
         self.pub_markers.publish(ma)
 
     def compute_v_geo(self, T_EE, T_goal):
