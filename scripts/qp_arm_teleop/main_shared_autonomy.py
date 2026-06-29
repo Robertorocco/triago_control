@@ -290,6 +290,12 @@ class SharedControlNode(Node):
 
         # --- Visualization Infrastructure ---
         self.pub_markers = self.create_publisher(MarkerArray, '/shared_policy_markers', 10)
+        # Separate topic for the YELLOW guidance gripper so it can be toggled
+        # independently in RViz. It is reference-anchored (current_T_user) and
+        # shows the belief-weighted USER-policy blend — i.e. exactly the velocity
+        # field that the haptic F_guide renders onto the operator's handle. This
+        # is the human-side counterpart to the green robot-policy gripper.
+        self.pub_guidance_marker = self.create_publisher(MarkerArray, '/guidance_policy_marker', 10)
         # Bug fix: this used to be assigned a second time later in __init__,
         # silently leaking the first TransformBroadcaster. Assigned exactly once.
         self.tf_broadcaster = TransformBroadcaster(self)
@@ -1011,6 +1017,28 @@ class SharedControlNode(Node):
 
                 # ONE publish per tick — all markers in a single message.
                 self.pub_markers.publish(combined_markers)
+
+                # --- YELLOW GUIDANCE GRIPPER (separate topic, toggleable) ------ #
+                # Reference-anchored counterpart to the green robot-policy gripper.
+                # It integrates the belief-weighted USER-policy blend (pi_blend) from
+                # the REFERENCE pose (current_T_user) — i.e. the exact velocity field
+                # that the haptic F_guide renders onto the handle. Published on its
+                # own topic (/guidance_policy_marker) so it can be shown/hidden in
+                # RViz independently of the robot-policy markers.
+                if user_policies and all(k in user_policies for k in self.target_keys):
+                    try:
+                        pi_blend_user = self.belief_estimator.blend_policies(user_policies)
+                    except KeyError:
+                        pi_blend_user = None
+                    if pi_blend_user is not None:
+                        guidance_markers = MarkerArray()
+                        guid_now = self.get_clock().now().to_msg()
+                        T_guid_1 = self.integrate_twist(self.current_T_user, pi_blend_user, 0.5)
+                        guidance_markers.markers.extend(
+                            self.create_gripper_markers(
+                                T_guid_1, 0.85, 0, guid_now,
+                                ns="guidance_policy", rgb=(1.0, 0.85, 0.0)))
+                        self.pub_guidance_marker.publish(guidance_markers)
 
             # Inference state (consumed by the haptic force manager) is lightweight
             # Float64MultiArray traffic — keep it at the full control rate.

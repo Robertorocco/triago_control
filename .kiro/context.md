@@ -602,6 +602,22 @@ logic, and nothing goes stale. This **replaced** the per-goal TF frames; only th
 still broadcasts a precise TF frame (`goal_<active_key>`) for pose debugging. The predictive
 trajectory grippers (ns `policy_grippers`) are unchanged.
 
+**Single-publish marker consolidation (2026-06-29)**: ALL markers on `/shared_policy_markers`
+(green `policy_grippers`, `goal_poses`, `grasp_ready_cue`, grasp-guidance arrows) are collected
+into ONE `MarkerArray` and published in a SINGLE `pub_markers.publish()` per timer tick. Before,
+each marker type was a separate publish → ~100 msg/s on a queue-10 topic → RViz subscriber queue
+starvation made the green gripper look stale while goal markers refreshed fine. Internal `_build_*`
+methods return marker lists; legacy `publish_*` wrappers are kept but the loop uses the
+consolidated path. **Do not revert to separate publishes.**
+
+**Yellow guidance gripper (2026-06-29)**: a separate topic `/guidance_policy_marker` (ns
+`guidance_policy`, yellow) draws the human-side counterpart to the green robot-policy gripper. It
+is **reference-anchored** (`current_T_user`) and integrates the belief-weighted **user-policy**
+blend `pi_blend = Σ belief[k]·user_policies[k]` — i.e. exactly the velocity field the haptic
+`F_guide` renders onto the handle. On its own topic so it can be toggled independently in RViz.
+Contrast: the green gripper is EE-anchored and integrates the **ee-policy** blend (`pi_max`).
+In test mode (`current_T_user == current_T_EE`) the two coincide.
+
 ---
 
 ## 12. Current State & Known Issues
