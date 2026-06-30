@@ -1,7 +1,7 @@
 import rclpy
 from visualization_msgs.msg import Marker, MarkerArray
 from geometry_msgs.msg import Point
-from std_msgs.msg import ColorRGBA, Float64MultiArray
+from std_msgs.msg import ColorRGBA, Float64MultiArray, String
 import pinocchio as pin
 import numpy as np
 from scipy.spatial.transform import Rotation as R # NEW IMPORT
@@ -21,9 +21,10 @@ class QPVisualizer:
         self.ee_pos_left = None
         self.ee_vel_left = None
 
-        # --- NEW: State variables to hold the COMMANDED telemetry ---
-        self.cmd_pos_right = None
-        self.cmd_rot_matrix_right = None
+        # --- State variables to hold the COMMANDED telemetry ---
+        self.cmd_pos = None
+        self.cmd_rot_matrix = None
+        self.active_arm = 'right'
 
         # --- Subscribe directly to the controller's published data ---
         self.ee_sub = node.create_subscription(
@@ -33,11 +34,24 @@ class QPVisualizer:
             10
         )
 
-        # --- NEW: Subscribe directly to the commanded reference ---
-        self.cmd_sub = node.create_subscription(
+        # --- Subscribe to BOTH arm references; only the active one updates cmd_pos ---
+        node.create_subscription(
             Float64MultiArray,
             '/arm_right/cartesian_reference',
-            self.cmd_callback,
+            self.cmd_callback_right,
+            10
+        )
+        node.create_subscription(
+            Float64MultiArray,
+            '/arm_left/cartesian_reference',
+            self.cmd_callback_left,
+            10
+        )
+        # --- Subscribe to the active-arm switch topic ---
+        node.create_subscription(
+            String,
+            '/shared_autonomy/active_arm',
+            self.active_arm_cb,
             10
         )
 
@@ -49,14 +63,28 @@ class QPVisualizer:
             self.ee_pos_left = np.array(msg.data[6:9])
             self.ee_vel_left = np.array(msg.data[9:12])
 
-    def cmd_callback(self, msg):
-        """NEW: Listens to the user's teleoperation commands"""
+    def active_arm_cb(self, msg):
+        """Switches which arm's commanded reference is visualized."""
+        if msg.data in ('right', 'left'):
+            self.active_arm = msg.data
+
+    def cmd_callback_right(self, msg):
+        """Updates commanded pose from the right-arm reference (only when active)."""
+        if self.active_arm != 'right':
+            return
         if len(msg.data) >= 6:
-            # Extract position
-            self.cmd_pos_right = np.array(msg.data[0:3])
-            # Extract RPY and convert to Rotation Matrix for the gripper builder
+            self.cmd_pos = np.array(msg.data[0:3])
             rpy = np.array(msg.data[3:6])
-            self.cmd_rot_matrix_right = R.from_euler('xyz', rpy, degrees=False).as_matrix()
+            self.cmd_rot_matrix = R.from_euler('xyz', rpy, degrees=False).as_matrix()
+
+    def cmd_callback_left(self, msg):
+        """Updates commanded pose from the left-arm reference (only when active)."""
+        if self.active_arm != 'left':
+            return
+        if len(msg.data) >= 6:
+            self.cmd_pos = np.array(msg.data[0:3])
+            rpy = np.array(msg.data[3:6])
+            self.cmd_rot_matrix = R.from_euler('xyz', rpy, degrees=False).as_matrix()
 
     def _build_gripper(self, p_center, R_mat, opacity, start_id, timestamp):
         """NEW: Builds a 3-part BLUE gripper for the commanded pose.
@@ -132,14 +160,18 @@ class QPVisualizer:
         A 0.4m error corresponds to the max 10N force (Kp = 25 N/m).
         """
         # Ensure we have both real and commanded positions before computing
-        if self.ee_pos_right is None or self.cmd_pos_right is None:
+        if self.cmd_pos is None:
+            return
+        # Use the active arm's EE position
+        ee_pos = self.ee_pos_right if self.active_arm == 'right' else self.ee_pos_left
+        if ee_pos is None:
             return
 
         markers = MarkerArray()
         timestamp = self.node.get_clock().now().to_msg()
         
         # 1. Compute the Cartesian Position Error
-        error_vec = self.cmd_pos_right - self.ee_pos_right
+        error_vec = self.cmd_pos - ee_pos
         error_mag = np.linalg.norm(error_vec)
 
         # 2. Compute the Error Ratio (0.0 to 1.0)
@@ -179,13 +211,13 @@ class QPVisualizer:
         tether.color = ColorRGBA(r=r_color, g=g_color, b=b_color, a=0.8)
 
         # Define the start (Real TCP) and end (Commanded TCP) points
-        p_start = Point(x=float(self.ee_pos_right[0]), 
-                        y=float(self.ee_pos_right[1]), 
-                        z=float(self.ee_pos_right[2]))
+        p_start = Point(x=float(ee_pos[0]), 
+                        y=float(ee_pos[1]), 
+                        z=float(ee_pos[2]))
         
-        p_end = Point(x=float(self.cmd_pos_right[0]), 
-                      y=float(self.cmd_pos_right[1]), 
-                      z=float(self.cmd_pos_right[2]))
+        p_end = Point(x=float(self.cmd_pos[0]), 
+                      y=float(self.cmd_pos[1]), 
+                      z=float(self.cmd_pos[2]))
 
         tether.points = [p_start, p_end]
         markers.markers.append(tether)
@@ -307,16 +339,9 @@ class QPVisualizer:
             
             if pos_curr is None or vel_curr is None: 
                 return
-            
-            # 1. The Blue Dot (Reality)
-            markers.markers.append(create_marker(idx, Marker.SPHERE, (0.04, 0.04, 0.04), ColorRGBA(r=0.0, g=0.0, b=1.0, a=0.8), position=pos_curr))
-            idx += 1
 
             if target_pose is not None:
-                # Target Dot (Green)
                 pos_targ = target_pose.translation
-                markers.markers.append(create_marker(idx, Marker.SPHERE, (0.04, 0.04, 0.04), ColorRGBA(r=0.0, g=1.0, b=0.0, a=0.8), position=pos_targ))
-                idx += 1
                 
                 # Distance/Reference Arrow (White)
                 Kp = 1.0
@@ -334,12 +359,10 @@ class QPVisualizer:
         process_arm(self.ee_pos_right, self.ee_vel_right, target_right)
         process_arm(self.ee_pos_left, self.ee_vel_left, target_left)
 
-        # --- 4. NEW: COMMANDED GRIPPER VISUALIZATION ---
-        if self.cmd_pos_right is not None and self.cmd_rot_matrix_right is not None:
-            # Opacity set to 0.8 as requested
-            gripper_markers = self._build_gripper(self.cmd_pos_right, self.cmd_rot_matrix_right, 0.8, idx, timestamp)
+        # --- 4. COMMANDED GRIPPER VISUALIZATION (Blue, follows active arm) ---
+        if self.cmd_pos is not None and self.cmd_rot_matrix is not None:
+            gripper_markers = self._build_gripper(self.cmd_pos, self.cmd_rot_matrix, 0.8, idx, timestamp)
             markers.markers.extend(gripper_markers)
-            # We used 3 markers (Base, Left, Right), so bump the id by 3
             idx += 3
             
         # =========================================================

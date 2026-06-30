@@ -276,8 +276,10 @@ class SharedControlNode(Node):
         self.trajectory_data = deque(maxlen=500)
 
         # --- ROS2 TOPICS ---
-        self.sub_human_reference = self.create_subscription(
-            Float64MultiArray, '/arm_right/cartesian_reference', self.human_reference_callback, 10)
+        self.sub_human_reference_right = self.create_subscription(
+            Float64MultiArray, '/arm_right/cartesian_reference', self.human_reference_callback_right, 10)
+        self.sub_human_reference_left = self.create_subscription(
+            Float64MultiArray, '/arm_left/cartesian_reference', self.human_reference_callback_left, 10)
         self.sub_ee_pose = self.create_subscription(
             Float64MultiArray, '/qp_debug/ee_real', self.robot_state_callback, 10)
         self.sub_collision = self.create_subscription(
@@ -392,6 +394,7 @@ class SharedControlNode(Node):
             self.belief_estimator.reset()
             self._ou_bias = np.zeros(6)
             self._belief_warmup_start = time.time()
+            self.plot_manager.push_arm_switch(new_arm)
         else:
             # --- FIRST PRESS: start the window ---
             self._btn_first_press_time = now
@@ -594,11 +597,21 @@ class SharedControlNode(Node):
         else:
             self.get_logger().error(f"[DETACH] REJECTED: {desc}  ({message})")
 
-    def human_reference_callback(self, msg):
-        """Extracts the user's SE(3) pose and 6D spatial twist from the synchronized 13-element array.
+    def human_reference_callback_right(self, msg):
+        """Right-arm reference → current_T_user + current_v_h (only when active)."""
+        if self.active_arm != 'right':
+            return
+        if len(msg.data) >= 13:
+            pos = np.array(msg.data[0:3])
+            rpy = np.array(msg.data[3:6])
+            rot_mat = R.from_euler('xyz', rpy).as_matrix()
+            self.current_T_user = create_transform(pos, rot_mat)
+            self.current_v_h = np.array(msg.data[6:12])
 
-        Format: [x, y, z, roll, pitch, yaw, vx, vy, vz, wx, wy, wz, TASK_DIM]
-        """
+    def human_reference_callback_left(self, msg):
+        """Left-arm reference → current_T_user + current_v_h (only when active)."""
+        if self.active_arm != 'left':
+            return
         if len(msg.data) >= 13:
             pos = np.array(msg.data[0:3])
             rpy = np.array(msg.data[3:6])
@@ -651,7 +664,7 @@ class SharedControlNode(Node):
         """
         RIGHT_POS_SLICE = slice(0, 3)
         RIGHT_RPY_SLICE = slice(12, 15)
-        LEFT_POS_SLICE = slice(3, 6)
+        LEFT_POS_SLICE = slice(6, 9)
         LEFT_RPY_SLICE = slice(15, 18)
 
         if len(msg.data) >= 18:

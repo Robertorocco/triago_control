@@ -66,16 +66,41 @@ class PlotManager:
     # Figure construction (run once)
     # ------------------------------------------------------------------
     def _build_belief_figure(self):
-        self.fig, self.ax_beliefs = plt.subplots(1, 1, figsize=(8, 4))
-        self.fig.canvas.manager.set_window_title('Intent Inference')
+        """Two vertically stacked bar charts: one per arm.
+
+        The ACTIVE arm is drawn in full color (blue/red); the INACTIVE arm is
+        greyscale and frozen at its last belief distribution. On arm switch,
+        main_shared_autonomy calls push_arm_switch() which snapshots the current
+        beliefs into the inactive arm's slot.
+        """
+        self.fig, (self.ax_beliefs_top, self.ax_beliefs_bot) = plt.subplots(
+            2, 1, figsize=(8, 6), sharex=True)
+        self.fig.canvas.manager.set_window_title('Intent Inference (Bimanual)')
 
         init_vals = [self._latest_beliefs[k] for k in self.target_keys]
-        self.bars = self.ax_beliefs.bar(self.target_keys, init_vals,
-                                         color='#00BFFF', edgecolor='black')
-        self.ax_beliefs.set_ylim(0, 1)
-        self.ax_beliefs.set_ylabel('Probability')
-        self.ax_beliefs.set_title('Intent Inference (Continuous Manifolds)')
+
+        # Top subplot: RIGHT arm (default active at start)
+        self.bars_right = self.ax_beliefs_top.bar(
+            self.target_keys, init_vals, color='#00BFFF', edgecolor='black')
+        self.ax_beliefs_top.set_ylim(0, 1)
+        self.ax_beliefs_top.set_ylabel('Probability')
+        self.ax_beliefs_top.set_title('RIGHT ARM (active)', fontsize=11, fontweight='bold')
+
+        # Bottom subplot: LEFT arm (inactive at start, greyscale)
+        self.bars_left = self.ax_beliefs_bot.bar(
+            self.target_keys, init_vals, color='#aaaaaa', edgecolor='#666666')
+        self.ax_beliefs_bot.set_ylim(0, 1)
+        self.ax_beliefs_bot.set_ylabel('Probability')
+        self.ax_beliefs_bot.set_title('LEFT ARM (inactive)', fontsize=11, color='grey')
+
         plt.tight_layout()
+
+        # Per-arm belief snapshots (the inactive arm shows its last known state)
+        self._beliefs_right = list(init_vals)
+        self._beliefs_left = list(init_vals)
+        self._excluded_right = set()
+        self._excluded_left = set()
+        self._active_arm_plot = 'right'
 
     def _build_twist_figure(self):
         # Layout: radar (spider) on the LEFT spanning the full height; on the
@@ -178,10 +203,25 @@ class PlotManager:
     # Producer-side API (called from the control loop thread)
     # ------------------------------------------------------------------
     def push_beliefs(self, beliefs: dict, excluded=None):
-        """Thread-safe write of the latest belief distribution (+ excluded set)."""
+        """Thread-safe write of the latest belief distribution (+ excluded set).
+        Updates ONLY the active arm's belief snapshot; the inactive arm stays frozen.
+        """
         with self.plot_lock:
             self._latest_beliefs = dict(beliefs)
             self._excluded_goals = set(excluded) if excluded else set()
+            probs = [beliefs[k] for k in self.target_keys]
+            excl = set(excluded) if excluded else set()
+            if self._active_arm_plot == 'right':
+                self._beliefs_right = probs
+                self._excluded_right = excl
+            else:
+                self._beliefs_left = probs
+                self._excluded_left = excl
+
+    def push_arm_switch(self, new_arm):
+        """Called when the active arm changes. Freezes the now-inactive arm's beliefs."""
+        with self.plot_lock:
+            self._active_arm_plot = new_arm
 
     def push_twist_snapshot(self, v_h, pi_star, goal_key):
         """Thread-safe write of the latest (v_h, pi*, goal_key) sample for the twist plot.
@@ -231,19 +271,43 @@ class PlotManager:
         self._update_twist_plot(snap)
 
     def _update_belief_bars(self, probs, excluded=frozenset()):
-        max_idx = int(np.argmax(probs))
-        for i, bar in enumerate(self.bars):
-            key = self.target_keys[i]
-            bar.set_height(probs[i])
-            if key in excluded:
-                # Goal disabled from estimation -> draw it light/faded.
-                bar.set_color('#cccccc')
-                bar.set_alpha(0.4)
-                bar.set_edgecolor('#999999')
-            else:
-                bar.set_alpha(1.0)
-                bar.set_color('red' if i == max_idx else '#00BFFF')
-                bar.set_edgecolor('black')
+        """Dual-subplot belief update: active arm in color, inactive arm in grey."""
+        with self.plot_lock:
+            active = self._active_arm_plot
+            probs_r = list(self._beliefs_right)
+            probs_l = list(self._beliefs_left)
+            excl_r = set(self._excluded_right)
+            excl_l = set(self._excluded_left)
+
+        # Helper to style one subplot's bars
+        def _style_bars(bars, ax, probs_arm, excl_arm, is_active, arm_label):
+            max_idx = int(np.argmax(probs_arm)) if probs_arm else 0
+            for i, bar in enumerate(bars):
+                bar.set_height(probs_arm[i])
+                key = self.target_keys[i]
+                if not is_active:
+                    # Inactive arm: greyscale, faded
+                    bar.set_color('#aaaaaa')
+                    bar.set_alpha(0.5)
+                    bar.set_edgecolor('#666666')
+                elif key in excl_arm:
+                    bar.set_color('#cccccc')
+                    bar.set_alpha(0.4)
+                    bar.set_edgecolor('#999999')
+                else:
+                    bar.set_alpha(1.0)
+                    bar.set_color('red' if i == max_idx else '#00BFFF')
+                    bar.set_edgecolor('black')
+            status = '(active)' if is_active else '(inactive)'
+            ax.set_title(f'{arm_label} ARM {status}',
+                         fontsize=11,
+                         fontweight='bold' if is_active else 'normal',
+                         color='black' if is_active else 'grey')
+
+        _style_bars(self.bars_right, self.ax_beliefs_top, probs_r, excl_r,
+                    active == 'right', 'RIGHT')
+        _style_bars(self.bars_left, self.ax_beliefs_bot, probs_l, excl_l,
+                    active == 'left', 'LEFT')
 
     def _update_twist_plot(self, snap):
         v_h = snap['v_h']
