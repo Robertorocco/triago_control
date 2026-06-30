@@ -1,7 +1,7 @@
 # AI Agent Context — triago_control
 
 > **This file is maintained by the AI agent. Do not edit manually.**
-> Last updated: 2026-06-26 (added §13.5 simulation flow; fixed F_guide → velocity-field guidance, green-gripper marker viz robustness, and SA frequency-plot layout)
+> Last updated: 2026-06-29 (per-arm bimanual FSM/belief, cost decoupling, posture-field, arm-switch, grasp-fail ABORT_RETREAT, RViz bimanual viz)
 
 ---
 
@@ -657,18 +657,30 @@ In test mode (`current_T_user == current_T_EE`) the two coincide.
 
 | Area | Status | Notes |
 |------|--------|-------|
-| QP bimanual arm control | ✅ Working | Full 6-DOF tracking with CBF safety |
-| Shared autonomy (belief + grasp) | ✅ Working | Refactored from monolithic script |
-| Grasp pipeline (full cycle) | ✅ Working | PRE_GRASP → APPROACH → CLOSE → ATTACH all succeed reliably |
-| Post-grasp (LIFT + HOLDING + place) | ✅ Working | 5 cm slow lift → HOLDING resumes shared autonomy → Platform placement manifold → release back to start |
-| Platform placement goal | 🔧 Active dev | `Platform_Place` manifold (axis ⊥ disk); debugging placement height/orientation live |
-| Haption teleoperation (clutch) | 🔧 Active dev | `teleop_triago_clutch.py` + `haptic_force_manager.py` |
+| QP bimanual arm control | ✅ Working | Full 6-DOF tracking with CBF safety; per-arm cost decoupling (inactive arm: 2×DAMP, MAX slack, GAMMA_MAX); grasp-boost (active arm pinned to MAX during align/approach). Posture task: gradient potential field (not a home spring). |
+| Bimanual arm switching | ✅ Working | Double-click Haption left button → switch active arm. Per-arm FSM + belief (frozen inactive arm). QP always publishes qdot for both arms (no zero-overwrite). Inactive arm CLF-held at frozen EE pose. |
+| Shared autonomy (belief + grasp) | ✅ Working | Two independent GraspStateMachine + BeliefEstimator per arm. Union goal exclusion. GRASP_ALIGN tolerances relaxed 10%. Side-grasp manifold 3 cm from cylinder centre. |
+| Grasp pipeline (full cycle) | ✅ Working | PRE_GRASP → ALIGN → APPROACH → CLOSE → LIFT → HOLDING. Tracking boost (MAX gamma+slack) during align. Align timeout 12s. |
+| Grasp failure | ✅ Working | Clear `[GRASP FAILED]` log. ABORT_RETREAT: backs out along reverse approach axis (gripper open, CBF bypass active during retreat, then restore). |
+| Post-grasp (LIFT + HOLDING + place) | ✅ Working | 9 cm slow lift → HOLDING resumes shared autonomy → Platform placement manifold → release → RELEASE_LIFT → SHARED_AUTONOMY |
+| RViz visualization | ✅ Working | Single-publish marker consolidation. Green=EE robot policy, Yellow=reference guidance (toggleable `/guidance_policy_marker`), Blue=active commanded gripper, Grey=inactive frozen CLF pose. Belief-opacity goal grippers. Dual belief subplot (active colored, inactive greyscale). Task-authority soft-cost plot (`/qp_debug/task_authority`). |
+| Haption teleoperation | ✅ Working | `teleop_triago_clutch.py` + `haptic_force_manager_tutorial.py`. Force layers: F_guide (velocity-field, v_max_user 0.04/0.10) + F_fixture (position spring near goal). Handle drag during autonomous phases (KP+KD velocity-following). |
 | Head control (visual servoing) | 🔧 Active dev | `qp_head_visual_servo.py`: QP-based hand-tracking, independent loop. Starting point — no image processing yet. |
 | Mobile base integration | 🔧 Partial | `base_controller.py` exists but not QP-certified |
 | Meshcat visualization | ✅ Working | Thread-safe, auto-reloads on grasp coloring |
 | Digital twin mode | ✅ Working | `SIMULATE_IDEAL_KINEMATICS` flag in config |
-| Dynamic CBF pair removal | ⚠️ Experimental | `DYNAMIC_CBF` flag, used during grasp sequences |
-| Open-loop trajectory testing | ✅ Working | `trajectory_generator.py` + `config/trajectory_endpoints.yaml`: YAML-selected quintic reference presets (free space → collision-risk → out-of-workspace) with optional λ-driven `dynamic_trajectory` time scaling |
+| Open-loop trajectory testing | ✅ Working | `trajectory_generator.py` + `config/trajectory_endpoints.yaml` |
+
+---
+
+## 12.1 Known Issues / Next Steps for the Next Agent
+
+| Issue | Description | Proposed Fix |
+|-------|-------------|-------------|
+| **Residual inactive-arm motion** | The inactive arm moves when the active arm moves fast, despite the full per-arm cost decoupling. Root cause: the **single shared scalar SoftMin CBF row** `J_soft·q̇ ≥ b` mixes BOTH arms' Jacobian columns (per-arm DAMP/slack/gamma cannot prevent this since the barrier is a CONSTRAINT, not a cost). | **Per-arm SoftMin split** in `collision_manager.compute_softmin_jacobian`: emit TWO barrier rows — right-involving pairs → one row touching only right-joint columns; left-involving pairs → one row touching only left-joint columns. Inter-arm (right-vs-left) pairs produce a SHARED row over both. Then the inactive arm's heavily-penalized cost ensures it stays still unless its OWN barrier is threatened. Contained change: `compute_softmin_jacobian` returns per-arm `(J_soft_R, h_soft_R, J_soft_L, h_soft_L, J_soft_inter, h_soft_inter)`, and `qp_formulator.build_and_solve` stacks them as 2–3 separate inequality rows instead of one. |
+| **Gazebo dual attach** | The IFRA_LinkAttacher plugin has a global `IsAttached` boolean allowing only ONE attachment. A patched `gazebo_link_attacher.cpp` was provided (per-pair gating, vector erase in Detach) but not yet confirmed in sim. | User must replace the plugin source, rebuild `ros2_linkattacher`, verify. |
+| **Platform placement (dual arm)** | `GoalSet.set_grasped` / `clear_grasped` tracks one grasped color at a time. The per-arm context save/restore (`_ctx_goalset`) handles this for one-arm-active-at-a-time, but a true simultaneous dual-arm placement (both arms holding and both wanting to place concurrently) is NOT supported. | For the current "one active at a time" policy this is fine. If needed: extend GoalSet to hold per-arm grasped state (two axes, two z-offsets). |
+| **Orientation choice** | The sticky hysteresis can commit to the "wrong" 180° candidate early; the user can't override without getting very close. | Consider resetting the sticky memory on clutch-engage, or using the reference velocity direction to break the tie. |
 
 ---
 
