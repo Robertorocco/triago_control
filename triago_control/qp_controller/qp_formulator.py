@@ -166,7 +166,8 @@ class QPFormulator:
 
     def build_and_solve(self, kin, J_soft, h_soft, d_safe_dynamic,
                         right_motion, left_motion, xdot_r, xdot_l,
-                        e_r, v_r, e_l, v_l, dt, right_frozen=False, left_frozen=False):
+                        e_r, v_r, e_l, v_l, dt, right_frozen=False, left_frozen=False,
+                        tracking_boost_arm=None):
         """
         Build and solve the CLF-CBF-QP for this tick.
 
@@ -189,6 +190,17 @@ class QPFormulator:
         # Per-arm CLF convergence rate: frozen arm holds tight at GAMMA_MAX.
         gamma_r = cfg.GAMMA_MAX if right_frozen else self.gamma_clf
         gamma_l = cfg.GAMMA_MAX if left_frozen else self.gamma_clf
+        # GRASP TRACKING BOOST: during autonomous grasp execution the grasping
+        # (active) arm must converge tightly to the standoff/insertion reference,
+        # so it is pinned to the MAX dynamic values — highest slack weight (track
+        # hard, barely yield) and highest CLF gamma (fast error decay). This is
+        # what lets GRASP_ALIGN converge inside tolerance instead of timing out.
+        if tracking_boost_arm == 'right':
+            weight_slack_r = cfg.MAX_WEIGHT_SLACK
+            gamma_r = cfg.GAMMA_MAX
+        elif tracking_boost_arm == 'left':
+            weight_slack_l = cfg.MAX_WEIGHT_SLACK
+            gamma_l = cfg.GAMMA_MAX
         # Representative slack weight for telemetry (average of both arms)
         self.weight_slack = (weight_slack_r + weight_slack_l) / 2.0
 

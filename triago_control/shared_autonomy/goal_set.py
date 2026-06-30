@@ -60,9 +60,15 @@ class GoalSet:
     # right over the cylinder top). Within this radius of the axis we FREEZE the
     # approach azimuth to its last committed value, so passing over the top no
     # longer swings the goal around the cylinder (the oscillation-from-indecision
-    # the operator saw). Must stay below the grasp standoff (r + approach_offset)
+    # the operator saw). Must stay below the grasp standoff (SIDE_STANDOFF_FROM_CENTER)
     # so a real side approach still tracks the anchor normally.
-    _SIDE_AZIMUTH_DEADZONE = 0.04   # m
+    _SIDE_AZIMUTH_DEADZONE = 0.02   # m  (kept < SIDE_STANDOFF_FROM_CENTER = 0.03)
+
+    # Side-grasp standoff measured from the cylinder CENTRE (axis), in meters.
+    # The policy/guidance manifold pulls the reference to exactly this radius, so
+    # it stays comfortably outside the cylinder (radius ~0.02 m) instead of being
+    # dragged toward/into it. Tunable: increase to keep the handle further out.
+    SIDE_STANDOFF_FROM_CENTER = 0.03   # m (3 cm from the cylinder axis)
 
     # --- Platform placement goal ---------------------------------------------
     # The placement_area model in the world: a flat yellow disk the grasped
@@ -450,7 +456,13 @@ class GoalSet:
                                                update_memory=update_memory, hysteresis=hyst)
 
             # 4. Target Position
-            standoff = r + approach_offset
+            # Standoff measured from the cylinder CENTRE (not the surface): the
+            # guidance/policy manifold pulls the user to exactly this radius, which
+            # keeps the reference comfortably OUTSIDE the cylinder (the operator
+            # reported the old r+approach_offset sometimes pulling the handle "into"
+            # the cylinder). The grasp itself does NOT need the reference closer —
+            # the blind insertion (GRASP_INSERTION_TRAVEL) handles the final reach.
+            standoff = self.SIDE_STANDOFF_FROM_CENTER
             p_target = np.array([
                 p_cyl[0] - X_t[0] * standoff,
                 p_cyl[1] - X_t[1] * standoff,

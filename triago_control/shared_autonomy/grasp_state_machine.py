@@ -314,8 +314,9 @@ class GraspStateMachine:
     # ------------------------------------------------------------------
     # PHASE 1.5: GRASP_ALIGN (precise centering before the blind insertion)
     # ------------------------------------------------------------------
-    ALIGN_POS_TOL = 0.02    # m — must be within 2 cm of the exact standoff
-    ALIGN_ANG_TOL = 0.13    # rad — approach-axis within ~7.5° of the goal
+    ALIGN_POS_TOL = 0.022   # m — within ~2.2 cm of the standoff (relaxed ~10%: grasp
+                            #   succeeds even from slightly looser alignment, per operator)
+    ALIGN_ANG_TOL = 0.143   # rad — approach-axis within ~8.2° of the goal (relaxed ~10%)
     ALIGN_TIMEOUT_S = 12.0  # if alignment doesn't converge in this time, abort
                             #   (raised 6 -> 12s: the precise centring before the blind
                             #    insertion can be slow, and a premature abort/approach is

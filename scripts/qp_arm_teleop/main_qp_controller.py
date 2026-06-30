@@ -519,11 +519,15 @@ class SafetyQPController(Node):
         # CLF, and doubled damping inside the QP — but only when exactly that arm
         # is frozen while the other is active (both-active keeps the dynamic
         # coupling unchanged; both-frozen pins both, which is the idle hold).
+        # During an autonomous grasp the ACTIVE arm is boosted to the max dynamic
+        # values (slack + gamma) so it converges tightly to the grasp reference.
+        boost_arm = self.active_arm if self.grasp_active else None
         q_dot_safe, slack_r, slack_l, b_col, lambda_joints_total = self.qp.build_and_solve(
             self.kin, J_soft, h_soft, d_safe_dynamic,
             self.right_imposed_motion, self.left_imposed_motion,
             self.xdot_ref_right, self.xdot_ref_left, e_r, v_r, e_l, v_l, dt,
-            right_frozen=self.right_frozen, left_frozen=self.left_frozen)
+            right_frozen=self.right_frozen, left_frozen=self.left_frozen,
+            tracking_boost_arm=boost_arm)
 
         self.publish_counter += 1
 
