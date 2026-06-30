@@ -26,6 +26,14 @@ class QPVisualizer:
         self.cmd_rot_matrix = None
         self.active_arm = 'right'
 
+        # Frozen (inactive) arm's held pose — shown as a grey gripper in RViz.
+        # Updated when the active arm switches: the old active arm's last known
+        # reference becomes the frozen pose for the grey gripper.
+        self.frozen_pos = None
+        self.frozen_rot_matrix = None
+        self._inactive_last_pos = None
+        self._inactive_last_rot = None
+
         # --- Subscribe directly to the controller's published data ---
         self.ee_sub = node.create_subscription(
             Float64MultiArray,
@@ -64,34 +72,59 @@ class QPVisualizer:
             self.ee_vel_left = np.array(msg.data[9:12])
 
     def active_arm_cb(self, msg):
-        """Switches which arm's commanded reference is visualized."""
-        if msg.data in ('right', 'left'):
+        """Switches which arm's commanded reference is visualized.
+        The old active arm's last known cmd_pos becomes the grey frozen gripper."""
+        if msg.data in ('right', 'left') and msg.data != self.active_arm:
+            # Snapshot: the arm we're leaving becomes the frozen grey gripper.
+            self.frozen_pos = self.cmd_pos.copy() if self.cmd_pos is not None else None
+            self.frozen_rot_matrix = self.cmd_rot_matrix.copy() if self.cmd_rot_matrix is not None else None
+            # Also start tracking the inactive arm's reference for the frozen gripper
+            # (if the inactive arm receives reference updates from _freeze_arm, we
+            # pick those up in the non-active callback and keep frozen_pos fresh).
             self.active_arm = msg.data
+            # Reset active-arm cmd so it re-anchors from the new arm's next message.
+            self.cmd_pos = None
+            self.cmd_rot_matrix = None
 
     def cmd_callback_right(self, msg):
-        """Updates commanded pose from the right-arm reference (only when active)."""
-        if self.active_arm != 'right':
+        """Updates commanded pose from the right-arm reference."""
+        if len(msg.data) < 6:
             return
-        if len(msg.data) >= 6:
-            self.cmd_pos = np.array(msg.data[0:3])
-            rpy = np.array(msg.data[3:6])
-            self.cmd_rot_matrix = R.from_euler('xyz', rpy, degrees=False).as_matrix()
+        pos = np.array(msg.data[0:3])
+        rot = R.from_euler('xyz', np.array(msg.data[3:6]), degrees=False).as_matrix()
+        if self.active_arm == 'right':
+            self.cmd_pos = pos
+            self.cmd_rot_matrix = rot
+        else:
+            # Inactive arm: keep the frozen grey gripper at its held pose.
+            self.frozen_pos = pos
+            self.frozen_rot_matrix = rot
 
     def cmd_callback_left(self, msg):
-        """Updates commanded pose from the left-arm reference (only when active)."""
-        if self.active_arm != 'left':
+        """Updates commanded pose from the left-arm reference."""
+        if len(msg.data) < 6:
             return
-        if len(msg.data) >= 6:
-            self.cmd_pos = np.array(msg.data[0:3])
-            rpy = np.array(msg.data[3:6])
-            self.cmd_rot_matrix = R.from_euler('xyz', rpy, degrees=False).as_matrix()
+        pos = np.array(msg.data[0:3])
+        rot = R.from_euler('xyz', np.array(msg.data[3:6]), degrees=False).as_matrix()
+        if self.active_arm == 'left':
+            self.cmd_pos = pos
+            self.cmd_rot_matrix = rot
+        else:
+            # Inactive arm: keep the frozen grey gripper at its held pose.
+            self.frozen_pos = pos
+            self.frozen_rot_matrix = rot
 
-    def _build_gripper(self, p_center, R_mat, opacity, start_id, timestamp):
-        """NEW: Builds a 3-part BLUE gripper for the commanded pose.
+    def _build_gripper(self, p_center, R_mat, opacity, start_id, timestamp,
+                       color=None, ns="qp_debug_gripper"):
+        """Builds a 3-part gripper for a commanded/frozen pose.
            Shifted backward so the reference point aligns with the fingertips (TCP).
         """
         markers = []
         quat = R.from_matrix(R_mat).as_quat()
+        if color is None:
+            color = ColorRGBA(r=0.0, g=0.0, b=1.0, a=opacity)  # default blue
+        else:
+            color.a = opacity
 
         # --- The TCP Shift ---
         # Shift the entire gripper backward along the local X-axis (approach axis)
@@ -103,7 +136,7 @@ class QPVisualizer:
         base = Marker()
         base.header.frame_id = self.ref_frame
         base.header.stamp = timestamp
-        base.ns = "qp_debug_gripper"
+        base.ns = ns
         base.id = start_id
         base.type = Marker.CUBE
         base.action = Marker.ADD
@@ -113,7 +146,7 @@ class QPVisualizer:
         
         base.pose.orientation.x, base.pose.orientation.y, base.pose.orientation.z, base.pose.orientation.w = quat[0], quat[1], quat[2], quat[3]
         base.scale.x, base.scale.y, base.scale.z = 0.02, 0.08, 0.03  
-        base.color = ColorRGBA(r=0.0, g=0.0, b=1.0, a=opacity) # BLUE
+        base.color = color
         markers.append(base)
 
         # 2. Left Finger
@@ -363,6 +396,15 @@ class QPVisualizer:
         if self.cmd_pos is not None and self.cmd_rot_matrix is not None:
             gripper_markers = self._build_gripper(self.cmd_pos, self.cmd_rot_matrix, 0.8, idx, timestamp)
             markers.markers.extend(gripper_markers)
+            idx += 3
+
+        # --- 5. FROZEN (INACTIVE) ARM GRIPPER (Grey, shows where the CLF holds it) ---
+        # Disappears when the arm becomes active (cmd_pos takes over → blue gripper).
+        if self.frozen_pos is not None and self.frozen_rot_matrix is not None:
+            grey_markers = self._build_gripper(
+                self.frozen_pos, self.frozen_rot_matrix, 0.5, idx, timestamp,
+                color=ColorRGBA(r=0.6, g=0.6, b=0.6, a=0.5), ns="frozen_gripper")
+            markers.markers.extend(grey_markers)
             idx += 3
             
         # =========================================================
