@@ -166,7 +166,7 @@ class QPFormulator:
 
     def build_and_solve(self, kin, J_soft, h_soft, d_safe_dynamic,
                         right_motion, left_motion, xdot_r, xdot_l,
-                        e_r, v_r, e_l, v_l, dt, inactive_arm=None):
+                        e_r, v_r, e_l, v_l, dt, right_frozen=False, left_frozen=False):
         """
         Build and solve the CLF-CBF-QP for this tick.
 
@@ -177,20 +177,33 @@ class QPFormulator:
 
         # --- Adaptive scheduling from previous loop's shadow prices ---
         weight_slack_r, weight_slack_l = self._schedule_weights(dt)
-        # Option B: the INACTIVE arm holds its frozen pose more stiffly — double
-        # its slack weight so it stays put unless yielding genuinely helps the
-        # active arm (the QP can still let it bend, just at a higher cost).
-        if inactive_arm == 'right':
-            weight_slack_r *= cfg.INACTIVE_SLACK_FACTOR
-        elif inactive_arm == 'left':
-            weight_slack_l *= cfg.INACTIVE_SLACK_FACTOR
+        # COST DECOUPLING (single-arm teleop): an INACTIVE (frozen) arm gets a
+        # FIXED maximal slack weight (no dynamic update), a fixed GAMMA_MAX CLF
+        # convergence rate, and doubled joint damping — so its hold is rigid and
+        # its solution is independent of whatever the active arm is doing. When
+        # BOTH arms are active (neither frozen) nothing changes (kept dynamic).
+        if right_frozen:
+            weight_slack_r = cfg.MAX_WEIGHT_SLACK
+        if left_frozen:
+            weight_slack_l = cfg.MAX_WEIGHT_SLACK
+        # Per-arm CLF convergence rate: frozen arm holds tight at GAMMA_MAX.
+        gamma_r = cfg.GAMMA_MAX if right_frozen else self.gamma_clf
+        gamma_l = cfg.GAMMA_MAX if left_frozen else self.gamma_clf
         # Representative slack weight for telemetry (average of both arms)
         self.weight_slack = (weight_slack_r + weight_slack_l) / 2.0
 
         # =========================================================
         # A. COST FUNCTION (damping + posture spring + slack penalty)
         # =========================================================
-        H_brake = np.eye(self.n_joints) * cfg.DAMP
+        # Joint velocity regularization (damping). Per-arm: an INACTIVE (frozen)
+        # arm gets DOUBLE damping so its motion is heavily penalized and its QP
+        # solution is decoupled from the active arm's demands.
+        damp_vec = np.full(self.n_joints, cfg.DAMP)
+        if right_frozen and kin.idx_right:
+            damp_vec[kin.idx_right] = 2.0 * cfg.DAMP
+        if left_frozen and kin.idx_left:
+            damp_vec[kin.idx_left] = 2.0 * cfg.DAMP
+        H_brake = np.diag(damp_vec)
 
         # Posture / joint-limit avoidance: repulsive POTENTIAL-FIELD reference.
         # ------------------------------------------------------------------
@@ -245,7 +258,7 @@ class QPFormulator:
         # B. TASK CONSTRAINTS (Perfect Scalar Inequality CLF)
         #    e^T (J dq) + delta >= e^T xdot_ref + gamma * V(e)
         # =========================================================
-        def add_perfect_scalar_clf(ee_id, e_vec, xdot_ref_vec, slack_idx):
+        def add_perfect_scalar_clf(ee_id, e_vec, xdot_ref_vec, slack_idx, gamma):
             if ee_id is None:
                 return
             J_6D = pin.getFrameJacobian(self.model, kin.data, ee_id, pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)
@@ -266,7 +279,7 @@ class QPFormulator:
                     row_slack[slack_idx] = 1.0
                     C_stack.append(np.concatenate([row_q, row_slack]))
                     # b = e_unit^T xdot_ref + (gamma/2) ||e_w||
-                    b_stack.append(np.dot(e_unit, xdot_ref_vec) + (0.5 * self.gamma_clf * e_norm))
+                    b_stack.append(np.dot(e_unit, xdot_ref_vec) + (0.5 * gamma * e_norm))
             else:
                 # Raw (un-normalized) formulation
                 row_q = np.dot(e_w.T, J_task)
@@ -274,13 +287,15 @@ class QPFormulator:
                 row_slack[slack_idx] = 1.0
                 C_stack.append(np.concatenate([row_q, row_slack]))
                 # b = (W e)^T xdot_ref + gamma * V(e),  V(e) = 0.5 e^T W e
-                b_stack.append(np.dot(e_w, xdot_ref_vec) + 0.5 * self.gamma_clf * np.dot(e_vec, e_w))
+                b_stack.append(np.dot(e_w, xdot_ref_vec) + 0.5 * gamma * np.dot(e_vec, e_w))
 
-        # Inject per-arm CLF rows only when that arm is tracking a reference
+        # Inject per-arm CLF rows only when that arm is tracking a reference.
+        # The frozen arm uses GAMMA_MAX (gamma_r / gamma_l set above) so it holds
+        # its pose tightly and independently of the active arm.
         if right_motion or xdot_r is not None:
-            add_perfect_scalar_clf(kin.ee_id_right, e_r, v_r, 0)
+            add_perfect_scalar_clf(kin.ee_id_right, e_r, v_r, 0, gamma_r)
         if left_motion or xdot_l is not None:
-            add_perfect_scalar_clf(kin.ee_id_left, e_l, v_l, 1)
+            add_perfect_scalar_clf(kin.ee_id_left, e_l, v_l, 1, gamma_l)
 
         # =========================================================
         # C. SAFETY CONSTRAINT (SoftMin CBF collision avoidance)

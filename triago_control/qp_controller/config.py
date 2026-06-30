@@ -76,16 +76,16 @@ POSTURE_SCALE_TAU = 0.2        # s — first-order ramp time-constant for the po
 # =============================================================================
 # --- Decoupled dynamic slack weighting ---
 BASE_WEIGHT_SLACK = 25.0        # Standard slack weight (active against an obstacle)
-MAX_WEIGHT_SLACK = 60.0        # Maximum slack weight (in free space)
-INACTIVE_SLACK_FACTOR = 2.0    # The INACTIVE arm's slack weight is scaled by this (Option B):
-                               #   it holds its frozen pose more stiffly (2x), yet can still bend
-                               #   if doing so helps the active arm satisfy task + collision safety.
+MAX_WEIGHT_SLACK = 60.0        # Maximum slack weight (in free space); ALSO the fixed slack
+                               #   weight pinned on an INACTIVE (frozen) arm to decouple it.
 BETA = 0.4                     # How fast slack weights return to baseline as lambda grows
                                #   [1.0 -> 0.4: gentler curve, less abrupt swing near lambda~1]
 SLACK_FILTER_TAU = 0.15        # LPF time constant on the shadow prices feeding the slack
                                #   scheduler (smooths the noisy raw lambda -> no weight jumps)
 # --- Dynamic gamma (CLF) scheduling ---
-GAMMA_CLF_DEFAULT = 1.5        # Static / initial CLF convergence rate (Vdot <= -gamma*V)
+GAMMA_CLF_DEFAULT = 0.75       # Static / initial CLF convergence rate (Vdot <= -gamma*V).
+                               #   Set to (GAMMA_MIN+GAMMA_MAX)/2; the old 1.5 was above the
+                               #   scheduled GAMMA_MAX, which was inconsistent.
 GAMMA_MIN = 0.5                # Lower bound of the scheduled CLF gamma
 GAMMA_MAX = 1.0                # Upper bound of the scheduled CLF gamma
 BETA_GAMMA = 5.0               # How quickly gamma drops as the collision lambda grows

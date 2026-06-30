@@ -515,17 +515,15 @@ class SafetyQPController(Node):
         a_ps = dt / (cfg.POSTURE_SCALE_TAU + dt)
         self._posture_scale += a_ps * (target_scale - self._posture_scale)
         self.qp.posture_scale = self._posture_scale
-        # Inactive arm (frozen while the other is actively driven) → doubled slack.
-        inactive_arm = None
-        if self.right_frozen and not self.left_frozen:
-            inactive_arm = 'right'
-        elif self.left_frozen and not self.right_frozen:
-            inactive_arm = 'left'
+        # Cost decoupling: a frozen (inactive) arm gets fixed MAX slack, GAMMA_MAX
+        # CLF, and doubled damping inside the QP — but only when exactly that arm
+        # is frozen while the other is active (both-active keeps the dynamic
+        # coupling unchanged; both-frozen pins both, which is the idle hold).
         q_dot_safe, slack_r, slack_l, b_col, lambda_joints_total = self.qp.build_and_solve(
             self.kin, J_soft, h_soft, d_safe_dynamic,
             self.right_imposed_motion, self.left_imposed_motion,
             self.xdot_ref_right, self.xdot_ref_left, e_r, v_r, e_l, v_l, dt,
-            inactive_arm=inactive_arm)
+            right_frozen=self.right_frozen, left_frozen=self.left_frozen)
 
         self.publish_counter += 1
 
