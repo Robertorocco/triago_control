@@ -93,6 +93,13 @@ class PlotManager:
         self.ax_beliefs_bot.set_ylabel('Probability')
         self.ax_beliefs_bot.set_title('LEFT ARM (inactive)', fontsize=11, color='grey')
 
+        # Show the goal-key tick labels on BOTH subplots (sharex hides the top
+        # ones by default). Rotate slightly for readability.
+        self.ax_beliefs_top.tick_params(labelbottom=True)
+        for ax in (self.ax_beliefs_top, self.ax_beliefs_bot):
+            ax.set_xticks(range(len(self.target_keys)))
+            ax.set_xticklabels(self.target_keys, rotation=20, ha='right', fontsize=8)
+
         plt.tight_layout()
 
         # Per-arm belief snapshots (the inactive arm shows its last known state)

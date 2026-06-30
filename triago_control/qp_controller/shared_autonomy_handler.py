@@ -67,7 +67,8 @@ class SharedAutonomyHandler:
 
     def close_gripper(self, side="right", position=0.0):
         # Send a FollowJointTrajectory goal to close one gripper to `position` (rad).
-        self.node.get_logger().info(f"[GRIPPER] Closing {side} gripper to position={position:.4f} rad")
+        # (Per-command INFO log removed: it fired on every CLOSE_ command — including
+        # the open-to-0.7 resets on startup/arm-switch — and spammed the console.)
         goal_msg = FollowJointTrajectory.Goal()
         goal_msg.trajectory.joint_names = [f'gripper_{side}_finger_joint']
         point = JointTrajectoryPoint()
