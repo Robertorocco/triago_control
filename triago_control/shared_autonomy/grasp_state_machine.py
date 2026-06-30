@@ -317,6 +317,12 @@ class GraspStateMachine:
     ALIGN_POS_TOL = 0.022   # m — within ~2.2 cm of the standoff (relaxed ~10%: grasp
                             #   succeeds even from slightly looser alignment, per operator)
     ALIGN_ANG_TOL = 0.143   # rad — approach-axis within ~8.2° of the goal (relaxed ~10%)
+    # Lateral centering tolerance: the perpendicular distance from the cylinder
+    # axis to the gripper's approach line must be within this. If not, the fingers
+    # will hit one side of the cylinder and knock it over during the blind insertion.
+    # Physically: gripper finger opening is ~7 cm, cylinder diameter is ~4 cm, so
+    # up to ~1.5 cm lateral error still lets both fingers bracket the cylinder.
+    ALIGN_CENTERING_TOL = 0.012   # m — must be centered within 12 mm of the cylinder axis
     ALIGN_TIMEOUT_S = 12.0  # if alignment doesn't converge in this time, abort
                             #   (raised 6 -> 12s: the precise centring before the blind
                             #    insertion can be slow, and a premature abort/approach is
@@ -346,13 +352,32 @@ class GraspStateMachine:
         pos_err = np.linalg.norm(inp.current_T_EE[:3, 3] - self._align_target[:3, 3])
         ang_err = np.linalg.norm(
             np.cross(inp.current_T_EE[:3, :3][:, 0], self._align_target[:3, :3][:, 0]))
+
+        # Lateral centering error: perpendicular distance from the cylinder axis
+        # to the gripper's approach line. For a side grasp the cylinder axis is
+        # vertical (world Z); the gripper approaches horizontally (local +X). The
+        # centering error is the horizontal distance between the cylinder axis and
+        # the point where the approach line would intersect the cylinder's XY plane.
+        # Geometrically: project the vector (EE → cylinder_center) onto the plane
+        # perpendicular to the approach axis, and take the component that is NOT
+        # along the vertical (the gripper's finger-opening direction doesn't matter
+        # — what matters is that the insertion line passes through the cylinder).
+        color = inp.active_goal_key.split('_')[0]
+        cyl_pos = self.cylinders[color]['pos']
+        approach_axis = self._align_target[:3, :3][:, 0]  # goal approach direction
+        ee_to_cyl = cyl_pos - inp.current_T_EE[:3, 3]
+        # Remove the component along the approach axis → what remains is the lateral offset
+        lateral_vec = ee_to_cyl - np.dot(ee_to_cyl, approach_axis) * approach_axis
+        centering_err = float(np.linalg.norm(lateral_vec))
+
         pos_ok = pos_err < self.ALIGN_POS_TOL
         ang_ok = ang_err < self.ALIGN_ANG_TOL
+        centered_ok = centering_err < self.ALIGN_CENTERING_TOL
 
-        if pos_ok and ang_ok:
+        if pos_ok and ang_ok and centered_ok:
             log_lines.append(
-                ("info", f"[GRASP] Alignment converged (pos={pos_err:.4f}m, ang={ang_err:.4f}). "
-                         f"Starting straight-line approach."))
+                ("info", f"[GRASP] Alignment converged (pos={pos_err:.4f}m, ang={ang_err:.4f}, "
+                         f"centering={centering_err*1000:.1f}mm). Starting straight-line approach."))
             T_base = self._align_target.copy()
             R_base = T_base[:3, :3]
             approach_axis = R_base[:, 0]
@@ -385,6 +410,10 @@ class GraspStateMachine:
             if not ang_ok:
                 reasons.append(
                     f"APPROACH-AXIS not aligned (ang_err={ang_err:.4f}, need < {self.ALIGN_ANG_TOL})")
+            if not centered_ok:
+                reasons.append(
+                    f"LATERAL CENTERING off (centering_err={centering_err*1000:.1f}mm, "
+                    f"need < {self.ALIGN_CENTERING_TOL*1000:.0f}mm — fingers would miss the cylinder)")
             log_lines.append(
                 ("warn", f"[GRASP FAILED] Alignment did not converge within {self.ALIGN_TIMEOUT_S:.0f}s — "
                          f"aborting. Reason(s): {'; '.join(reasons)}. Backing out along the reverse "
