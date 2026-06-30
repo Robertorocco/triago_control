@@ -297,6 +297,10 @@ class SharedControlNode(Node):
         # (grasp approach/close/lift). teleop_triago_clutch freezes and re-anchors
         # on the falling edge so teleop resumes cleanly from the post-grasp pose.
         self.pub_grasp_active = self.create_publisher(Bool, '/shared_autonomy/grasp_active', 10)
+        # Publish the active arm name so teleop_triago_clutch and the force manager
+        # can follow the arm switch (they need to know which /arm_*/cartesian_reference
+        # to publish/subscribe and which EE slice to read from /qp_debug/ee_real).
+        self.pub_active_arm = self.create_publisher(String, '/shared_autonomy/active_arm', 10)
 
         # Active goal pose + confidence for the haptic position virtual fixture.
         # [x, y, z, roll, pitch, yaw, confidence] in base_footprint.
@@ -384,6 +388,7 @@ class SharedControlNode(Node):
             self.active_arm = new_arm
             self.get_logger().info(
                 f"\033[95m[ARM SWITCH] Double-click detected → active arm: {new_arm.upper()}\033[0m")
+            self.pub_active_arm.publish(String(data=new_arm))
             self.belief_estimator.reset()
             self._ou_bias = np.zeros(6)
             self._belief_warmup_start = time.time()
@@ -975,6 +980,9 @@ class SharedControlNode(Node):
         grasp_exec = self.grasp_sm.state in (
             "GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT", "RELEASE_LIFT", "ABORT_LIFT")
         self.pub_grasp_active.publish(Bool(data=grasp_exec))
+        # Latched active-arm state: late-joining nodes (teleop, force manager)
+        # always know which arm is being controlled.
+        self.pub_active_arm.publish(String(data=self.active_arm))
 
         # Active goal pose + confidence for the haptic position virtual fixture.
         # Confidence is forced to 0 during grasp execution so the fixture releases
