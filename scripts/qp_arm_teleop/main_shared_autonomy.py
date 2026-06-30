@@ -257,6 +257,7 @@ class SharedControlNode(Node):
         self.DOUBLE_CLICK_WINDOW = 0.5  # seconds to detect the second press
         self._btn_first_press_time = None
         self._btn_timer = None
+        self._btn_last_state = False  # for rising-edge detection (raw topic is level, not edge)
 
         # --- Grasp contact confirmation ---
         # Signed gripper<->cylinder collision distance published by teleop.
@@ -361,12 +362,16 @@ class SharedControlNode(Node):
         Single press (no second press within 0.5 s) → grasp trigger (original).
         Double press (two presses within 0.5 s)     → arm switch (left ↔ right).
 
-        Implementation: on the first rising edge, record the time. On the second
-        rising edge within DOUBLE_CLICK_WINDOW, switch the arm. A ROS timer fires
-        after the window to commit the single-press action if no second press came.
+        The virtuose/button_left topic is a LEVEL signal (True while held, False
+        while released), published at 150 Hz. We detect the RISING EDGE ourselves
+        (transition False→True) so one physical press is registered exactly once.
         """
-        if not msg.data:
-            return  # only rising edge
+        # --- Rising-edge detection (level → edge) ---
+        current = bool(msg.data)
+        rising = current and not self._btn_last_state
+        self._btn_last_state = current
+        if not rising:
+            return
 
         now = time.time()
         if self._btn_first_press_time is not None and (now - self._btn_first_press_time) < self.DOUBLE_CLICK_WINDOW:
