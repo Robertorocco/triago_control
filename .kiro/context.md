@@ -503,6 +503,8 @@ from triago_control.shared_autonomy.belief_estimator import BeliefEstimator
 
 4. **Controller switching**: TRIAGo requires explicit activation of velocity controllers (`arm_right_joint_space_controller_vel`, `arm_left_joint_space_controller_vel`) and deactivation of conflicting trajectory controllers before the QP can command the arms.
 
+5. **Bimanual inactive-arm handling (Option B, 2026-06-29)**: the QP-computed velocity is ALWAYS sent to TSID for BOTH arms — the old zero-overwrite for a reference-less arm is removed (it discarded the inactive arm's collision-avoidance motion, causing silent inter-arm penetration). The INACTIVE arm (the one not currently teleoperated) is FROZEN at its current EE pose via a zero-velocity CLF (`_freeze_arm` in `main_qp_controller`, triggered on `/shared_autonomy/active_arm` switch, on watchdog-stale reference, and once at startup for both arms). Its slack weight is doubled (`INACTIVE_SLACK_FACTOR=2.0`) so it holds position firmly yet can still bend if that helps the active arm satisfy task + CBF safety. `build_and_solve(..., inactive_arm=...)` applies the doubling.
+
 ---
 
 ## 9. Mathematical Core (QP-CLF-CBF)

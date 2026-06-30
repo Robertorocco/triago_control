@@ -77,6 +77,9 @@ POSTURE_SCALE_TAU = 0.2        # s — first-order ramp time-constant for the po
 # --- Decoupled dynamic slack weighting ---
 BASE_WEIGHT_SLACK = 25.0        # Standard slack weight (active against an obstacle)
 MAX_WEIGHT_SLACK = 60.0        # Maximum slack weight (in free space)
+INACTIVE_SLACK_FACTOR = 2.0    # The INACTIVE arm's slack weight is scaled by this (Option B):
+                               #   it holds its frozen pose more stiffly (2x), yet can still bend
+                               #   if doing so helps the active arm satisfy task + collision safety.
 BETA = 0.4                     # How fast slack weights return to baseline as lambda grows
                                #   [1.0 -> 0.4: gentler curve, less abrupt swing near lambda~1]
 SLACK_FILTER_TAU = 0.15        # LPF time constant on the shadow prices feeding the slack

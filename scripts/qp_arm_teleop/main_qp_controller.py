@@ -151,6 +151,16 @@ class SafetyQPController(Node):
         self._posture_scale = 1.0
         self.create_subscription(Bool, '/shared_autonomy/grasp_active', self.grasp_active_cb, 10)
 
+        # Active-arm tracking (Option B bimanual): the INACTIVE arm is frozen at
+        # its current EE pose (held by a zero-velocity CLF) with double slack
+        # weight, but is NOT zeroed — its QP-computed motion is ALWAYS sent to
+        # TSID so it can bend to help the active arm avoid collisions.
+        self.active_arm = 'right'
+        self.right_frozen = False
+        self.left_frozen = False
+        self._refs_initialized = False
+        self.create_subscription(String, '/shared_autonomy/active_arm', self.active_arm_cb, 10)
+
         # Services for controller switching
         self.switch_srv = self.create_client(SwitchController, '/controller_manager/switch_controller')
         self.list_srv = self.create_client(ListControllers, '/controller_manager/list_controllers')
@@ -320,8 +330,51 @@ class SafetyQPController(Node):
         """Tracks whether shared autonomy is autonomously driving a grasp/lift."""
         self.grasp_active = bool(msg.data)
 
+    def _freeze_arm(self, side):
+        """Snapshot one arm's CURRENT EE pose as its held reference (zero velocity).
+
+        Used when an arm becomes inactive (arm switch / stale teleop). The arm
+        keeps imposed_motion=True so its CLF holds it at this pose; with the
+        doubled inactive slack weight it stays put unless yielding helps the
+        active arm. Requires up-to-date FK (call after kinematics update).
+        """
+        if self.kin.current_q is None:
+            return
+        ee_id = self.kin.ee_id_right if side == 'right' else self.kin.ee_id_left
+        if ee_id is None:
+            return
+        pos = np.array(self.kin.data.oMf[ee_id].translation)
+        rpy = pin.rpy.matrixToRpy(self.kin.data.oMf[ee_id].rotation)
+        if side == 'right':
+            self.x_ref_right = pos; self.rpy_ref_right = rpy
+            self.xdot_ref_right = np.zeros(3); self.w_ref_right = np.zeros(3)
+            self.right_imposed_motion = True
+            self.last_right_msg_time = time.time()
+            self.right_frozen = True
+        else:
+            self.x_ref_left = pos; self.rpy_ref_left = rpy
+            self.xdot_ref_left = np.zeros(3); self.w_ref_left = np.zeros(3)
+            self.left_imposed_motion = True
+            self.last_left_msg_time = time.time()
+            self.left_frozen = True
+
+    def active_arm_cb(self, msg):
+        """Arm switch: freeze the now-inactive arm at its current pose."""
+        new_arm = msg.data
+        if new_arm not in ('right', 'left') or new_arm == self.active_arm:
+            return
+        old_arm = self.active_arm
+        self.active_arm = new_arm
+        self._freeze_arm(old_arm)            # hold the arm we just left
+        if new_arm == 'right':
+            self.right_frozen = False        # the newly-active arm tracks teleop again
+        else:
+            self.left_frozen = False
+        self.get_logger().info(f"[ARM] Active arm = {new_arm.upper()}; froze {old_arm.upper()} at current pose.")
+
     def ref_cb_right(self, msg):
         # Right-arm cartesian reference (12+ float protocol, 6-float fallback).
+        # A fresh reference means this arm is being actively driven -> un-freeze it.
         if len(msg.data) >= 12:
             self.x_ref_right = np.array(msg.data[0:3])
             self.rpy_ref_right = np.array(msg.data[3:6])
@@ -329,15 +382,18 @@ class SafetyQPController(Node):
             self.w_ref_right = np.array(msg.data[9:12])
             self.task_dim_right = msg.data[12] if len(msg.data) >= 13 else 6.0
             self.right_imposed_motion = True
+            self.right_frozen = False
             self.last_right_msg_time = time.time()
         elif len(msg.data) >= 6:
             self.x_ref_right = np.array(msg.data[0:3])
             self.xdot_ref_right = np.array(msg.data[3:6])
             self.right_imposed_motion = True
+            self.right_frozen = False
             self.last_right_msg_time = time.time()
 
     def ref_cb_left(self, msg):
         # Left-arm cartesian reference (12+ float protocol, 6-float fallback).
+        # A fresh reference means this arm is being actively driven -> un-freeze it.
         if len(msg.data) >= 12:
             self.x_ref_left = np.array(msg.data[0:3])
             self.rpy_ref_left = np.array(msg.data[3:6])
@@ -345,11 +401,13 @@ class SafetyQPController(Node):
             self.w_ref_left = np.array(msg.data[9:12])
             self.task_dim_left = msg.data[12] if len(msg.data) >= 13 else 6.0
             self.left_imposed_motion = True
+            self.left_frozen = False
             self.last_left_msg_time = time.time()
         elif len(msg.data) >= 6:
             self.x_ref_left = np.array(msg.data[0:3])
             self.xdot_ref_left = np.array(msg.data[3:6])
             self.left_imposed_motion = True
+            self.left_frozen = False
             self.last_left_msg_time = time.time()
 
     # =====================================================================
@@ -391,18 +449,29 @@ class SafetyQPController(Node):
         if self.kin.current_q is None:
             return
 
-        # --- Watchdog timeout (freeze an arm if its reference went stale) ---
-        if self.left_imposed_motion and (time.time() - self.last_left_msg_time) > cfg.WATCHDOG_TIMEOUT:
-            self.left_imposed_motion = False
-            print("[Safety] Watchdog Timeout: Left motion stopped.")
-        if self.right_imposed_motion and (time.time() - self.last_right_msg_time) > cfg.WATCHDOG_TIMEOUT:
-            self.right_imposed_motion = False
-            print("[Safety] Watchdog Timeout: Right motion stopped.")
+        # --- Watchdog: a stale-reference arm is FROZEN at its current pose (held
+        # by a zero-velocity CLF) rather than going limp. Option B keeps it under
+        # QP control so it can still bend to help the active arm avoid collisions.
+        if self.right_imposed_motion and not self.right_frozen \
+                and (time.time() - self.last_right_msg_time) > cfg.WATCHDOG_TIMEOUT:
+            self._freeze_arm('right')
+            print("[Safety] Watchdog: Right reference stale -> frozen at current pose.")
+        if self.left_imposed_motion and not self.left_frozen \
+                and (time.time() - self.last_left_msg_time) > cfg.WATCHDOG_TIMEOUT:
+            self._freeze_arm('left')
+            print("[Safety] Watchdog: Left reference stale -> frozen at current pose.")
 
         # --- 0. Kinematics + geometry refresh ---
         self.kin.update_kinematics()
         self.kin.debug_interrogate()
         self.col.update_geometry(self.kin.current_q)
+
+        # One-time: freeze BOTH arms at their startup pose so every arm always has
+        # a holding CLF (no limp/uncontrolled arm). Teleop overrides the active one.
+        if not self._refs_initialized:
+            self._freeze_arm('right')
+            self._freeze_arm('left')
+            self._refs_initialized = True
 
         # --- Deferred attachment (needs fresh oMi / oMg) ---
         if self.hri.pending_attach is not None:
@@ -446,10 +515,17 @@ class SafetyQPController(Node):
         a_ps = dt / (cfg.POSTURE_SCALE_TAU + dt)
         self._posture_scale += a_ps * (target_scale - self._posture_scale)
         self.qp.posture_scale = self._posture_scale
+        # Inactive arm (frozen while the other is actively driven) → doubled slack.
+        inactive_arm = None
+        if self.right_frozen and not self.left_frozen:
+            inactive_arm = 'right'
+        elif self.left_frozen and not self.right_frozen:
+            inactive_arm = 'left'
         q_dot_safe, slack_r, slack_l, b_col, lambda_joints_total = self.qp.build_and_solve(
             self.kin, J_soft, h_soft, d_safe_dynamic,
             self.right_imposed_motion, self.left_imposed_motion,
-            self.xdot_ref_right, self.xdot_ref_left, e_r, v_r, e_l, v_l, dt)
+            self.xdot_ref_right, self.xdot_ref_left, e_r, v_r, e_l, v_l, dt,
+            inactive_arm=inactive_arm)
 
         self.publish_counter += 1
 
@@ -459,15 +535,21 @@ class SafetyQPController(Node):
                                     J_soft, h_soft, d_safe_dynamic, abs_min_distance,
                                     qdot_err_14, xdot_err_6)
 
-        # --- 5. Command publishing + hardware override ---
+        # --- 5. Command publishing ---
+        # Option B: ALWAYS send the QP-computed velocity to TSID for BOTH arms.
+        # The old per-arm zero-overwrite (when an arm had no fresh reference) is
+        # removed: it discarded the QP's collision-avoidance motion for the
+        # inactive arm, which let the two arms silently inter-penetrate. The
+        # inactive arm is instead held by its frozen-pose CLF (+ doubled slack),
+        # so its commanded motion is meaningful and safe.
         cmd_data_r = [0.0] * 7
         cmd_data_l = [0.0] * 7
         if self.active_controller_mode:
             if self.kin.idx_right:
-                cmd_data_r = q_dot_safe[self.kin.idx_right].tolist() if self.right_imposed_motion else [0.0] * len(self.kin.idx_right)
+                cmd_data_r = q_dot_safe[self.kin.idx_right].tolist()
                 self.pub_right.publish(Float64MultiArray(data=cmd_data_r))
             if self.kin.idx_left:
-                cmd_data_l = q_dot_safe[self.kin.idx_left].tolist() if self.left_imposed_motion else [0.0] * len(self.kin.idx_left)
+                cmd_data_l = q_dot_safe[self.kin.idx_left].tolist()
                 self.pub_left.publish(Float64MultiArray(data=cmd_data_l))
 
         # Save the exact command sent to hardware for next tick's tracking-error math

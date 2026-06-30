@@ -166,7 +166,7 @@ class QPFormulator:
 
     def build_and_solve(self, kin, J_soft, h_soft, d_safe_dynamic,
                         right_motion, left_motion, xdot_r, xdot_l,
-                        e_r, v_r, e_l, v_l, dt):
+                        e_r, v_r, e_l, v_l, dt, inactive_arm=None):
         """
         Build and solve the CLF-CBF-QP for this tick.
 
@@ -177,6 +177,13 @@ class QPFormulator:
 
         # --- Adaptive scheduling from previous loop's shadow prices ---
         weight_slack_r, weight_slack_l = self._schedule_weights(dt)
+        # Option B: the INACTIVE arm holds its frozen pose more stiffly — double
+        # its slack weight so it stays put unless yielding genuinely helps the
+        # active arm (the QP can still let it bend, just at a higher cost).
+        if inactive_arm == 'right':
+            weight_slack_r *= cfg.INACTIVE_SLACK_FACTOR
+        elif inactive_arm == 'left':
+            weight_slack_l *= cfg.INACTIVE_SLACK_FACTOR
         # Representative slack weight for telemetry (average of both arms)
         self.weight_slack = (weight_slack_r + weight_slack_l) / 2.0
 
