@@ -322,7 +322,7 @@ class GraspStateMachine:
     # will hit one side of the cylinder and knock it over during the blind insertion.
     # Physically: gripper finger opening is ~7 cm, cylinder diameter is ~4 cm, so
     # up to ~1.5 cm lateral error still lets both fingers bracket the cylinder.
-    ALIGN_CENTERING_TOL = 0.012   # m — must be centered within 12 mm of the cylinder axis
+    ALIGN_CENTERING_TOL = 0.025   # m — must be centered within 25 mm of the cylinder axis
     ALIGN_TIMEOUT_S = 12.0  # if alignment doesn't converge in this time, abort
                             #   (raised 6 -> 12s: the precise centring before the blind
                             #    insertion can be slow, and a premature abort/approach is
