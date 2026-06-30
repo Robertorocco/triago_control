@@ -216,6 +216,13 @@ class CollisionManager:
             for obs_id in self.workspace_obstacle_ids:
                 self.cmodel.addCollisionPair(pin.CollisionPair(obs_id, arm_id))
 
+        # 2b. Cylinder vs Cylinder: so that when BOTH grippers hold a cylinder
+        # (bimanual), the two held cylinders cannot inter-penetrate. Harmless while
+        # both rest on the table (static, far apart); becomes a real CBF pair once
+        # both are re-parented to the arm chains on grasp.
+        if hasattr(self, 'red_cyl_id') and hasattr(self, 'blue_cyl_id'):
+            self.cmodel.addCollisionPair(pin.CollisionPair(self.red_cyl_id, self.blue_cyl_id))
+
         # 3. Ground collision (HANDS ONLY: custom box + wrist), avoiding CAD finger noise
         hand_keywords = ["collision_box", "7_link"]
         for geom_id in all_arm_ids:

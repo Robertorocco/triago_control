@@ -548,9 +548,29 @@ Solver: `quadprog.solve_qp` (active-set method).
 The `main_shared_autonomy.py` node implements:
 - **Bayesian belief estimation** over a discrete goal set (with goal **exclusion** support)
 - **Local QP policy** (separate from the safety QP) for constrained intent following
-- **Grasp state machine**: SHARED_AUTONOMY → PRE_GRASP → GRASP_APPROACH → GRASP_CLOSE → LIFT → HOLDING
+- **Grasp state machine**: SHARED_AUTONOMY → PRE_GRASP → GRASP_ALIGN → GRASP_APPROACH → GRASP_CLOSE → LIFT → HOLDING (abort path: → ABORT_RETREAT)
 - **Alpha-blending** between human teleop input and autonomous policy (WIP)
 - Publishes cartesian references consumed by `main_qp_controller.py`
+
+### 11.0 Bimanual: TWO independent state machines (2026-06-29)
+
+Each arm has its OWN `GraspStateMachine` + `BeliefEstimator` + grasped-color +
+active-goal + goal_set placement context (`self._sm['right'/'left']`,
+`self._be[...]`, `self._ctx_*`). `self.grasp_sm` / `self.belief_estimator` always
+POINT at the ACTIVE arm's instance, so `timer_callback` is unchanged; the inactive
+arm's FSM/belief are simply never stepped (frozen) until reactivated.
+`_switch_active_arm(new_arm)` (called on the left-button double-click) saves the
+leaving arm's context and restores the entering arm's — so e.g. *grasp Red with
+right → switch to left → grasp Blue* works: the right FSM stays HOLDING(Red) while
+the left independently runs SHARED_AUTONOMY→grasp. Goal exclusion is the **union**
+(`_update_goal_exclusions`): a color held by EITHER arm is excluded from both arms'
+beliefs; Platform is demandable for an arm only if THAT arm holds something. The
+collision world declares a **cylinder-vs-cylinder CBF pair** so two held cylinders
+cannot inter-penetrate. The node DRIVES the switch and PUBLISHES
+`/shared_autonomy/active_arm` (it no longer subscribes to it — that self-echo was
+removed). Failed grasps (align/approach timeout) → **ABORT_RETREAT**: back out
+along the reverse approach axis (gripper open) while the cylinder CBF bypass stays
+active, then restore CBF.
 
 ### 11.1 Goal Set (5 goals)
 

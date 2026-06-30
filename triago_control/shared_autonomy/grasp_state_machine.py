@@ -175,7 +175,7 @@ class GraspStateMachine:
             "LIFT": self._lift,
             "HOLDING": self._holding,
             "RELEASE_LIFT": self._release_lift,
-            "ABORT_LIFT": self._abort_lift,
+            "ABORT_RETREAT": self._abort_lift,
         }
 
     def _transition(self, new_state):
@@ -202,7 +202,7 @@ class GraspStateMachine:
         between PRE_GRASP and SHARED_AUTONOMY is re-evaluated every tick based on
         belief + alignment.
         """
-        if self._state in ("GRASP_CLOSE", "GRASP_APPROACH", "LIFT", "HOLDING", "GRASP_ALIGN", "RELEASE_LIFT", "ABORT_LIFT"):
+        if self._state in ("GRASP_CLOSE", "GRASP_APPROACH", "LIFT", "HOLDING", "GRASP_ALIGN", "RELEASE_LIFT", "ABORT_RETREAT"):
             # GRASP_* and LIFT are pure run-to-completion phases. HOLDING is
             # special: while an object is in the gripper the PRE_GRASP branch is
             # deliberately UNREACHABLE (you cannot commit a second grasp with the
@@ -316,7 +316,10 @@ class GraspStateMachine:
     # ------------------------------------------------------------------
     ALIGN_POS_TOL = 0.02    # m — must be within 2 cm of the exact standoff
     ALIGN_ANG_TOL = 0.13    # rad — approach-axis within ~7.5° of the goal
-    ALIGN_TIMEOUT_S = 6.0   # if alignment doesn't converge in this time, abort
+    ALIGN_TIMEOUT_S = 12.0  # if alignment doesn't converge in this time, abort
+                            #   (raised 6 -> 12s: the precise centring before the blind
+                            #    insertion can be slow, and a premature abort/approach is
+                            #    what was nudging the cylinder over with the fingertips)
 
     def _grasp_align(self, inp: TickInput) -> TickOutput:
         """Drive precisely to the standoff pose before committing the blind insertion.
@@ -382,11 +385,12 @@ class GraspStateMachine:
                 reasons.append(
                     f"APPROACH-AXIS not aligned (ang_err={ang_err:.4f}, need < {self.ALIGN_ANG_TOL})")
             log_lines.append(
-                ("warn", f"[GRASP] Alignment timeout after {self.ALIGN_TIMEOUT_S:.0f}s — aborting. "
-                         f"Reason(s): {'; '.join(reasons)}."))
+                ("warn", f"[GRASP FAILED] Alignment did not converge within {self.ALIGN_TIMEOUT_S:.0f}s — "
+                         f"aborting. Reason(s): {'; '.join(reasons)}. Backing out along the reverse "
+                         f"approach axis and restoring CBF."))
             self._abort_lift_start = None
             self._abort_lift_color = color
-            self._transition("ABORT_LIFT")
+            self._transition("ABORT_RETREAT")
             self._align_start = None
             return TickOutput(
                 target_twist=np.zeros(6),
@@ -462,11 +466,13 @@ class GraspStateMachine:
 
         if time.time() - self.grasp_timer > self.GRASP_APPROACH_TIMEOUT_S:
             log_lines.append(
-                ("warn", f"[GRASP] Approach timeout — contact_d={contact_d:.4f}m "
-                         f"(never reached {self.GRASP_CONTACT_DEPTH}m). Aborting grasp."))
+                ("warn", f"[GRASP FAILED] Approach timed out after {self.GRASP_APPROACH_TIMEOUT_S:.0f}s — "
+                         f"contact depth {contact_d:.4f}m never reached the {self.GRASP_CONTACT_DEPTH}m "
+                         f"threshold (cylinder likely not seated between the fingers). Backing out along "
+                         f"the reverse approach axis and restoring CBF."))
             self._abort_lift_start = None
             self._abort_lift_color = color
-            self._transition("ABORT_LIFT")
+            self._transition("ABORT_RETREAT")
             return TickOutput(
                 target_twist=np.zeros(6),
                 new_state=self._state,
@@ -687,32 +693,37 @@ class GraspStateMachine:
         )
 
     # ------------------------------------------------------------------
-    # PHASE 7: ABORT_LIFT (failed grasp retreat — lift clear before restoring CBF)
+    # PHASE 7: ABORT_RETREAT (failed grasp — back out the way we came in)
     # ------------------------------------------------------------------
     def _abort_lift(self, inp: TickInput) -> TickOutput:
         """Retreat after a failed grasp (approach/align timeout).
 
-        The gripper is still overlapping the cylinder (CBF bypass active). We
-        lift vertically for LIFT_DURATION with the gripper OPEN, moving clear of
-        the object, then restore the CBF (ignore_cbf="None") and return to
-        SHARED_AUTONOMY. The bypass stays active DURING the lift so no barrier
-        spike occurs while overlapping.
+        This is the EXACT OPPOSITE of the approach: the gripper backs out along
+        the NEGATIVE approach axis (its local +X), retracing the insertion path
+        away from the cylinder, with the fingers OPEN. The gripper<->cylinder CBF
+        bypass stays active DURING the retreat (so no barrier spike while still
+        overlapping); once clear, the CBF is restored (ignore_cbf="None") and
+        control returns to SHARED_AUTONOMY.
         """
-        self._transition("ABORT_LIFT")
+        self._transition("ABORT_RETREAT")
         log_lines = []
 
         if self._abort_lift_start is None:
             self._abort_lift_start = time.time()
             log_lines.append(
-                ("info", f"[ABORT-LIFT] Moving ~{self.LIFT_HEIGHT * 100:.0f} cm clear of the "
-                         f"cylinder (gripper open) before restoring CBF."))
+                ("info", f"[ABORT-RETREAT] Backing out ~{self.LIFT_HEIGHT * 100:.0f} cm along the "
+                         f"reverse approach axis (gripper open) before restoring CBF."))
 
         elapsed = time.time() - self._abort_lift_start
         color = self._abort_lift_color or inp.active_goal_key.split('_')[0]
         cbf_name = self.cylinders[color]['cbf_name'] if color in self.cylinders else ""
 
         if elapsed < self.LIFT_DURATION:
-            target_twist = np.array([0.0, 0.0, self.LIFT_VELOCITY, 0.0, 0.0, 0.0])
+            # Reverse approach: retreat along the gripper's local -X (approach axis
+            # points +X into the object, so backing out is -X) in world frame.
+            approach_axis = inp.current_T_EE[:3, :3][:, 0]
+            v_lin = -self.LIFT_VELOCITY * approach_axis
+            target_twist = np.array([v_lin[0], v_lin[1], v_lin[2], 0.0, 0.0, 0.0])
             return TickOutput(
                 target_twist=target_twist,
                 new_state=self._state,
@@ -721,11 +732,11 @@ class GraspStateMachine:
                 log_lines=log_lines,
             )
 
-        # Lift complete → safe to restore CBF and hand control back.
+        # Retreat complete → safe to restore CBF and hand control back.
         self._transition("SHARED_AUTONOMY")
         self._abort_lift_start = None
         self._abort_lift_color = None
-        log_lines.append(("info", "[ABORT-LIFT] Clear. CBF restored. Teleoperation resumed."))
+        log_lines.append(("info", "[ABORT-RETREAT] Clear of the cylinder. CBF restored. Teleoperation resumed."))
         return TickOutput(
             target_twist=np.zeros(6),
             new_state=self._state,

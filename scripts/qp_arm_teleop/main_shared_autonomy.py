@@ -182,6 +182,29 @@ class SharedControlNode(Node):
         # (e.g. arming the placement goal) exactly once.
         self._prev_sm_state = self.grasp_sm.state
 
+        # --- Per-arm state: TWO independent state machines -------------------
+        # One GraspStateMachine + BeliefEstimator PER ARM. self.grasp_sm and
+        # self.belief_estimator always POINT at the ACTIVE arm's instance, so the
+        # rest of timer_callback is unchanged; the inactive arm's FSM/belief are
+        # simply never stepped (their state is FROZEN) until that arm is
+        # reactivated. Scalar context (grasped color, active goal, goal_set
+        # placement bookkeeping) is saved/restored per arm on switch.
+        self._sm = {
+            'right': self.grasp_sm,
+            'left': GraspStateMachine(
+                cylinders=self.goal_set.cylinders,
+                initial_state="SHARED_AUTONOMY", debug=True),
+        }
+        self._be = {
+            'right': self.belief_estimator,
+            'left': BeliefEstimator(
+                target_keys=self.target_keys, W=self.W, beta=0.04, ema_alpha=0.995),
+        }
+        self._be['left'].set_excluded_goals({self.goal_set.PLATFORM_KEY})
+        self._ctx_grasped = {'right': None, 'left': None}
+        self._ctx_active_goal = {'right': self.active_goal_key, 'left': self.active_goal_key}
+        self._ctx_goalset = {'right': (None, None, 0.0), 'left': (None, None, 0.0)}
+
         # --- Plot Manager (delegated to PlotManager) ---
         # Imported lazily here (after plt.ion() is implicitly handled inside
         # PlotManager) to keep the import block above focused on ROS/math deps.
@@ -193,9 +216,10 @@ class SharedControlNode(Node):
             freq_window_s=self.freq_window_s,
         )
 
-        # --- NEW SUBSCRIBER: Toggle active arm via Haption Button mapping ---
-        self.sub_active_arm = self.create_subscription(
-            String, '/shared_autonomy/active_arm', self.active_arm_callback, 10)
+        # NOTE: this node DRIVES the arm switch itself (double-click on the left
+        # button → _switch_active_arm) and PUBLISHES /shared_autonomy/active_arm
+        # for the other nodes (teleop, force manager, QP). It does NOT subscribe
+        # to that topic (no self-echo loop, no duplicate switch logic).
 
         # --- Velocity Limits & Smooth Saturation Parameters ---
         self.v_max_lin = 0.1
@@ -387,14 +411,7 @@ class SharedControlNode(Node):
                 self._btn_timer.cancel()
                 self._btn_timer = None
             new_arm = 'left' if self.active_arm == 'right' else 'right'
-            self.active_arm = new_arm
-            self.get_logger().info(
-                f"\033[95m[ARM SWITCH] Double-click detected → active arm: {new_arm.upper()}\033[0m")
-            self.pub_active_arm.publish(String(data=new_arm))
-            self.belief_estimator.reset()
-            self._ou_bias = np.zeros(6)
-            self._belief_warmup_start = time.time()
-            self.plot_manager.push_arm_switch(new_arm)
+            self._switch_active_arm(new_arm)
         else:
             # --- FIRST PRESS: start the window ---
             self._btn_first_press_time = now
@@ -443,8 +460,7 @@ class SharedControlNode(Node):
         """
         self.grasped_color = color.capitalize()
         self.goal_set.set_grasped(color, self.current_T_EE)
-        self.belief_estimator.set_excluded_goals(
-            {f"{self.grasped_color}_Top", f"{self.grasped_color}_Side"})
+        self._update_goal_exclusions()
         if self.POLICY_BELIEF_TEST:
             with self._test_goal_lock:
                 self.test_goal_key = self.goal_set.PLATFORM_KEY
@@ -495,11 +511,13 @@ class SharedControlNode(Node):
         self.grasp_sm._lift_start_time = None
         self.grasp_sm._holding_entered = False
 
-        # Reset goal availability: Platform off (empty gripper), cylinders on.
+        # Reset goal availability via the UNION rule (accounts for the OTHER arm
+        # possibly still holding a cylinder): clear THIS arm's grasp, then re-derive
+        # exclusions for both arms.
         prev = self.grasped_color
-        self.belief_estimator.set_excluded_goals({self.goal_set.PLATFORM_KEY})
         self.goal_set.clear_grasped()
         self.grasped_color = None
+        self._update_goal_exclusions()
         # Restart the belief warm-up so the system re-acquires intent gently
         # (looks for the user's twist) instead of instantly locking a goal and
         # yanking the device right after release.
@@ -645,15 +663,65 @@ class SharedControlNode(Node):
         msg_ee.data = ee_array
         self.pub_ee_policy.publish(msg_ee)
 
-    def active_arm_callback(self, msg):
-        """Switches the actively controlled arm (left/right) when the user presses the haption button."""
-        if msg.data in ['right', 'left'] and self.active_arm != msg.data:
-            self.active_arm = msg.data
-            self.get_logger().info(f"Active Arm switched to: {self.active_arm.upper()}")
-            # Reset belief and OU bias to avoid jumps across the arm switch.
-            self.belief_estimator.reset()
-            self._ou_bias = np.zeros(6)
-            self._belief_warmup_start = time.time()  # re-explore after arm switch
+    def _arm_grasped(self, arm):
+        """Held color for an arm ('Red'/'Blue'/None) — active arm reads live, the
+        other reads its saved context."""
+        return self.grasped_color if arm == self.active_arm else self._ctx_grasped[arm]
+
+    def _update_goal_exclusions(self):
+        """UNION goal exclusions applied to BOTH arms' belief estimators.
+
+        A cylinder held by EITHER arm is un-graspable by both (its Top/Side goals
+        excluded everywhere). The Platform placement goal is demandable for an arm
+        only if THAT arm is currently holding something.
+        """
+        held = set()
+        for a in ('right', 'left'):
+            c = self._arm_grasped(a)
+            if c:
+                held.add(c)
+        for arm in ('right', 'left'):
+            excl = set()
+            for color in held:
+                excl.add(f"{color}_Top")
+                excl.add(f"{color}_Side")
+            if not self._arm_grasped(arm):
+                excl.add(self.goal_set.PLATFORM_KEY)
+            self._be[arm].set_excluded_goals(excl)
+
+    def _switch_active_arm(self, new_arm):
+        """Swap the active arm's context so each hand is an INDEPENDENT state
+        machine; the leaving arm's FSM/belief/grasped state is frozen and the
+        entering arm's is restored exactly where it was left.
+        """
+        if new_arm not in ('right', 'left') or new_arm == self.active_arm:
+            return
+        old = self.active_arm
+        # 1. Save the leaving arm's scalar + goal_set placement context.
+        self._ctx_grasped[old] = self.grasped_color
+        self._ctx_active_goal[old] = self.active_goal_key
+        self._ctx_goalset[old] = (self.goal_set.grasped_color,
+                                   self.goal_set.grasped_axis_local,
+                                   self.goal_set.grasped_z_offset)
+        # 2. Activate the new arm: re-point at its FSM/belief, restore its context.
+        self.active_arm = new_arm
+        self.grasp_sm = self._sm[new_arm]
+        self.belief_estimator = self._be[new_arm]
+        self.grasped_color = self._ctx_grasped[new_arm]
+        self.active_goal_key = self._ctx_active_goal[new_arm]
+        gc, ga, gz = self._ctx_goalset[new_arm]
+        self.goal_set.grasped_color = gc
+        self.goal_set.grasped_axis_local = ga
+        self.goal_set.grasped_z_offset = gz
+        self._prev_sm_state = self.grasp_sm.state
+        self._belief_warmup_start = time.time()
+        # 3. Notify the other nodes + the dual belief plot. Belief is NOT reset:
+        # each arm keeps (and resumes from) its own frozen belief.
+        self.pub_active_arm.publish(String(data=new_arm))
+        self.plot_manager.push_arm_switch(new_arm)
+        self.get_logger().info(
+            f"\033[95m[ARM SWITCH] → {new_arm.upper()} | state={self.grasp_sm.state} "
+            f"| holding={self.grasped_color}\033[0m")
 
     def robot_state_callback(self, msg):
         """Extracts EE pose dynamically based on the active arm.
@@ -711,7 +779,7 @@ class SharedControlNode(Node):
         # HOLDING is intentionally NOT here: it drives toward goals via the QP and
         # therefore needs fresh collision data, like SHARED_AUTONOMY / PRE_GRASP.
         in_grasp_state = self.grasp_sm.state in (
-            "PRE_GRASP", "GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT", "RELEASE_LIFT", "ABORT_LIFT")
+            "PRE_GRASP", "GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT", "RELEASE_LIFT", "ABORT_RETREAT")
 
         if not in_grasp_state:
             if self.J_c is None or self.h_c is None:
@@ -811,7 +879,7 @@ class SharedControlNode(Node):
             # twist is zeroed, and the belief should stay FROZEN until the grasp
             # ends — otherwise the distribution evolves on meaningless data.
             grasp_exec_now = self.grasp_sm.state in (
-                "GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT", "RELEASE_LIFT", "ABORT_LIFT")
+                "GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT", "RELEASE_LIFT", "ABORT_RETREAT")
             # Falling edge (grasp just finished) -> restart the warm-up so the
             # post-grasp navigation does not instantly lock onto a goal.
             if self._prev_grasp_exec and not grasp_exec_now:
@@ -916,7 +984,7 @@ class SharedControlNode(Node):
         # The Haption input is disconnected: the grasp state machine drives the
         # arm autonomously through approach, close and lift. Teleoperation
         # resumes automatically once HOLDING is reached.
-        if self.grasp_sm.state in ("GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT", "RELEASE_LIFT", "ABORT_LIFT"):
+        if self.grasp_sm.state in ("GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT", "RELEASE_LIFT", "ABORT_RETREAT"):
             self.current_v_h = np.zeros(6)
 
         # --- 4. THE GRASPING STATE MACHINE (delegated) ---
@@ -991,7 +1059,7 @@ class SharedControlNode(Node):
         # During autonomous grasp execution (approach/close/lift) the node DRIVES
         # the arm directly (see section 6) and the Haption teleop must yield.
         grasp_exec = self.grasp_sm.state in (
-            "GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT", "RELEASE_LIFT", "ABORT_LIFT")
+            "GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT", "RELEASE_LIFT", "ABORT_RETREAT")
         self.pub_grasp_active.publish(Bool(data=grasp_exec))
         # Latched active-arm state: late-joining nodes (teleop, force manager)
         # always know which arm is being controlled.
