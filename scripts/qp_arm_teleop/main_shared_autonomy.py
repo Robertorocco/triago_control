@@ -830,17 +830,19 @@ class SharedControlNode(Node):
                 if not self.PREDICTION and key != self.active_goal_key:
                     continue
 
-                # Goal-manifold point resolved w.r.t. the REFERENCE pose
-                # (current_T_user, from /arm_right/cartesian_reference). In teleop
-                # the QP-CLF tracks the reference, so the reference — NOT the
-                # lagging real EE — is the robot's intended pose and the correct
-                # anchor for picking the point on the goal manifold (Side azimuth
-                # + grasp height, Top roll, Platform XY + yaw). This single
-                # resolution owns the sticky orientation/azimuth memory
-                # (update_memory=True) and is shared by BOTH policies below, so the
-                # robot and the haptic guidance always aim at the SAME point.
+                # Goal-manifold point resolved w.r.t. the REAL ROBOT POSE
+                # (current_T_EE). The EE is always physically valid (constrained by
+                # the QP-CLF-CBF) and moves slowly — unlike the reference, which can
+                # fly through obstacles and pull the manifold point into unreachable
+                # configurations. Anchoring the goal at the EE means the policy
+                # always asks for a physically reachable next step, and the haptic
+                # guidance (F_guide) renders a force that corresponds to an
+                # achievable EE motion. This single resolution owns the sticky
+                # orientation/azimuth memory (update_memory=True) and is shared by
+                # BOTH policies below, so the robot and the haptic guidance always
+                # aim at the SAME point.
                 # Test mode: current_T_user == current_T_EE → identical to before.
-                T_goal = self.goal_set.get_dynamic_goal_pose(self.current_T_user, key)
+                T_goal = self.goal_set.get_dynamic_goal_pose(self.current_T_EE, key)
 
                 # EE policy: velocity FROM the real EE toward that goal (commands
                 # the robot in test/grasp mode, feeds pi_max and the green gripper).
@@ -916,9 +918,9 @@ class SharedControlNode(Node):
                     if key in excluded:
                         continue
                     T_g = self.goal_set.get_dynamic_goal_pose(
-                        self.current_T_user, key, update_memory=False)
+                        self.current_T_EE, key, update_memory=False)
                     pos_costs[key] = float(np.sum(
-                        (self.current_T_user[:3, 3] - T_g[:3, 3]) ** 2))
+                        (self.current_T_EE[:3, 3] - T_g[:3, 3]) ** 2))
                 self.belief_estimator.update(
                     self.current_v_h, user_policies,
                     gain=engagement * warmup, pos_costs=pos_costs)
@@ -958,7 +960,7 @@ class SharedControlNode(Node):
         # update_memory=False: the policy loop already committed the sticky choice
         # for this key this tick, so this only reads it.
         T_active_goal = self.goal_set.get_dynamic_goal_pose(
-            self.current_T_user, self.active_goal_key, approach_offset=0.05,
+            self.current_T_EE, self.active_goal_key, approach_offset=0.05,
             update_memory=False)
         p_EE = self.current_T_EE[:3, 3]        # REAL robot — grasp condition anchor
         p_goal = T_active_goal[:3, 3]
@@ -1384,11 +1386,11 @@ class SharedControlNode(Node):
             family = goal_key.split('_')[0]
             rgb = self.GOAL_FAMILY_RGB.get(family, (0.0, 1.0, 0.0))
             opacity = self._belief_to_opacity(beliefs.get(goal_key, 0.0))
-            # Draw each goal at the manifold point selected by the REFERENCE pose
+            # Draw each goal at the manifold point anchored at the REAL EE pose
             # (same anchor as the policy loop), so the RViz goal grippers match
             # where the system is actually steering. update_memory=False (read-only).
             T_goal = self.goal_set.get_dynamic_goal_pose(
-                self.current_T_user, goal_key, update_memory=False)
+                self.current_T_EE, goal_key, update_memory=False)
             markers.extend(
                 self.create_gripper_markers(T_goal, opacity, i, now,
                                             ns="goal_poses", rgb=rgb))
