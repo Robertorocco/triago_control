@@ -353,22 +353,35 @@ class GraspStateMachine:
         ang_err = np.linalg.norm(
             np.cross(inp.current_T_EE[:3, :3][:, 0], self._align_target[:3, :3][:, 0]))
 
-        # Lateral centering error: perpendicular distance from the cylinder axis
-        # to the gripper's approach line. For a side grasp the cylinder axis is
-        # vertical (world Z); the gripper approaches horizontally (local +X). The
-        # centering error is the horizontal distance between the cylinder axis and
-        # the point where the approach line would intersect the cylinder's XY plane.
-        # Geometrically: project the vector (EE → cylinder_center) onto the plane
-        # perpendicular to the approach axis, and take the component that is NOT
-        # along the vertical (the gripper's finger-opening direction doesn't matter
-        # — what matters is that the insertion line passes through the cylinder).
+        # Lateral centering error: the miss-distance between the gripper's
+        # INSERTION LINE (through the EE, along the approach axis) and the
+        # CYLINDER AXIS (a vertical line through the cylinder). This is what
+        # decides whether the fingers will bracket the cylinder symmetrically.
+        #
+        # IMPORTANT: the grasp HEIGHT is free (you may grasp anywhere along the
+        # cylinder) and the approach DEPTH is irrelevant here — so BOTH the
+        # along-cylinder-axis (vertical) component AND the along-approach
+        # component must be removed. Only the remaining "finger-opening" offset
+        # (perpendicular to both axes) can cause a finger to hit the cylinder.
+        # (The previous version removed only the approach component, so the
+        # EE-vs-cylinder-centre height difference inflated the error by tens of mm.)
         color = inp.active_goal_key.split('_')[0]
         cyl_pos = self.cylinders[color]['pos']
-        approach_axis = self._align_target[:3, :3][:, 0]  # goal approach direction
+        approach_axis = self._align_target[:3, :3][:, 0]   # gripper +X (unit)
+        cyl_axis = np.array([0.0, 0.0, 1.0])               # upright table cylinder
         ee_to_cyl = cyl_pos - inp.current_T_EE[:3, 3]
-        # Remove the component along the approach axis → what remains is the lateral offset
-        lateral_vec = ee_to_cyl - np.dot(ee_to_cyl, approach_axis) * approach_axis
-        centering_err = float(np.linalg.norm(lateral_vec))
+        n = np.cross(approach_axis, cyl_axis)
+        n_norm = float(np.linalg.norm(n))
+        if n_norm > 1e-6:
+            # Side grasp (approach ⊥ cylinder axis): miss-distance along the
+            # common perpendicular = the finger-opening offset. Height & depth removed.
+            n = n / n_norm
+            centering_err = float(abs(np.dot(ee_to_cyl, n)))
+        else:
+            # Top grasp (approach ∥ cylinder axis): centering is the horizontal
+            # radial distance from the EE to the axis (remove the vertical component).
+            d_perp = ee_to_cyl - np.dot(ee_to_cyl, cyl_axis) * cyl_axis
+            centering_err = float(np.linalg.norm(d_perp))
 
         pos_ok = pos_err < self.ALIGN_POS_TOL
         ang_ok = ang_err < self.ALIGN_ANG_TOL
