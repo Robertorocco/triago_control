@@ -1,7 +1,9 @@
 # AI Agent Context — triago_control
 
 > **This file is maintained by the AI agent. Do not edit manually.**
-> Last updated: 2026-06-29 (per-arm bimanual FSM/belief, cost decoupling, posture-field, arm-switch, grasp-fail ABORT_RETREAT, RViz bimanual viz, sensing-honesty note + tightened grasp gates, RViz marker topic split + periodic sweep)
+> Last updated: 2026-07-01 (per-arm SoftMin CBF split — fixes the residual inactive-arm coupling;
+> STABLE v1 checkpoint tagged 2026-06-30 at commit "STABLE v1: teleoperation + grasping backup
+> checkpoint" — roll back there if this or a later change regresses the system)
 
 ---
 
@@ -529,10 +531,58 @@ Decision vector: `x = [q_dot (nv), delta_right, delta_left]`
 
 **Constraints** (C'x >= b):
 - **CLF (task tracking)**: Perfect Scalar Inequality CLF with diagonal task weights [pos=10, ori=1]. Two formulations available (`COMPARISON_CLF` flag): normalized (unit-error) or raw.
-- **CBF (collision avoidance)**: SoftMin aggregation over K_MAX_PAIRS=60 closest collision pairs. Dynamic margin = d_safe_base + k_v_safe * ||v||.
+- **CBF (collision avoidance) — TWO INDEPENDENT PER-ARM ROWS (2026-07-01)**: replaced the single
+  combined SoftMin row with `J_soft_R·q̇ ≥ b_R` and `J_soft_L·q̇ ≥ b_L`, aggregated separately over
+  K_MAX_PAIRS=60 closest pairs that touch each arm's own geometry (`CollisionManager._arm_membership`
+  — a pair touching BOTH arms, e.g. a genuine inter-arm contact or two held cylinders, contributes
+  to BOTH rows; a pair touching only one arm's geometry vs. a static obstacle appears in ONLY that
+  arm's row). Dynamic margin = d_safe_base + k_v_safe * ||v|| (shared by both rows). Fixes the
+  spurious coupling where the inactive arm twitched/oscillated whenever the active arm neared an
+  UNRELATED obstacle — see §10.1.
 - **Joint limits**: velocity-aware position buffer (CBF-style).
 
 Solver: `quadprog.solve_qp` (active-set method).
+
+### 9.2 Per-arm SoftMin CBF split (2026-07-01) — the coupling fix
+
+**Problem** (diagnosed and confirmed correct by design review): a single scalar SoftMin CBF row
+mixes ALL active pairs via one softmax weighting. Its gradient can have nonzero columns in an
+arm's joints even when NONE of that arm's own pairs are actually close to binding — merely because
+some OTHER pair (possibly involving only the other arm) was among the K closest. The QP then
+legitimately recruits the "innocent" arm's joints to help satisfy a barrier that has nothing to do
+with it, causing oscillation / unwanted motion of the inactive arm whenever the active arm nears
+ANY obstacle (not just the other arm).
+
+**Fix**: `CollisionManager.compute_softmin_jacobian` now builds **two independent aggregates**,
+routed per-pair by `_arm_membership(geom_id, attached_object_arm)`: a geometry belongs to arm X if
+it is one of X's own capsules/gripper box, OR a cylinder X currently holds (`attached_object_arm:
+{cyl_id: 'right'/'left'}`, threaded through from `SharedAutonomyHandler`). A pair contributes to
+arm X's SoftMin iff **at least one** of its two geometries belongs to X:
+- A pair touching **both** arms (genuine inter-arm contact, or two held cylinders nearing each
+  other) contributes to **both** rows → **preserves** "arm A may yield to help arm B reduce its
+  tracking error" (the desired coupling).
+- A pair touching **only** arm A's geometry vs. a static obstacle (table, wall, un-held cylinder,
+  body) **never** appears in arm B's row → **eliminates** the spurious oscillation (the unwanted
+  coupling).
+
+`qp_formulator.build_and_solve` now takes `(J_soft_r, h_soft_r, J_soft_l, h_soft_l, ...)` and
+assembles TWO CBF rows (rows 0 and 1; joint-limit rows shifted +1 to indices 2..2+2*n_joints).
+Returns `b_col_pair = (b_col_r, b_col_l)` instead of a scalar. Two independent shadow prices are
+tracked: `qp.last_lambda_cbf_right` / `qp.last_lambda_cbf_left` (their max is kept as
+`qp.last_lambda_col` for backward-compat with the slack scheduler).
+
+**Downstream propagation** (all updated together, matching payload layouts):
+- `/qp_debug/lambda_cbf`: `Float64` → **`Float64MultiArray`** `[lambda_cbf_R, lambda_cbf_L]`.
+- `/collision_constraints`: 13 floats → **14 floats** `[b_col_r, b_col_l, J_c_cart_R(6), J_c_cart_L(6)]`.
+  Each arm's own cartesian gradient now comes from its OWN SoftMin (`J_soft_r`/`J_soft_l`)
+  instead of both projecting the same combined `J_soft` — this also fixed a latent bug where
+  `main_shared_autonomy.collision_data_callback` read the SAME `b_col`/gradient regardless of
+  which arm was active.
+- Plotter: "QP Data" window's CBF-price row now plots **both** `λ_CBF,R` (red) and `λ_CBF,L`
+  (blue) on the same axes (`lambda_cbf_callback` now expects a 2-element array).
+- `haption_teleoperation/haptic_force_manager_tutorial.py`: `cbf_gradient_cb` reads the shifted
+  14-float layout (indices 2:8 for the right gradient, was 1:7); `lambda_cb` takes `msg.data[0]`
+  (lambda_cbf_R) since that node always drives the right gripper.
 
 ### 9.1 Sensing constraints (real-hardware honesty, 2026-06-29)
 
@@ -735,7 +785,7 @@ visible, so at most one frame is dropped.
 
 | Issue | Description | Proposed Fix |
 |-------|-------------|-------------|
-| **Residual inactive-arm motion** | The inactive arm moves when the active arm moves fast, despite the full per-arm cost decoupling. Root cause: the **single shared scalar SoftMin CBF row** `J_soft·q̇ ≥ b` mixes BOTH arms' Jacobian columns (per-arm DAMP/slack/gamma cannot prevent this since the barrier is a CONSTRAINT, not a cost). | **Per-arm SoftMin split** in `collision_manager.compute_softmin_jacobian`: emit TWO barrier rows — right-involving pairs → one row touching only right-joint columns; left-involving pairs → one row touching only left-joint columns. Inter-arm (right-vs-left) pairs produce a SHARED row over both. Then the inactive arm's heavily-penalized cost ensures it stays still unless its OWN barrier is threatened. Contained change: `compute_softmin_jacobian` returns per-arm `(J_soft_R, h_soft_R, J_soft_L, h_soft_L, J_soft_inter, h_soft_inter)`, and `qp_formulator.build_and_solve` stacks them as 2–3 separate inequality rows instead of one. |
+| **Residual inactive-arm motion** | ✅ **FIXED (2026-07-01)** — see §9.2. Was caused by the single shared scalar SoftMin CBF row mixing both arms' Jacobian columns. Replaced with two independent per-arm SoftMin rows (`J_soft_r`/`J_soft_l`), routed by `_arm_membership`. A pair only pollutes an arm's row if it actually touches that arm's geometry (or a cylinder it holds); genuine inter-arm pairs still contribute to both rows, preserving the desired "arm A may yield to help arm B" behavior. **Please re-verify in practice** (fast active-arm motion near an unrelated obstacle should no longer perturb the idle arm) and report back if any residual coupling remains. | Done — verify in testing. |
 | **Gazebo dual attach** | The IFRA_LinkAttacher plugin has a global `IsAttached` boolean allowing only ONE attachment. A patched `gazebo_link_attacher.cpp` was provided (per-pair gating, vector erase in Detach) — confirmed working by the operator. | Done. |
 | **No independent grasp confirmation** | Grasp success is decided PURELY geometrically (FK-derived contact distance/angle vs. the robot's own *believed* cylinder pose) — there is no force/torque sensing on the arm chains and no vision confirmation wired in yet, so a "successful" grasp can still be a miss if the geometric gates are satisfied by coincidence. Gates were tightened ~10% (2026-06-29) as a stopgap. | Wire `head_control/object_detector.py` (or similar) as an independent post-close confirmation (does the detected cylinder pose match "in the gripper"?), and/or measure the grasped cylinder's real axis at attach time instead of assuming world +Z (see §9.1). |
 | **Platform placement (dual arm)** | `GoalSet.set_grasped` / `clear_grasped` tracks one grasped color at a time. The per-arm context save/restore (`_ctx_goalset`) handles this for one-arm-active-at-a-time, but a true simultaneous dual-arm placement (both arms holding and both wanting to place concurrently) is NOT supported. | For the current "one active at a time" policy this is fine. If needed: extend GoalSet to hold per-arm grasped state (two axes, two z-offsets). |

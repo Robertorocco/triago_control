@@ -763,17 +763,21 @@ class SharedControlNode(Node):
     def collision_data_callback(self, msg):
         """Extracts Cartesian collision Jacobian dynamically based on the active arm.
 
-        Bug fix: the original used `== 13`, which silently dropped valid
-        extended messages if the publisher ever grew the array beyond 13
-        fields. Changed to `>= 13` so backward-compatible extensions still work.
+        Layout (14 floats, per-arm CBF split): [b_col_r, b_col_l,
+        J_c_cart_R(6), J_c_cart_L(6)]. Each arm's h_c/J_c now comes from its OWN
+        independent SoftMin barrier (previously both used the single combined
+        b_col, so the wrong arm's barrier value leaked into whichever arm was
+        active here). Bug fix retained: `>= 14` (was `>= 13`) so backward-
+        compatible extensions still work.
         """
-        if len(msg.data) >= 13:
+        if len(msg.data) >= 14:
             self.last_collision_time = time.time()
-            self.h_c = np.array([msg.data[0]])
             if self.active_arm == 'right':
-                self.J_c = np.array(msg.data[1:7]).reshape(1, 6)
+                self.h_c = np.array([msg.data[0]])
+                self.J_c = np.array(msg.data[2:8]).reshape(1, 6)
             else:
-                self.J_c = np.array(msg.data[7:13]).reshape(1, 6)
+                self.h_c = np.array([msg.data[1]])
+                self.J_c = np.array(msg.data[8:14]).reshape(1, 6)
 
     def timer_callback(self):
         """Main loop: evaluates optimal policies, updates belief, and integrates output."""

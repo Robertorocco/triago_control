@@ -133,7 +133,7 @@ class SafetyQPController(Node):
         self.pub_loop_freq = self.create_publisher(Float64, '/qp_debug/loop_freq', 10)
         self.pub_min_dist = self.create_publisher(Float64, '/qp_debug/min_distance', 10)
         self.pub_top_pairs = self.create_publisher(String, '/qp_debug/top_pairs', 10)
-        self.pub_lambda_cbf = self.create_publisher(Float64, '/qp_debug/lambda_cbf', 10)
+        self.pub_lambda_cbf = self.create_publisher(Float64MultiArray, '/qp_debug/lambda_cbf', 10)
         self.pub_lambda_joints = self.create_publisher(Float64MultiArray, '/qp_debug/lambda_joints', 10)
         self.pub_dynamic_weights = self.create_publisher(Float64MultiArray, '/qp_debug/dynamic_weights', 10)
         self.pub_d_safe_dynamic = self.create_publisher(Float64, '/qp_debug/d_safe_dynamic', 10)
@@ -497,12 +497,14 @@ class SafetyQPController(Node):
         # --- Low-level tracking error (commanded vs measured) ---
         qdot_err_14, xdot_err_6 = self.kin.compute_tracking_errors(self.last_qdot_cmd_14)
 
-        # --- 1. SoftMin CBF aggregation ---
-        J_soft, h_soft, d_safe_dynamic, abs_min_distance = self.col.compute_softmin_jacobian(
-            self.kin.current_v, self.kin.idx_right, self.kin.idx_left,
-            self.hri.grasp_margin_targets, self.hri.attached_objects,
-            self.hri.attached_adjacency, self.hri.ignored_targets, self.publish_counter,
-            attach_ramp_shifts=self.hri.get_attach_ramp_shifts())
+        # --- 1. SoftMin CBF aggregation (TWO independent per-arm barriers) ---
+        J_soft_r, h_soft_r, J_soft_l, h_soft_l, d_safe_dynamic, abs_min_distance = \
+            self.col.compute_softmin_jacobian(
+                self.kin.current_v, self.kin.idx_right, self.kin.idx_left,
+                self.hri.grasp_margin_targets, self.hri.attached_objects,
+                self.hri.attached_adjacency, self.hri.ignored_targets, self.publish_counter,
+                attach_ramp_shifts=self.hri.get_attach_ramp_shifts(),
+                attached_object_arm=self.hri.attached_object_arm)
 
         # --- 2. Task errors ---
         e_r, v_r, e_l, v_l = self.extract_task_errors()
@@ -522,8 +524,8 @@ class SafetyQPController(Node):
         # During an autonomous grasp the ACTIVE arm is boosted to the max dynamic
         # values (slack + gamma) so it converges tightly to the grasp reference.
         boost_arm = self.active_arm if self.grasp_active else None
-        q_dot_safe, slack_r, slack_l, b_col, lambda_joints_total = self.qp.build_and_solve(
-            self.kin, J_soft, h_soft, d_safe_dynamic,
+        q_dot_safe, slack_r, slack_l, b_col_pair, lambda_joints_total = self.qp.build_and_solve(
+            self.kin, J_soft_r, h_soft_r, J_soft_l, h_soft_l, d_safe_dynamic,
             self.right_imposed_motion, self.left_imposed_motion,
             self.xdot_ref_right, self.xdot_ref_left, e_r, v_r, e_l, v_l, dt,
             right_frozen=self.right_frozen, left_frozen=self.left_frozen,
@@ -533,8 +535,9 @@ class SafetyQPController(Node):
 
         # --- 4. Downsampled telemetry publishing ---
         if self.publish_counter % self.publish_every_n == 0:
-            self._publish_telemetry(q_dot_safe, slack_r, slack_l, b_col, lambda_joints_total,
-                                    J_soft, h_soft, d_safe_dynamic, abs_min_distance,
+            self._publish_telemetry(q_dot_safe, slack_r, slack_l, b_col_pair, lambda_joints_total,
+                                    J_soft_r, h_soft_r, J_soft_l, h_soft_l,
+                                    d_safe_dynamic, abs_min_distance,
                                     qdot_err_14, xdot_err_6)
 
         # --- 5. Command publishing ---
@@ -574,7 +577,10 @@ class SafetyQPController(Node):
         # --- 7. External debug visualizer (optional tethers / overlays) ---
         if self.publish_counter % self.publish_every_n == 0:
             if not cfg.DISABLE_CBF:
-                self.pub_debug_h.publish(Float64(data=float(h_soft - d_safe_dynamic)))
+                # Legacy single scalar: the WORSE (smaller) margin of the two arms.
+                margin_r = h_soft_r - d_safe_dynamic
+                margin_l = h_soft_l - d_safe_dynamic
+                self.pub_debug_h.publish(Float64(data=float(min(margin_r, margin_l))))
             self.viz.publish_debug(
                 self.kin.model, self.kin.data, self.col.cdata, self.kin.current_q,
                 q_dot_safe, None, None, self.kin.ee_id_right, self.kin.ee_id_left,
@@ -590,13 +596,17 @@ class SafetyQPController(Node):
         #     print(f"Joint Brakes (L):  {self.qp.last_lambda_joints_left:.4f}")
         #     print("===========================\n")
 
-    def _publish_telemetry(self, q_dot_safe, slack_r, slack_l, b_col, lambda_joints_total,
-                           J_soft, h_soft, d_safe_dynamic, abs_min_distance,
+    def _publish_telemetry(self, q_dot_safe, slack_r, slack_l, b_col_pair, lambda_joints_total,
+                           J_soft_r, h_soft_r, J_soft_l, h_soft_l, d_safe_dynamic, abs_min_distance,
                            qdot_err_14, xdot_err_6):
         # Publish the full dashboard telemetry set (downsampled, off the hot path).
         # Slacks + shadow prices
         self.pub_slacks.publish(Float64MultiArray(data=[float(abs(slack_r)), float(abs(slack_l))]))
-        self.pub_lambda_cbf.publish(Float64(data=self.qp.last_lambda_col))
+        # Two INDEPENDENT per-arm CBF shadow prices (lambda_cbf_R, lambda_cbf_L),
+        # replacing the single combined value. Published together on
+        # /qp_debug/lambda_cbf so the plotter can show both on the same axes.
+        self.pub_lambda_cbf.publish(Float64MultiArray(
+            data=[self.qp.last_lambda_cbf_right, self.qp.last_lambda_cbf_left]))
         if self.kin.idx_right and self.kin.idx_left:
             max_lambda_r = float(np.max(lambda_joints_total[self.kin.idx_right]))
             max_lambda_l = float(np.max(lambda_joints_total[self.kin.idx_left]))
@@ -649,14 +659,23 @@ class SafetyQPController(Node):
         # Virtual wall marker
         self.viz.publish_wall_marker()
 
-        # Cartesian projection of the collision gradient for shared autonomy (13 floats)
+        # Cartesian projection of the collision gradient for shared autonomy.
+        # Each arm's OWN cartesian gradient now comes from ITS OWN independent
+        # SoftMin (J_soft_r for the right projection, J_soft_l for the left),
+        # matching the per-arm CBF split -- previously both used the single
+        # combined J_soft/b_col, which leaked the other arm's barrier into
+        # whichever arm main_shared_autonomy currently treats as active.
+        # NEW layout (14 floats): [b_col_r, b_col_l, J_c_cart_R(6), J_c_cart_L(6)]
+        # (old layout was 13 floats: [b_col, J_c_cart_R(6), J_c_cart_L(6)] --
+        # main_shared_autonomy.collision_data_callback is updated to match).
+        b_col_r, b_col_l = b_col_pair
         if self.kin.ee_id_right is not None and self.kin.ee_id_left is not None:
             J_EE_R_6D = pin.getFrameJacobian(self.kin.model, self.kin.data, self.kin.ee_id_right, pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)
             J_EE_L_6D = pin.getFrameJacobian(self.kin.model, self.kin.data, self.kin.ee_id_left, pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)
-            J_c_cart_R = np.dot(J_soft, np.linalg.pinv(J_EE_R_6D))
-            J_c_cart_L = np.dot(J_soft, np.linalg.pinv(J_EE_L_6D))
+            J_c_cart_R = np.dot(J_soft_r, np.linalg.pinv(J_EE_R_6D))
+            J_c_cart_L = np.dot(J_soft_l, np.linalg.pinv(J_EE_L_6D))
             self.pub_shared_col.publish(Float64MultiArray(
-                data=[float(b_col)] + J_c_cart_R.tolist() + J_c_cart_L.tolist()))
+                data=[float(b_col_r), float(b_col_l)] + J_c_cart_R.tolist() + J_c_cart_L.tolist()))
 
 
 def main():

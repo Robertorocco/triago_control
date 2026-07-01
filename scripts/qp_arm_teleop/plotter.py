@@ -162,7 +162,7 @@ class TriagoDashboard(Node):
         self.get_logger().info('Dashboard Initialized. Waiting for 14-DoF stream...')
     
         # --- NEW: Lagrangian Subscribers ---
-        self.create_subscription(Float64, '/qp_debug/lambda_cbf', self.lambda_cbf_callback, qos_profile)
+        self.create_subscription(Float64MultiArray, '/qp_debug/lambda_cbf', self.lambda_cbf_callback, qos_profile)
         self.create_subscription(Float64MultiArray, '/qp_debug/lambda_joints', self.lambda_joints_callback, qos_profile)
         # --- NEW: Task-authority (soft-task cost decomposition) ---
         self.create_subscription(Float64MultiArray, '/qp_debug/task_authority', self.task_authority_callback, qos_profile)
@@ -329,9 +329,14 @@ class TriagoDashboard(Node):
 
     # --- NEW: Lagrangian Callbacks ---
     def lambda_cbf_callback(self, msg):
+        """[lambda_cbf_R, lambda_cbf_L] -- the two INDEPENDENT per-arm CBF shadow
+        prices (replaces the old single combined scalar)."""
         t = self.get_time()
         self.lambda_cbf_time.append(t)
-        self.lambda_cbf_buffer.append(msg.data)
+        data = list(msg.data)
+        if len(data) < 2:
+            data = (data + [0.0, 0.0])[:2]
+        self.lambda_cbf_buffer.append(data)
 
     def lambda_joints_callback(self, msg):
         t = self.get_time()
@@ -490,14 +495,18 @@ def update_plot(frame, node, lines_map, axs1, axs2, axs3, ax_pairs, dyn_plots, f
                 lines_map['slack_left_scalar'].set_data([], [])
 
 
-    # 3B. Update CBF Lambda
+    # 3B. Update CBF Lambda (TWO independent per-arm traces)
     if node.lambda_cbf_time:
         t_lc = list(node.lambda_cbf_time)
-        data_lc = list(node.lambda_cbf_buffer)
+        data_lc = list(node.lambda_cbf_buffer)   # each entry: [lambda_R, lambda_L]
         min_len = min(len(t_lc), len(data_lc))
         if min_len > 0:
-            lines_map['lambda_cbf'].set_data(t_lc[:min_len], data_lc[:min_len])
-            artists.append(lines_map['lambda_cbf'])
+            data_r = [d[0] for d in data_lc[:min_len]]
+            data_l = [d[1] for d in data_lc[:min_len]]
+            lines_map['lambda_cbf_r'].set_data(t_lc[:min_len], data_r)
+            lines_map['lambda_cbf_l'].set_data(t_lc[:min_len], data_l)
+            artists.append(lines_map['lambda_cbf_r'])
+            artists.append(lines_map['lambda_cbf_l'])
 
     # 3C. Update Joint Lambdas
     if node.lambda_joints_time:
@@ -781,12 +790,16 @@ def main(args=None):
     lines_map['slack_left_y'] = l_sl_y
     lines_map['slack_left_z'] = l_sl_z
 
-    # Row 2: CBF Lambda
-    l_lc, = axs2[2].plot([], [], 'm-', label=r'$\lambda_{CBF}$')
+    # Row 2: CBF Lambda -- TWO independent per-arm shadow prices on the SAME axes
+    # (replaces the single combined lambda_cbf trace) so their independent
+    # evolution can be compared directly (per-arm SoftMin CBF split).
+    l_lc_r, = axs2[2].plot([], [], 'r-', label=r'$\lambda_{CBF,R}$')
+    l_lc_l, = axs2[2].plot([], [], 'b-', label=r'$\lambda_{CBF,L}$')
     axs2[2].set_ylabel('CBF Price', rotation=0, ha='left', labelpad=10)
     axs2[2].yaxis.set_label_position('right')
     axs2[2].legend(loc='upper left', fontsize='x-small')
-    lines_map['lambda_cbf'] = l_lc
+    lines_map['lambda_cbf_r'] = l_lc_r
+    lines_map['lambda_cbf_l'] = l_lc_l
 
     # Row 3: Joint Lambdas (R and L on same plot)
     l_lj_r, = axs2[3].plot([], [], 'r-', label=r'$\lambda_{Joints}$ R')

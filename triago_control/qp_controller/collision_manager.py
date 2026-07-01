@@ -7,18 +7,25 @@ Owns the `hppfcl` geometry model and every proximity query the controller needs:
     * adds simplified gripper bounding boxes, body colliders, ground, wall and
       the bimanual workspace obstacles (table + red/blue cylinders),
     * declares the collision-pair graph (with all the original exclusions),
-    * runs the per-tick distance queries and aggregates them into a single
-      SoftMin Control Barrier Function gradient.
+    * runs the per-tick distance queries and aggregates them into TWO
+      INDEPENDENT per-arm SoftMin Control Barrier Function gradients.
 
 ----------------------------------------------------------------------------
-SoftMin CBF math (PRESERVED EXACTLY):
+SoftMin CBF math (per arm X in {R, L}; PRESERVED per-pair math, now evaluated
+over a PER-ARM subset of pairs -- see compute_softmin_jacobian / _arm_membership
+for the coupling-fix rationale):
 
-    h_soft(q) = -(1/alpha) * log( sum_k exp(-alpha * d_k(q)) )
+    h_soft_X(q) = -(1/alpha) * log( sum_{k in Pairs(X)} exp(-alpha * d_k(q)) )
 
-    J_soft(q) = sum_k ( exp(-alpha * d_k(q)) / sum_j exp(-alpha * d_j(q)) ) * J_k(q)
+    J_soft_X(q) = sum_{k in Pairs(X)} ( exp(-alpha*d_k(q)) / sum_{j in Pairs(X)} exp(-alpha*d_j(q)) ) * J_k(q)
 
-  i.e. a differentiable approximation of the single closest distance, whose
-  gradient is the convex (softmax) blend of every active pair Jacobian J_k.
+  Pairs(X) = every active pair touching at least one geometry belonging to arm
+  X (its own links/gripper, or a cylinder it currently holds). A genuine
+  inter-arm pair belongs to BOTH Pairs(R) and Pairs(L). Each h_soft_X/J_soft_X
+  is a differentiable approximation of the closest distance RESTRICTED to arm
+  X's own pairs, whose gradient is the convex (softmax) blend of just those
+  pairs' Jacobians -- so it has zero columns in the OTHER arm's joints unless a
+  pair genuinely touches both.
 
 Dynamic safety margin (PRESERVED EXACTLY):
 
@@ -58,6 +65,11 @@ class CollisionManager:
         self.gripper_box_ids = {}          # {'right': id, 'left': id}
         self.workspace_obstacle_ids = []
         self.top_active_pairs = []         # [(name1, name2, dist)] 3 closest enabled pairs (debug)
+
+        # Lazy sets (built on first use in _arm_membership) for O(1) "does this
+        # geom_id belong to the right/left arm's own geometry" lookups.
+        self._right_geom_id_set = set()
+        self._left_geom_id_set = set()
 
     def calculate_offsets(self, chain, tool_link_name):
         # Build per-link capsule placements by snapping each link to its dominant axis.
@@ -189,6 +201,12 @@ class CollisionManager:
         self.blue_cyl_id = self.cmodel.addGeometryObject(
             pin.GeometryObject("blue_cylinder", 0, blue_pose, hppfcl.Cylinder(*cfg.CYLINDER_SIZE)))
         self.workspace_obstacle_ids.append(self.blue_cyl_id)
+
+        # Finalize the per-arm membership sets used by _arm_membership to split
+        # the SoftMin CBF into independent per-arm barriers (right_geom_ids /
+        # left_geom_ids already include each arm's gripper collision box).
+        self._right_geom_id_set = set(self.right_geom_ids)
+        self._left_geom_id_set = set(self.left_geom_ids)
 
     def define_collision_pairs(self):
         # Declare every checked collision pair, preserving the original exclusion rules.
@@ -387,18 +405,67 @@ class CollisionManager:
         pin.updateGeometryPlacements(self.model, self.data, self.cmodel, self.cdata, current_q)
         pin.computeDistances(self.cmodel, self.cdata)
 
+    def _arm_membership(self, geom_id, attached_object_arm=None):
+        """Classify a geometry id as belonging to 'right', 'left', 'both', or None.
+
+        Used to split the single SoftMin CBF into two INDEPENDENT per-arm
+        barriers (see compute_softmin_jacobian). A geometry belongs to an arm if:
+          * it is one of that arm's own capsules/gripper box (self.right_geom_ids
+            / self.left_geom_ids), OR
+          * it is a cylinder currently ATTACHED (grasped) by that arm
+            (attached_object_arm: {cyl_id: 'right'/'left'}) — a held object moves
+            with its owning arm, so it must count as part of that arm's "body"
+            for the purpose of collision-avoidance authority.
+
+        Static world geometry (table, ground, wall, body boxes, un-grasped
+        cylinders) belongs to NEITHER arm on its own — a pair between two such
+        geometries never occurs (they don't move relative to each other), but a
+        pair between an arm's geometry and a static object correctly attributes
+        to just that one arm.
+
+        Returns a set subset of {'right', 'left'} (empty set if neither).
+        """
+        membership = set()
+        if geom_id in self._right_geom_id_set:
+            membership.add('right')
+        if geom_id in self._left_geom_id_set:
+            membership.add('left')
+        if attached_object_arm and geom_id in attached_object_arm:
+            membership.add(attached_object_arm[geom_id])
+        return membership
+
     def compute_softmin_jacobian(self, current_v, idx_right, idx_left,
                                  margin_targets, attached_objs, attached_adjacency,
                                  ignored_targets, publish_counter=0,
-                                 attach_ramp_shifts=None):
+                                 attach_ramp_shifts=None, attached_object_arm=None):
         """
-        Aggregate all active collision pairs into one SoftMin CBF.
+        Aggregate active collision pairs into TWO INDEPENDENT per-arm SoftMin CBFs
+        (plus the legacy combined pair for backward-compatible telemetry).
 
-        Returns: (J_soft, h_soft, d_safe_dynamic, abs_min_distance)
-            J_soft : (nv,) gradient of the SoftMin barrier (0 when no interaction)
-            h_soft : scalar SoftMin distance value (1.0 when no interaction)
-            d_safe_dynamic : velocity-inflated safety margin used by the barrier
-            abs_min_distance : true closest distance (for telemetry)
+        RATIONALE (per-arm coupling fix): a single SoftMin row mixes ALL active
+        pairs' Jacobians via one softmax weighting, so its gradient can have
+        nonzero columns in an arm's joints even when NONE of that arm's own pairs
+        are actually close to binding -- merely because some OTHER pair (possibly
+        involving only the other arm) was among the K closest. The QP then
+        legitimately (but uselessly) recruits the "innocent" arm's joints to
+        satisfy a barrier that has nothing to do with it, causing the inactive
+        arm to twitch/oscillate whenever the active arm nears ANY obstacle.
+
+        FIX: build one SoftMin aggregate per arm, where a pair contributes to
+        arm A's aggregate iff at least one of its two geometries belongs to arm A
+        (via _arm_membership -- includes a cylinder A is currently holding). A
+        genuine inter-arm pair (or two held cylinders getting close) touches BOTH
+        arms and correctly contributes to BOTH aggregates -- preserving the
+        desired "arm A may yield to let arm B reduce its tracking error" behavior.
+        A pair that touches only arm A's geometry (vs. a static obstacle, e.g.
+        the table) NEVER appears in arm B's aggregate, so arm B's barrier row has
+        an EXACTLY ZERO gradient there -- eliminating the spurious coupling.
+
+        Returns: (J_soft_R, h_soft_R, J_soft_L, h_soft_L, d_safe_dynamic, abs_min_distance)
+            J_soft_X : (nv,) gradient of arm X's SoftMin barrier (0 when no interaction)
+            h_soft_X : scalar SoftMin distance value for arm X (1.0 when no interaction)
+            d_safe_dynamic : velocity-inflated safety margin used by both barriers
+            abs_min_distance : true closest distance over ALL pairs (for telemetry)
         """
         # --- Dynamic margin: thicken the barrier with arm speed (computed FIRST) ---
         # It must be known before the SoftMin shifts, otherwise high velocity would
@@ -419,10 +486,15 @@ class CollisionManager:
         active_pairs = pair_distances[:cfg.K_MAX_PAIRS]
         abs_min_distance = float(pair_distances[0][0]) if pair_distances else 1.0
 
-        # SoftMin accumulators
-        sum_exp = 0.0
-        J_soft_sum = np.zeros(self.model.nv)
-        active_interaction = False
+        # SoftMin accumulators -- ONE PER ARM. A pair's (weight * J_dist_k)
+        # contribution is added to R's accumulator if the pair touches the right
+        # arm's geometry, to L's if it touches the left arm's, to BOTH if it
+        # touches both (genuine inter-arm / held-object pairs) -- see
+        # _arm_membership. This is the core of the per-arm decoupling.
+        sum_exp_r, sum_exp_l = 0.0, 0.0
+        J_soft_sum_r = np.zeros(self.model.nv)
+        J_soft_sum_l = np.zeros(self.model.nv)
+        active_interaction_r, active_interaction_l = False, False
         jacobian_cache = {}
         enabled_pairs = []   # (raw_distance, geom_id_first, geom_id_second) actually contributing
 
@@ -521,9 +593,25 @@ class CollisionManager:
             # SoftMax weighting on the (shifted) effective distance
             d_eff = d + shift
             weight = np.exp(-cfg.ALPHA_SOFTMIN * d_eff)
-            sum_exp += weight
-            J_soft_sum += weight * J_dist_k
-            active_interaction = True
+
+            # --- PER-ARM ROUTING (the coupling fix) ---
+            # A pair contributes to arm X's SoftMin aggregate iff at least one of
+            # its two geometries belongs to arm X (own links/gripper, or a
+            # cylinder that arm is currently holding). A pair touching BOTH arms
+            # (inter-arm contact, or two held cylinders) contributes to BOTH --
+            # correctly preserving "arm A may yield to help arm B" -- while a pair
+            # touching only ONE arm's geometry (e.g. that arm vs. the static
+            # table) NEVER pollutes the other arm's barrier.
+            touched = (self._arm_membership(first, attached_object_arm)
+                      | self._arm_membership(second, attached_object_arm))
+            if 'right' in touched:
+                sum_exp_r += weight
+                J_soft_sum_r += weight * J_dist_k
+                active_interaction_r = True
+            if 'left' in touched:
+                sum_exp_l += weight
+                J_soft_sum_l += weight * J_dist_k
+                active_interaction_l = True
 
         # --- Record the 3 closest ACTUALLY-ENABLED pairs for the debug plot ---
         enabled_pairs.sort(key=lambda x: x[0])
@@ -533,11 +621,18 @@ class CollisionManager:
             n2 = self.cmodel.geometryObjects[g2].name
             self.top_active_pairs.append((n1, n2, float(d_p)))
 
-        # No active interaction -> barrier is silent (open space)
-        if not active_interaction or sum_exp < 1e-6:
-            return np.zeros(self.model.nv), 1.0, d_safe_dynamic, abs_min_distance
+        # No active interaction -> that arm's barrier is silent (open space).
+        # Each arm's SoftMin is computed and returned INDEPENDENTLY.
+        if not active_interaction_r or sum_exp_r < 1e-6:
+            J_soft_r, h_soft_r = np.zeros(self.model.nv), 1.0
+        else:
+            J_soft_r = J_soft_sum_r / sum_exp_r
+            h_soft_r = -(1.0 / cfg.ALPHA_SOFTMIN) * np.log(sum_exp_r)
 
-        # Normalize the blended gradient and recover the scalar SoftMin distance
-        J_soft = J_soft_sum / sum_exp
-        h_soft = -(1.0 / cfg.ALPHA_SOFTMIN) * np.log(sum_exp)
-        return J_soft, h_soft, d_safe_dynamic, abs_min_distance
+        if not active_interaction_l or sum_exp_l < 1e-6:
+            J_soft_l, h_soft_l = np.zeros(self.model.nv), 1.0
+        else:
+            J_soft_l = J_soft_sum_l / sum_exp_l
+            h_soft_l = -(1.0 / cfg.ALPHA_SOFTMIN) * np.log(sum_exp_l)
+
+        return J_soft_r, h_soft_r, J_soft_l, h_soft_l, d_safe_dynamic, abs_min_distance

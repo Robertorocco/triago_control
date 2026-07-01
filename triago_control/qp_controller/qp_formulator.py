@@ -48,8 +48,14 @@ class QPFormulator:
         self.H = np.zeros((self.n_total, self.n_total))
         self.g = np.zeros(self.n_total)
 
-        # Lagrange multiplier memory (shadow prices fed back into scheduling)
+        # Lagrange multiplier memory (shadow prices fed back into scheduling).
+        # last_lambda_col is now the MAX of the two per-arm CBF shadow prices
+        # (kept for backward-compat with the slack scheduler, which wants "how
+        # hard is EITHER barrier pushing"); the two are also tracked separately
+        # for telemetry/plotting.
         self.last_lambda_col = 0.0
+        self.last_lambda_cbf_right = 0.0
+        self.last_lambda_cbf_left = 0.0
         self.last_lambda_joints_right = 0.0
         self.last_lambda_joints_left = 0.0
 
@@ -164,7 +170,7 @@ class QPFormulator:
 
         return weight_slack_r, weight_slack_l
 
-    def build_and_solve(self, kin, J_soft, h_soft, d_safe_dynamic,
+    def build_and_solve(self, kin, J_soft_r, h_soft_r, J_soft_l, h_soft_l, d_safe_dynamic,
                         right_motion, left_motion, xdot_r, xdot_l,
                         e_r, v_r, e_l, v_l, dt, right_frozen=False, left_frozen=False,
                         tracking_boost_arm=None):
@@ -310,14 +316,26 @@ class QPFormulator:
             add_perfect_scalar_clf(kin.ee_id_left, e_l, v_l, 1, gamma_l)
 
         # =========================================================
-        # C. SAFETY CONSTRAINT (SoftMin CBF collision avoidance)
-        #    J_soft dq >= -gamma_cbf * (h_soft - d_safe_dynamic)
+        # C. SAFETY CONSTRAINTS (TWO INDEPENDENT per-arm SoftMin CBFs)
+        #    J_soft_X dq >= -gamma_cbf * (h_soft_X - d_safe_dynamic)   for X in {R, L}
+        #
+        # Replaces the single combined SoftMin row. Each row's gradient only has
+        # nonzero columns in the joints of the pairs that actually contributed to
+        # IT (see CollisionManager.compute_softmin_jacobian): an inter-arm pair
+        # (or two held cylinders) appears in BOTH rows (preserves "arm A may
+        # yield to help arm B"), but a pair touching only arm A's geometry vs. a
+        # static obstacle NEVER appears in arm B's row (eliminates the spurious
+        # coupling/oscillation where an idle arm twitched because the OTHER arm
+        # neared an unrelated obstacle).
         # =========================================================
-        C_col_padded = np.concatenate([J_soft, np.zeros(self.n_slacks)])
+        C_col_r_padded = np.concatenate([J_soft_r, np.zeros(self.n_slacks)])
+        C_col_l_padded = np.concatenate([J_soft_l, np.zeros(self.n_slacks)])
         if cfg.DISABLE_CBF:
-            b_col = -10000.0  # Practically infinite slack -> barrier never activates
+            b_col_r = -10000.0  # Practically infinite slack -> barrier never activates
+            b_col_l = -10000.0
         else:
-            b_col = -cfg.GAMMA_CBF * (h_soft - d_safe_dynamic)
+            b_col_r = -cfg.GAMMA_CBF * (h_soft_r - d_safe_dynamic)
+            b_col_l = -cfg.GAMMA_CBF * (h_soft_l - d_safe_dynamic)
 
         # =========================================================
         # D. JOINT LIMITS (velocity-aware CBF buffer, upper + lower)
@@ -351,10 +369,10 @@ class QPFormulator:
                                               -cfg.P_GAIN_LIMITS * (q_now - q_l - dynamic_buffer))
 
         # =========================================================
-        # E. ASSEMBLE ALL CONSTRAINTS (collision, limits, task)
+        # E. ASSEMBLE ALL CONSTRAINTS (collision x2, limits, task)
         # =========================================================
-        C_all = [C_col_padded.reshape(1, -1)]
-        b_all = [np.array([b_col])]
+        C_all = [C_col_r_padded.reshape(1, -1), C_col_l_padded.reshape(1, -1)]
+        b_all = [np.array([b_col_r]), np.array([b_col_l])]
         C_all.append(self.C_max)
         b_all.append(-self.dq_max_safe)
         C_all.append(self.C_min)
@@ -374,18 +392,25 @@ class QPFormulator:
         if sol is None:
             # Infeasible: halt motion and reset the collision shadow-price memory
             self.last_lambda_col = 0.0
+            self.last_lambda_cbf_right = 0.0
+            self.last_lambda_cbf_left = 0.0
             self.task_energies = np.zeros(3)
-            return np.zeros(self.n_joints), 0.0, 0.0, b_col, np.zeros(self.n_joints)
+            return np.zeros(self.n_joints), 0.0, 0.0, (b_col_r, b_col_l), np.zeros(self.n_joints)
 
         q_dot_safe = sol[:self.n_joints]
         slack_r = sol[-2]
         slack_l = sol[-1]
 
-        # 1. Collision shadow price (row 0)
-        self.last_lambda_col = float(lagrangians[0])
-        # 2. Joint-limit shadow prices: upper rows then lower rows
-        lambda_upper = np.array(lagrangians[1:1 + self.n_joints])
-        lambda_lower = np.array(lagrangians[1 + self.n_joints:1 + 2 * self.n_joints])
+        # 1. Collision shadow prices (rows 0 = right CBF, 1 = left CBF)
+        self.last_lambda_cbf_right = float(lagrangians[0])
+        self.last_lambda_cbf_left = float(lagrangians[1])
+        # Backward-compat scalar (used by the slack scheduler's "how hard is
+        # EITHER barrier pushing" logic): the max of the two per-arm prices.
+        self.last_lambda_col = max(self.last_lambda_cbf_right, self.last_lambda_cbf_left)
+        # 2. Joint-limit shadow prices: upper rows then lower rows (offset by +2
+        #    now that there are TWO collision rows instead of one).
+        lambda_upper = np.array(lagrangians[2:2 + self.n_joints])
+        lambda_lower = np.array(lagrangians[2 + self.n_joints:2 + 2 * self.n_joints])
         lambda_joints_total = lambda_upper + lambda_lower
 
         # Extract per-arm worst shadow price only when that arm is actively tracking
