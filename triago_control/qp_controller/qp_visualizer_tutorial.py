@@ -357,50 +357,9 @@ class QPVisualizer:
             markers.markers.append(create_marker(idx, Marker.TEXT_VIEW_FACING, (0.0, 0.0, 0.03), c_text, position=midpoint, text=f"{min_d:.3f}m"))
             idx += 1
 
-        # --- 2. WORST JOINT LIMIT (Arms Only, Exclude 7) ---
-        worst_margin = 100.0
-        worst_joint_idx = -1
-        is_upper = False
-        
-        for i, joint in enumerate(model.joints):
-            if i == 0 or joint.nq != 1: continue 
-            
-            # --- FILTER ---
-            name = model.names[i]
-            if "arm" not in name: continue  # Must be an arm joint
-            if "7" in name: continue        # EXCLUDE WRIST ROTATION
-            # --------------
-
-            q_val = q[joint.idx_q]
-            q_u = model.upperPositionLimit[joint.idx_q]
-            q_l = model.lowerPositionLimit[joint.idx_q]
-            
-            dist_u = q_u - q_val
-            dist_l = q_val - q_l
-            current_min = min(dist_u, dist_l)
-            
-            if current_min < worst_margin:
-                worst_margin = current_min
-                worst_joint_idx = i
-                is_upper = (dist_u < dist_l)
-
-        if worst_margin < limit_buffer and worst_joint_idx != -1:
-            pos_joint = data.oMi[worst_joint_idx].translation
-            joint_name = model.names[worst_joint_idx]
-            
-            label_type = "MAX" if is_upper else "MIN"
-            col = c_crit if worst_margin < (limit_buffer/2) else c_warn
-            
-            text_str = f"{joint_name}\n{label_type} ({worst_margin:.2f})"
-            
-            # Draw Text
-            pos_text = pos_joint.copy()
-            pos_text[2] += 0.1 
-            markers.markers.append(create_marker(idx, Marker.TEXT_VIEW_FACING, (0.0, 0.0, 0.025), c_text, position=pos_text, text=text_str))
-            idx += 1
-            
-            markers.markers.append(create_marker(idx, Marker.SPHERE, (0.04, 0.04, 0.04), col, position=pos_joint))
-            idx += 1
+        # --- 2. WORST JOINT LIMIT --- (REMOVED: the text/sphere at the near-limit
+        # joint cluttered the RViz view; joint-limit proximity is monitored via the
+        # plotter's lambda_joints trace instead.)
 
         # --- 3. ARM VECTORS (Arrows) ---
         def process_arm(pos_curr, vel_curr, target_pose):
