@@ -177,7 +177,7 @@ class QPFormulator:
         """
         Build and solve the CLF-CBF-QP for this tick.
 
-        Returns: (q_dot_safe, slack_r, slack_l, b_col, lambda_joints_total)
+        Returns: (q_dot_safe, slack_r, slack_l, (b_col_r, b_col_l), lambda_joints_total)
         """
         self.H.fill(0.0)
         self.g.fill(0.0)
@@ -437,4 +437,4 @@ class QPFormulator:
         e_slack = float(weight_slack_r * slack_r ** 2 + weight_slack_l * slack_l ** 2)
         self.task_energies = np.array([e_damp, e_posture, e_slack])
 
-        return q_dot_safe, slack_r, slack_l, b_col, lambda_joints_total
+        return q_dot_safe, slack_r, slack_l, (b_col_r, b_col_l), lambda_joints_total
