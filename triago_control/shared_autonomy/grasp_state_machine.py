@@ -111,7 +111,14 @@ class GraspStateMachine:
     #     would kick the robot out of PRE_GRASP even while perfectly aligned.
 
     GRASP_CBF_MARGIN = -0.08
-    GRASP_CONTACT_DEPTH = -0.038     # gripper-box↔cylinder overlap to trigger close (slightly relaxed from -0.04)
+    # Tightened ~10% (operator observed false-positive grasp confirmations: the
+    # gate let GRASP_CLOSE start when the fingers weren't actually well-seated).
+    # We have NO force/torque sensing on the real hardware (joint pos/vel + camera
+    # only), so contact must be confirmed purely geometrically — tightening these
+    # gates is the correct, sensor-realistic way to reduce false positives.
+    GRASP_CONTACT_DEPTH = -0.0418    # gripper-box<->cylinder overlap to trigger close (was -0.038, ~10% deeper)
+    APPROACH_ANG_TOL = 0.135         # rad — approach-axis alignment at end of insertion (was 0.15, ~10% tighter)
+    APPROACH_POS_TOL = 0.009         # m — position-reached fallback (was 0.01, ~10% tighter)
     GRASP_INSERTION_TRAVEL = 0.09    # m, straight-line advance from standoff along approach axis (DEPTH knob)
     GRASP_FORCE_THRESHOLD = 2.0
     GRASP_CLOSE_HOLD_S = 4.0
@@ -470,17 +477,17 @@ class GraspStateMachine:
 
         ang_fwd_err = np.linalg.norm(
             np.cross(inp.current_T_EE[:3, :3][:, 0], self.locked_grasp_pose[:3, :3][:, 0]))
-        ang_ok = ang_fwd_err < 0.15
+        ang_ok = ang_fwd_err < self.APPROACH_ANG_TOL
 
         contact_d = inp.grasp_contact.get(color.lower(), 1.0)
         contact_ok = contact_d <= self.GRASP_CONTACT_DEPTH
 
         # Position-reached fallback: with the straight-line locked target, the
-        # advance is finished once the EE is within 1 cm of it, even if the
-        # gripper-box contact distance never crosses GRASP_CONTACT_DEPTH.
+        # advance is finished once the EE is within APPROACH_POS_TOL of it, even
+        # if the gripper-box contact distance never crosses GRASP_CONTACT_DEPTH.
         pos_to_target = np.linalg.norm(
             inp.current_T_EE[:3, 3] - self.locked_grasp_pose[:3, 3])
-        pos_reached = pos_to_target < 0.01
+        pos_reached = pos_to_target < self.APPROACH_POS_TOL
 
         if ang_ok and (contact_ok or pos_reached):
             self._transition("GRASP_CLOSE")

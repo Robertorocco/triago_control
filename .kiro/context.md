@@ -1,7 +1,7 @@
 # AI Agent Context — triago_control
 
 > **This file is maintained by the AI agent. Do not edit manually.**
-> Last updated: 2026-06-29 (per-arm bimanual FSM/belief, cost decoupling, posture-field, arm-switch, grasp-fail ABORT_RETREAT, RViz bimanual viz)
+> Last updated: 2026-06-29 (per-arm bimanual FSM/belief, cost decoupling, posture-field, arm-switch, grasp-fail ABORT_RETREAT, RViz bimanual viz, sensing-honesty note + tightened grasp gates, RViz marker topic split + periodic sweep)
 
 ---
 
@@ -534,6 +534,30 @@ Decision vector: `x = [q_dot (nv), delta_right, delta_left]`
 
 Solver: `quadprog.solve_qp` (active-set method).
 
+### 9.1 Sensing constraints (real-hardware honesty, 2026-06-29)
+
+**No Gazebo ground-truth is ever read** (`/gazebo/model_states`, `GetEntityState`, etc. — none
+exist in this codebase, confirmed by design review). The system relies **only** on what real
+hardware provides: joint position/velocity (`/joint_states`) and, for future perception work,
+camera (`head_control/object_detector.py` — upright-cylinder fit, built but not yet wired into
+the grasp pipeline). **There is no force/torque sensing on the arm chains anywhere**:
+`TickInput.current_force_mag` / `current_force_local` are hardcoded to `0.0` / `zeros(3)` —
+present in the dataclass for a future sensor, never populated. Grasp confirmation is therefore
+**purely geometric**: `grasp_contact` (signed gripper-box↔cylinder `hppfcl` distance) is computed
+from the robot's own FK against the cylinder's *believed* position — a kinematic value tracked in
+`GoalSet.cylinders[...]['pos']`, updated only by `relocate_cylinder` after a placement, never
+measured from the object itself. `GoalSet.set_grasped` similarly **assumes** the grasped
+cylinder's axis is world `+Z` at the attach instant rather than measuring it — if the object was
+tilted when grasped (plausible with the realistic, lower-friction world physics), the frozen axis
+is wrong and the `Platform_Place` orientation goal inherits that error. **Next-agent TODO**: wire
+`object_detector.py` (or an equivalent vision check) as an independent confirmation signal, and to
+measure the real grasped-object axis instead of assuming it.
+
+Because there is no independent (force/vision) confirmation, the **geometric** grasp-success gates
+were tightened ~10% (2026-06-29) after observing false-positive `GRASP_CLOSE` triggers (fingers
+not actually well-seated): `GRASP_CONTACT_DEPTH` −0.038→−0.0418 m, `APPROACH_ANG_TOL` 0.15→0.135
+rad, `APPROACH_POS_TOL` 0.01→0.009 m (all in `grasp_state_machine.py`, `_grasp_approach`).
+
 ---
 
 ## 10. Adaptive Scheduling (shadow-price feedback)
@@ -643,13 +667,25 @@ starvation made the green gripper look stale while goal markers refreshed fine. 
 methods return marker lists; legacy `publish_*` wrappers are kept but the loop uses the
 consolidated path. **Do not revert to separate publishes.**
 
-**Yellow guidance gripper (2026-06-29)**: a separate topic `/guidance_policy_marker` (ns
-`guidance_policy`, yellow) draws the human-side counterpart to the green robot-policy gripper. It
-is **reference-anchored** (`current_T_user`) and integrates the belief-weighted **user-policy**
-blend `pi_blend = Σ belief[k]·user_policies[k]` — i.e. exactly the velocity field the haptic
-`F_guide` renders onto the handle. On its own topic so it can be toggled independently in RViz.
-Contrast: the green gripper is EE-anchored and integrates the **ee-policy** blend (`pi_max`).
-In test mode (`current_T_user == current_T_EE`) the two coincide.
+**Guidance / robot-policy gripper topics (updated 2026-06-29)**: BOTH predictive grippers now live
+on their OWN dedicated topics (previously the robot-policy gripper was mixed into
+`/shared_policy_markers`):
+- `/guidance_policy_marker` (ns `guidance_policy`, **light blue** — was yellow) — the human-side
+  counterpart. **Reference-anchored** (`current_T_user`), integrates the belief-weighted
+  **user-policy** blend `pi_blend = Σ belief[k]·user_policies[k]` — exactly the velocity field the
+  haptic `F_guide` renders onto the handle.
+- `/robot_policy_marker` (ns `policy_grippers`, **light green**) — the robot-side counterpart.
+  **EE-anchored** (`current_T_EE`), integrates the **ee-policy** blend (`pi_max`).
+
+In test mode (`current_T_user == current_T_EE`) the two coincide. `/shared_policy_markers` now
+only carries: belief-opacity goal grippers + the PRE_GRASP pulsing cue (grasp-guidance move/rotate
+arrows were removed — they cluttered the view without adding clarity; the builder methods
+`_build_grasp_guidance` / `_build_clear_grasp_guidance` remain in the code, unused, in case
+they're wanted again). All three marker topics receive a periodic `Marker.DELETEALL` sweep every
+`MARKER_CLEANUP_PERIOD_S=3.0` s (`main_shared_autonomy._sweep_all_markers`) so any RViz marker that
+got stuck (lifetime never re-triggered, or a namespace changed between versions) self-heals
+instead of lingering forever; the very next control tick republishes what should actually be
+visible, so at most one frame is dropped.
 
 ---
 
@@ -663,7 +699,7 @@ In test mode (`current_T_user == current_T_EE`) the two coincide.
 | Grasp pipeline (full cycle) | ✅ Working | PRE_GRASP → ALIGN → APPROACH → CLOSE → LIFT → HOLDING. Tracking boost (MAX gamma+slack) during align. Align timeout 12s. |
 | Grasp failure | ✅ Working | Clear `[GRASP FAILED]` log. ABORT_RETREAT: backs out along reverse approach axis (gripper open, CBF bypass active during retreat, then restore). |
 | Post-grasp (LIFT + HOLDING + place) | ✅ Working | 9 cm slow lift → HOLDING resumes shared autonomy → Platform placement manifold → release → RELEASE_LIFT → SHARED_AUTONOMY |
-| RViz visualization | ✅ Working | Single-publish marker consolidation. Green=EE robot policy, Yellow=reference guidance (toggleable `/guidance_policy_marker`), Blue=active commanded gripper, Grey=inactive frozen CLF pose. Belief-opacity goal grippers. Dual belief subplot (active colored, inactive greyscale). Task-authority soft-cost plot (`/qp_debug/task_authority`). |
+| RViz visualization | ✅ Working | Light-green=EE robot policy (own topic `/robot_policy_marker`), Light-blue=reference guidance (own topic `/guidance_policy_marker`), Blue=active commanded gripper, Grey=inactive frozen CLF pose. Belief-opacity goal grippers + grasp-ready cue on `/shared_policy_markers`. Grasp-guidance move/rotate arrows REMOVED (cluttered the view). Periodic DELETEALL sweep every 3s on all 3 marker topics (self-heals stuck/ghost markers). Dual belief subplot (active colored, inactive greyscale). Task-authority soft-cost plot (`/qp_debug/task_authority`). |
 | Haption teleoperation | ✅ Working | `teleop_triago_clutch.py` + `haptic_force_manager_tutorial.py`. Force layers: F_guide (velocity-field, v_max_user 0.04/0.10) + F_fixture (position spring near goal). Handle drag during autonomous phases (KP+KD velocity-following). |
 | Head control (visual servoing) | 🔧 Active dev | `qp_head_visual_servo.py`: QP-based hand-tracking, independent loop. Starting point — no image processing yet. |
 | Mobile base integration | 🔧 Partial | `base_controller.py` exists but not QP-certified |
@@ -678,7 +714,8 @@ In test mode (`current_T_user == current_T_EE`) the two coincide.
 | Issue | Description | Proposed Fix |
 |-------|-------------|-------------|
 | **Residual inactive-arm motion** | The inactive arm moves when the active arm moves fast, despite the full per-arm cost decoupling. Root cause: the **single shared scalar SoftMin CBF row** `J_soft·q̇ ≥ b` mixes BOTH arms' Jacobian columns (per-arm DAMP/slack/gamma cannot prevent this since the barrier is a CONSTRAINT, not a cost). | **Per-arm SoftMin split** in `collision_manager.compute_softmin_jacobian`: emit TWO barrier rows — right-involving pairs → one row touching only right-joint columns; left-involving pairs → one row touching only left-joint columns. Inter-arm (right-vs-left) pairs produce a SHARED row over both. Then the inactive arm's heavily-penalized cost ensures it stays still unless its OWN barrier is threatened. Contained change: `compute_softmin_jacobian` returns per-arm `(J_soft_R, h_soft_R, J_soft_L, h_soft_L, J_soft_inter, h_soft_inter)`, and `qp_formulator.build_and_solve` stacks them as 2–3 separate inequality rows instead of one. |
-| **Gazebo dual attach** | The IFRA_LinkAttacher plugin has a global `IsAttached` boolean allowing only ONE attachment. A patched `gazebo_link_attacher.cpp` was provided (per-pair gating, vector erase in Detach) but not yet confirmed in sim. | User must replace the plugin source, rebuild `ros2_linkattacher`, verify. |
+| **Gazebo dual attach** | The IFRA_LinkAttacher plugin has a global `IsAttached` boolean allowing only ONE attachment. A patched `gazebo_link_attacher.cpp` was provided (per-pair gating, vector erase in Detach) — confirmed working by the operator. | Done. |
+| **No independent grasp confirmation** | Grasp success is decided PURELY geometrically (FK-derived contact distance/angle vs. the robot's own *believed* cylinder pose) — there is no force/torque sensing on the arm chains and no vision confirmation wired in yet, so a "successful" grasp can still be a miss if the geometric gates are satisfied by coincidence. Gates were tightened ~10% (2026-06-29) as a stopgap. | Wire `head_control/object_detector.py` (or similar) as an independent post-close confirmation (does the detected cylinder pose match "in the gripper"?), and/or measure the grasped cylinder's real axis at attach time instead of assuming world +Z (see §9.1). |
 | **Platform placement (dual arm)** | `GoalSet.set_grasped` / `clear_grasped` tracks one grasped color at a time. The per-arm context save/restore (`_ctx_goalset`) handles this for one-arm-active-at-a-time, but a true simultaneous dual-arm placement (both arms holding and both wanting to place concurrently) is NOT supported. | For the current "one active at a time" policy this is fine. If needed: extend GoalSet to hold per-arm grasped state (two axes, two z-offsets). |
 | **Orientation choice** | The sticky hysteresis can commit to the "wrong" 180° candidate early; the user can't override without getting very close. | Consider resetting the sticky memory on clutch-engage, or using the reference velocity direction to break the tie. |
 

@@ -343,6 +343,10 @@ class SharedControlNode(Node):
         # field that the haptic F_guide renders onto the operator's handle. This
         # is the human-side counterpart to the green robot-policy gripper.
         self.pub_guidance_marker = self.create_publisher(MarkerArray, '/guidance_policy_marker', 10)
+        # Dedicated topic for the light-green robot-policy (predictive trajectory)
+        # gripper, split out of /shared_policy_markers so it can be shown/hidden
+        # independently in RViz, same rationale as the guidance marker above.
+        self.pub_robot_policy_marker = self.create_publisher(MarkerArray, '/robot_policy_marker', 10)
         # Bug fix: this used to be assigned a second time later in __init__,
         # silently leaking the first TransformBroadcaster. Assigned exactly once.
         self.tf_broadcaster = TransformBroadcaster(self)
@@ -355,6 +359,16 @@ class SharedControlNode(Node):
 
         # Main Loop at 100Hz
         self.timer = self.create_timer(1.0 / self.CONTROL_HZ, self.timer_callback)
+
+        # Periodic full marker sweep: every MARKER_CLEANUP_PERIOD_S, publish a
+        # DELETEALL on every marker topic we own. RViz markers can occasionally
+        # get "stuck" (a stale marker whose lifetime never re-triggers, or one
+        # published just before a namespace/id scheme changed) and linger on
+        # screen forever. This guarantees the display self-heals periodically
+        # instead of accumulating ghost markers over a long session.
+        self.MARKER_CLEANUP_PERIOD_S = 3.0
+        self.timer_marker_cleanup = self.create_timer(
+            self.MARKER_CLEANUP_PERIOD_S, self._sweep_all_markers)
 
         # --- User Pose To build user_policy ---
         self.current_T_user = np.eye(4)
@@ -1131,9 +1145,13 @@ class SharedControlNode(Node):
                 # appear non-updating while goal markers refreshed fine.
                 combined_markers = MarkerArray()
 
-                # Green policy grippers (predictive trajectory)
-                combined_markers.markers.extend(
+                # Light-green robot-policy grippers (predictive trajectory) now
+                # published on their OWN topic (/robot_policy_marker), not mixed
+                # into /shared_policy_markers, so it can be toggled independently.
+                robot_policy_markers = MarkerArray()
+                robot_policy_markers.markers.extend(
                     self._build_policy_gripper_markers(trajectory_data))
+                self.pub_robot_policy_marker.publish(robot_policy_markers)
 
                 # Goal poses as belief-opacity gripper markers
                 beliefs = self.belief_estimator.get_beliefs()
@@ -1153,28 +1171,21 @@ class SharedControlNode(Node):
                         self._pregrasp_cue_logged = False
                         combined_markers.markers.extend(self._build_clear_grasp_ready_cue())
 
-                # Grasp-guidance arrows: how to move/rotate to satisfy the grasp
-                # condition. Only for cylinder grasp goals (not the Platform), and
-                # only while still free (SHARED_AUTONOMY / PRE_GRASP).
-                is_cylinder_goal = self.active_goal_key.split('_')[0] in self.goal_set.cylinders
-                if is_cylinder_goal and self.grasp_sm.state in ("SHARED_AUTONOMY", "PRE_GRASP"):
-                    combined_markers.markers.extend(
-                        self._build_grasp_guidance(self.current_T_EE, T_active_goal, pos_error, ang_error))
-                    self._guidance_shown = True
-                elif getattr(self, '_guidance_shown', False):
-                    self._guidance_shown = False
-                    combined_markers.markers.extend(self._build_clear_grasp_guidance())
+                # (Grasp-guidance move/rotate arrows REMOVED per operator request:
+                # they cluttered the visualization without adding clarity. The
+                # _build_grasp_guidance / _build_clear_grasp_guidance helpers are
+                # kept in the codebase — unused — in case they're wanted again.)
 
                 # ONE publish per tick — all markers in a single message.
                 self.pub_markers.publish(combined_markers)
 
-                # --- YELLOW GUIDANCE GRIPPER (separate topic, toggleable) ------ #
-                # Reference-anchored counterpart to the green robot-policy gripper.
-                # It integrates the belief-weighted USER-policy blend (pi_blend) from
-                # the REFERENCE pose (current_T_user) — i.e. the exact velocity field
-                # that the haptic F_guide renders onto the handle. Published on its
-                # own topic (/guidance_policy_marker) so it can be shown/hidden in
-                # RViz independently of the robot-policy markers.
+                # --- LIGHT-BLUE GUIDANCE GRIPPER (separate topic, toggleable) -- #
+                # Reference-anchored counterpart to the light-green robot-policy
+                # gripper. It integrates the belief-weighted USER-policy blend
+                # (pi_blend) from the REFERENCE pose (current_T_user) — i.e. the
+                # exact velocity field that the haptic F_guide renders onto the
+                # handle. Published on its own topic (/guidance_policy_marker) so
+                # it can be shown/hidden in RViz independently.
                 if user_policies and all(k in user_policies for k in self.target_keys):
                     try:
                         pi_blend_user = self.belief_estimator.blend_policies(user_policies)
@@ -1187,7 +1198,7 @@ class SharedControlNode(Node):
                         guidance_markers.markers.extend(
                             self.create_gripper_markers(
                                 T_guid_1, 0.85, 0, guid_now,
-                                ns="guidance_policy", rgb=(1.0, 0.85, 0.0)))
+                                ns="guidance_policy", rgb=(0.3, 0.7, 1.0)))
                         self.pub_guidance_marker.publish(guidance_markers)
 
             # Inference state (consumed by the haptic force manager) is lightweight
@@ -1471,6 +1482,23 @@ class SharedControlNode(Node):
         ma = MarkerArray()
         ma.markers.extend(self._build_clear_grasp_ready_cue())
         self.pub_markers.publish(ma)
+
+    def _sweep_all_markers(self):
+        """Publish a DELETEALL marker on every topic this node owns.
+
+        Called every MARKER_CLEANUP_PERIOD_S (3s). This is a self-healing pass:
+        any RViz marker that got "stuck" (e.g. its lifetime expired mid-jitter
+        and the next publish was skipped, or a namespace changed between code
+        versions) is forcibly cleared. The very next control tick immediately
+        republishes whatever SHOULD currently be visible, so this causes at most
+        one dropped frame of markers, not a visible blackout.
+        """
+        delete_all = Marker()
+        delete_all.action = Marker.DELETEALL
+        ma = MarkerArray()
+        ma.markers.append(delete_all)
+        for pub in (self.pub_markers, self.pub_guidance_marker, self.pub_robot_policy_marker):
+            pub.publish(ma)
 
     def publish_grasp_guidance(self, T_EE, T_goal, pos_error, ang_error, now=None):
         """Draw 'how to move to satisfy the grasp condition' cues on the gripper (legacy wrapper)."""
