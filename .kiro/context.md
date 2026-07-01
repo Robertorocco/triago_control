@@ -667,6 +667,28 @@ starvation made the green gripper look stale while goal markers refreshed fine. 
 methods return marker lists; legacy `publish_*` wrappers are kept but the loop uses the
 consolidated path. **Do not revert to separate publishes.**
 
+**Ghost-marker fixes (2026-06-29, round 2)**: two root causes of markers "stuck forever" on
+screen were found and fixed:
+1. **Stale excluded-goal position** — `_build_goal_pose_markers` drew a faded (not hidden) gripper
+   for EXCLUDED goals (e.g. the just-grasped cylinder's own Top/Side), anchored at
+   `GoalSet.cylinders[color]['pos']` — the cylinder's ORIGINAL TABLE SPAWN position, only updated
+   by `relocate_cylinder()` at release. While held, that anchor is stale (the object moved with the
+   gripper), so the "faded" marker looked like a ghost frozen at the pick-up spot. Fix: excluded
+   goals are now explicitly `Marker.DELETE`d (`_delete_gripper_markers`) instead of faded.
+2. **Shifting marker ID in `qp_visualizer_tutorial.QPVisualizer.publish_debug`** — the blue
+   commanded gripper and grey frozen gripper used `id=idx`, where `idx` accumulates from
+   CONDITIONAL markers earlier in the same tick (collision line/text, joint-limit sphere/text —
+   each appears only sometimes). RViz identifies a marker by `(ns, id)`; since the id shifted tick
+   to tick even though the ns never changed, every tick created a NEW marker instead of overwriting
+   the previous one, and the old (ns, id) was never revisited (no lifetime, no DELETE) — permanent
+   ghost, independent of arm switching. Fix: both grippers now use a FIXED `id=0` (unique
+   per-namespace, cannot collide with the `"qp_debug"` ns markers). Also explicitly `DELETE`s each
+   gripper's markers when its pose becomes `None` (e.g. right after an arm switch, before the first
+   new-arm reference arrives).
+3. Both `main_shared_autonomy` (3 topics) and `QPVisualizer` (`/qp_debug_visualization`,
+   `/teleop_debug_visualization`) now run an independent periodic `Marker.DELETEALL` sweep every
+   `MARKER_CLEANUP_PERIOD_S=3.0` s as defense-in-depth against any other orphaning path.
+
 **Guidance / robot-policy gripper topics (updated 2026-06-29)**: BOTH predictive grippers now live
 on their OWN dedicated topics (previously the robot-policy gripper was mixed into
 `/shared_policy_markers`):

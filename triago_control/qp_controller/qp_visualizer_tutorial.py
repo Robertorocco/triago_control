@@ -63,6 +63,22 @@ class QPVisualizer:
             10
         )
 
+        # Periodic full sweep of both marker topics this class owns, so any
+        # marker that gets orphaned by a code path we haven't foreseen (id
+        # collisions, dropped messages, etc.) self-heals instead of lingering on
+        # screen forever. Defense-in-depth alongside the fixed-id fix above.
+        self.MARKER_CLEANUP_PERIOD_S = 3.0
+        node.create_timer(self.MARKER_CLEANUP_PERIOD_S, self._sweep_all_markers)
+
+    def _sweep_all_markers(self):
+        """Publish Marker.DELETEALL on every topic this class owns."""
+        delete_all = Marker()
+        delete_all.action = Marker.DELETEALL
+        ma = MarkerArray()
+        ma.markers.append(delete_all)
+        self.pub.publish(ma)
+        self.teleop_pub.publish(ma)
+
     def ee_callback(self, msg):
         # Protocol: [Px_R, Py_R, Pz_R, Vx_R, Vy_R, Vz_R, Px_L, Py_L, Pz_L, Vx_L, Vy_L, Vz_L]
         if len(msg.data) >= 12:
@@ -85,6 +101,26 @@ class QPVisualizer:
             # Reset active-arm cmd so it re-anchors from the new arm's next message.
             self.cmd_pos = None
             self.cmd_rot_matrix = None
+            # BUG FIX: without an explicit DELETE, the blue "qp_debug_gripper"
+            # markers drawn for the arm we just left stay on screen FOREVER —
+            # publish_debug only re-ADDs at the SAME ns/id when cmd_pos is set, and
+            # here we just set it to None, so nothing ever overwrites/removes the
+            # old blue gripper. Clear it explicitly on every switch.
+            self._delete_marker_group("qp_debug_gripper", start_id=0, count=3)
+
+    def _delete_marker_group(self, ns, start_id, count):
+        """Publish DELETE for `count` markers in `ns` starting at `start_id`."""
+        ma = MarkerArray()
+        now = self.node.get_clock().now().to_msg()
+        for i in range(count):
+            m = Marker()
+            m.header.frame_id = self.ref_frame
+            m.header.stamp = now
+            m.ns = ns
+            m.id = start_id + i
+            m.action = Marker.DELETE
+            ma.markers.append(m)
+        self.pub.publish(ma)
 
     def cmd_callback_right(self, msg):
         """Updates commanded pose from the right-arm reference."""
@@ -393,19 +429,32 @@ class QPVisualizer:
         process_arm(self.ee_pos_left, self.ee_vel_left, target_left)
 
         # --- 4. COMMANDED GRIPPER VISUALIZATION (Blue, follows active arm) ---
+        # BUG FIX: these two grippers use a FIXED start_id (0), NOT the shared
+        # `idx` counter. `idx` accumulates from the conditional markers above
+        # (collision line/text, joint-limit sphere/text — each appears only
+        # SOMETIMES), so under the old code the gripper's id shifted tick to
+        # tick even though its ns ("qp_debug_gripper" / "frozen_gripper") never
+        # changed. RViz treats (ns, id) as the marker's identity, so a shifting
+        # id meant a NEW marker was created every time instead of overwriting
+        # the previous one — the old id was never touched again (no lifetime,
+        # no DELETE) and stayed on screen forever. Both namespaces are unique to
+        # these two grippers, so a fixed id=0..2 here cannot collide with the
+        # "qp_debug" markers above (different namespace).
         if self.cmd_pos is not None and self.cmd_rot_matrix is not None:
-            gripper_markers = self._build_gripper(self.cmd_pos, self.cmd_rot_matrix, 0.8, idx, timestamp)
+            gripper_markers = self._build_gripper(self.cmd_pos, self.cmd_rot_matrix, 0.8, 0, timestamp)
             markers.markers.extend(gripper_markers)
-            idx += 3
+        else:
+            self._delete_marker_group("qp_debug_gripper", start_id=0, count=3)
 
         # --- 5. FROZEN (INACTIVE) ARM GRIPPER (Grey, shows where the CLF holds it) ---
         # Disappears when the arm becomes active (cmd_pos takes over → blue gripper).
         if self.frozen_pos is not None and self.frozen_rot_matrix is not None:
             grey_markers = self._build_gripper(
-                self.frozen_pos, self.frozen_rot_matrix, 0.5, idx, timestamp,
+                self.frozen_pos, self.frozen_rot_matrix, 0.5, 0, timestamp,
                 color=ColorRGBA(r=0.6, g=0.6, b=0.6, a=0.5), ns="frozen_gripper")
             markers.markers.extend(grey_markers)
-            idx += 3
+        else:
+            self._delete_marker_group("frozen_gripper", start_id=0, count=3)
             
         # =========================================================
         # --- 5. PINHOLE TASK ENVIRONMENT (STATIC OBSTACLES) ---

@@ -1388,12 +1388,25 @@ class SharedControlNode(Node):
     def _build_goal_pose_markers(self, beliefs, now=None):
         """Build every goal pose as a gripper marker whose opacity tracks its belief.
 
+        EXCLUDED goals (e.g. the just-grasped cylinder's own Top/Side goals) are
+        explicitly DELETEd rather than faded. Fading assumed the goal's manifold
+        point would still track something meaningful — but GoalSet.cylinders[..]
+        ['pos'] is the cylinder's ORIGINAL TABLE SPAWN position, only updated by
+        relocate_cylinder() at RELEASE time. While held, that position is stale
+        (the object has moved with the gripper), so drawing it — even faded —
+        showed a ghost gripper frozen at the old pick-up spot. Excluded means "not
+        currently reachable/meaningful", so it is correctly hidden, not faded.
+
         Returns a list of Marker objects (not a MarkerArray).
         """
         if now is None:
             now = self.get_clock().now().to_msg()
+        excluded = self.belief_estimator.get_excluded_goals()
         markers = []
         for i, goal_key in enumerate(self.target_keys):
+            if goal_key in excluded:
+                markers.extend(self._delete_gripper_markers(i, now, ns="goal_poses"))
+                continue
             family = goal_key.split('_')[0]
             rgb = self.GOAL_FAMILY_RGB.get(family, (0.0, 1.0, 0.0))
             opacity = self._belief_to_opacity(beliefs.get(goal_key, 0.0))
@@ -1405,6 +1418,22 @@ class SharedControlNode(Node):
             markers.extend(
                 self.create_gripper_markers(T_goal, opacity, i, now,
                                             ns="goal_poses", rgb=rgb))
+        return markers
+
+    @staticmethod
+    def _delete_gripper_markers(step_index, now, ns):
+        """DELETE the 3 marker parts (base + 2 fingers) built by create_gripper_markers
+        for the given step_index/ns, so an excluded/hidden goal is actually removed
+        from RViz instead of lingering at a stale pose."""
+        markers = []
+        for offset in range(3):
+            m = Marker()
+            m.header.frame_id = "base_footprint"
+            m.header.stamp = now
+            m.ns = ns
+            m.id = step_index * 3 + offset
+            m.action = Marker.DELETE
+            markers.append(m)
         return markers
 
     def publish_goal_pose_markers(self, beliefs, now=None):
