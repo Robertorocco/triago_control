@@ -478,302 +478,19 @@ Visualization Manager:
         Value: /teleop/target_markers
       Value: true
     - Class: rviz_default_plugins/TF
-      Enabled: true
+      Enabled: false
       Frame Timeout: 15
       Frames:
         All Enabled: false
-        arm_head_1_link:
-          Value: false
-        arm_head_2_link:
-          Value: false
-        arm_head_3_link:
-          Value: false
-        arm_head_4_link:
-          Value: false
-        arm_head_5_link:
-          Value: false
-        arm_head_6_link:
-          Value: false
-        arm_head_7_link:
-          Value: false
-        arm_head_tool_link:
-          Value: false
-        arm_left_1_link:
-          Value: false
-        arm_left_2_link:
-          Value: false
-        arm_left_3_link:
-          Value: false
-        arm_left_4_link:
-          Value: false
-        arm_left_5_link:
-          Value: false
-        arm_left_6_link:
-          Value: false
-        arm_left_7_link:
-          Value: false
-        arm_left_tool_link:
-          Value: false
-        arm_right_1_link:
-          Value: false
-        arm_right_2_link:
-          Value: false
-        arm_right_3_link:
-          Value: false
-        arm_right_4_link:
-          Value: false
-        arm_right_5_link:
-          Value: false
-        arm_right_6_link:
-          Value: false
-        arm_right_7_link:
-          Value: false
-        arm_right_tool_link:
-          Value: false
-        base_antenna_left_link:
-          Value: false
-        base_antenna_right_link:
-          Value: false
-        base_dock_link:
-          Value: false
-        base_footprint:
-          Value: true
-        base_front_laser_link:
-          Value: false
-        base_imu_link:
-          Value: false
-        base_link:
-          Value: true
-        base_rear_laser_link:
-          Value: false
-        gripper_head_camera_link:
-          Value: false
-        gripper_head_camera_rgbd_bottom_screw_frame:
-          Value: false
-        gripper_head_camera_rgbd_color_optical_frame:
-          Value: false
-        gripper_head_camera_rgbd_depth_optical_frame:
-          Value: false
-        gripper_head_camera_rgbd_link:
-          Value: false
-        gripper_left_base_finger_left_link:
-          Value: false
-        gripper_left_base_finger_right_link:
-          Value: false
-        gripper_left_base_link:
-          Value: false
-        gripper_left_fingertip_left_link:
-          Value: false
-        gripper_left_fingertip_right_link:
-          Value: false
-        gripper_left_grasping_link:
-          Value: true
-        gripper_left_inner_finger_left_link:
-          Value: false
-        gripper_left_inner_finger_right_link:
-          Value: false
-        gripper_left_outer_finger_left_link:
-          Value: false
-        gripper_left_outer_finger_right_link:
-          Value: false
-        gripper_left_screw_left_link:
-          Value: false
-        gripper_left_screw_right_link:
-          Value: false
-        gripper_right_base_finger_left_link:
-          Value: false
-        gripper_right_base_finger_right_link:
-          Value: false
-        gripper_right_base_link:
-          Value: false
-        gripper_right_fingertip_left_link:
-          Value: false
-        gripper_right_fingertip_right_link:
-          Value: false
-        gripper_right_grasping_link:
-          Value: true
-        gripper_right_inner_finger_left_link:
-          Value: false
-        gripper_right_inner_finger_right_link:
-          Value: false
-        gripper_right_outer_finger_left_link:
-          Value: false
-        gripper_right_outer_finger_right_link:
-          Value: false
-        gripper_right_screw_left_link:
-          Value: false
-        gripper_right_screw_right_link:
-          Value: false
-        suspension_front_left_link:
-          Value: false
-        suspension_front_right_link:
-          Value: false
-        suspension_rear_left_link:
-          Value: false
-        suspension_rear_right_link:
-          Value: false
-        torso_arm_head_link:
-          Value: false
-        torso_arm_left_link:
-          Value: false
-        torso_arm_right_link:
-          Value: false
-        torso_fixed_column_link:
-          Value: false
-        torso_fixed_link:
-          Value: false
-        torso_imu_link:
-          Value: false
-        torso_lift_link:
-          Value: false
-        virtual_base_laser_link:
-          Value: false
-        wheel_front_left_link:
-          Value: false
-        wheel_front_right_link:
-          Value: false
-        wheel_rear_left_link:
-          Value: false
-        wheel_rear_right_link:
-          Value: false
-        wrist_left_ft_sensor_base_link:
-          Value: false
-        wrist_left_ft_sensor_link:
-          Value: false
-        wrist_left_ft_tool_link:
-          Value: false
-        wrist_right_ft_sensor_base_link:
-          Value: false
-        wrist_right_ft_sensor_link:
-          Value: false
-        wrist_right_ft_tool_link:
-          Value: false
       Marker Scale: 0.5
       Name: TF
       Show Arrows: false
       Show Axes: true
       Show Names: false
       Tree:
-        base_footprint:
-          base_link:
-            base_antenna_left_link:
-              {}
-            base_antenna_right_link:
-              {}
-            base_dock_link:
-              {}
-            base_front_laser_link:
-              {}
-            base_imu_link:
-              {}
-            base_rear_laser_link:
-              {}
-            suspension_front_left_link:
-              wheel_front_left_link:
-                {}
-            suspension_front_right_link:
-              wheel_front_right_link:
-                {}
-            suspension_rear_left_link:
-              wheel_rear_left_link:
-                {}
-            suspension_rear_right_link:
-              wheel_rear_right_link:
-                {}
-            torso_fixed_column_link:
-              {}
-            torso_fixed_link:
-              torso_lift_link:
-                arm_head_1_link:
-                  arm_head_2_link:
-                    arm_head_3_link:
-                      arm_head_4_link:
-                        arm_head_5_link:
-                          arm_head_6_link:
-                            arm_head_7_link:
-                              arm_head_tool_link:
-                                gripper_head_camera_link:
-                                  gripper_head_camera_rgbd_bottom_screw_frame:
-                                    gripper_head_camera_rgbd_link:
-                                      {}
-                                  gripper_head_camera_rgbd_color_optical_frame:
-                                    {}
-                                  gripper_head_camera_rgbd_depth_optical_frame:
-                                    {}
-                arm_left_1_link:
-                  arm_left_2_link:
-                    arm_left_3_link:
-                      arm_left_4_link:
-                        arm_left_5_link:
-                          arm_left_6_link:
-                            arm_left_7_link:
-                              arm_left_tool_link:
-                                wrist_left_ft_sensor_base_link:
-                                  wrist_left_ft_sensor_link:
-                                    {}
-                                  wrist_left_ft_tool_link:
-                                    gripper_left_base_link:
-                                      gripper_left_base_finger_left_link:
-                                        gripper_left_inner_finger_left_link:
-                                          gripper_left_fingertip_left_link:
-                                            {}
-                                        gripper_left_screw_left_link:
-                                          {}
-                                      gripper_left_base_finger_right_link:
-                                        gripper_left_inner_finger_right_link:
-                                          gripper_left_fingertip_right_link:
-                                            {}
-                                        gripper_left_screw_right_link:
-                                          {}
-                                      gripper_left_grasping_link:
-                                        {}
-                                      gripper_left_outer_finger_left_link:
-                                        {}
-                                      gripper_left_outer_finger_right_link:
-                                        {}
-                arm_right_1_link:
-                  arm_right_2_link:
-                    arm_right_3_link:
-                      arm_right_4_link:
-                        arm_right_5_link:
-                          arm_right_6_link:
-                            arm_right_7_link:
-                              arm_right_tool_link:
-                                wrist_right_ft_sensor_base_link:
-                                  wrist_right_ft_sensor_link:
-                                    {}
-                                  wrist_right_ft_tool_link:
-                                    gripper_right_base_link:
-                                      gripper_right_base_finger_left_link:
-                                        gripper_right_inner_finger_left_link:
-                                          gripper_right_fingertip_left_link:
-                                            {}
-                                        gripper_right_screw_left_link:
-                                          {}
-                                      gripper_right_base_finger_right_link:
-                                        gripper_right_inner_finger_right_link:
-                                          gripper_right_fingertip_right_link:
-                                            {}
-                                        gripper_right_screw_right_link:
-                                          {}
-                                      gripper_right_grasping_link:
-                                        {}
-                                      gripper_right_outer_finger_left_link:
-                                        {}
-                                      gripper_right_outer_finger_right_link:
-                                        {}
-                torso_arm_head_link:
-                  {}
-                torso_arm_left_link:
-                  {}
-                torso_arm_right_link:
-                  {}
-                torso_imu_link:
-                  {}
-            virtual_base_laser_link:
-              {}
+        {}
       Update Interval: 0
-      Value: true
+      Value: false
     - Class: rviz_default_plugins/Marker
       Enabled: true
       Name: Marker
@@ -793,7 +510,6 @@ Visualization Manager:
       Namespaces:
         environment: true
         qp_debug: true
-        qp_debug_gripper: true
         task_environment: true
       Topic:
         Depth: 5
@@ -905,9 +621,6 @@ Visualization Manager:
       Name: QP_Debug_Markers
       Namespaces:
         goal_poses: true
-        grasp_guidance_pos: true
-        grasp_guidance_rot: true
-        policy_grippers: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -940,6 +653,18 @@ Visualization Manager:
         Reliability Policy: Best Effort
         Value: /guidance_policy_marker
       Value: true
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: false
+      Name: QP_Debug_Markers
+      Namespaces:
+        {}
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Best Effort
+        Value: /robot_policy_marker
+      Value: false
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -961,7 +686,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 1.603291630744934
+      Distance: 2.3502800464630127
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
