@@ -1,7 +1,11 @@
 # AI Agent Context — triago_control
 
 > **This file is maintained by the AI agent. Do not edit manually.**
-> Last updated: 2026-07-01 (per-arm SoftMin CBF split — fixes the residual inactive-arm coupling;
+> Last updated: 2026-07-01 (per-arm dynamic CBF safety-margin split — second coupling channel,
+> found after the per-arm SoftMin Jacobian split alone did not eliminate the reported
+> idle-arm oscillation; see §9.3. Also: fixed a `NameError` on a stale `b_col` reference left
+> over from the Jacobian split (PR #8), and replaced plotter.py's broken-in-sim raw-encoder
+> plot with the QP-solved joint velocity for direct QP-vs-simulator diagnosis.
 > STABLE v1 checkpoint tagged 2026-06-30 at commit "STABLE v1: teleoperation + grasping backup
 > checkpoint" — roll back there if this or a later change regresses the system)
 
@@ -584,6 +588,56 @@ tracked: `qp.last_lambda_cbf_right` / `qp.last_lambda_cbf_left` (their max is ke
   14-float layout (indices 2:8 for the right gradient, was 1:7); `lambda_cb` takes `msg.data[0]`
   (lambda_cbf_R) since that node always drives the right gripper.
 
+### 9.3 Per-arm dynamic safety margin split (2026-07-01) — the SECOND coupling channel
+
+After §9.2's Jacobian split, the operator still observed idle-arm oscillation when the
+active arm moved fast near an obstacle. Full mathematical re-audit of the CBF math found
+a second, independent coupling channel that the Jacobian split did not touch:
+`d_safe_dynamic = D_SAFE_BASE + K_V_SAFE * ||v_norm||`, where `v_norm` was computed from
+the **combined** velocity of BOTH arms (`concat(current_v[idx_right], current_v[idx_left])`),
+and this ONE scalar was used identically in both CBF rows:
+`b_col_X = -GAMMA_CBF * (h_soft_X - d_safe_dynamic)`.
+
+A fast active arm inflates the combined `v_norm`, which shrinks the idle arm's own margin
+against its (nearly always finite, just usually harmless) own `h_soft_L` — tightening
+`b_col_L` and forcing idle-arm joint motion **purely because the other arm sped up**, with
+no change in the idle arm's own geometry or proximity. This is a *threshold*-level coupling
+(shifts the constraint's RHS), distinct from the Jacobian-level coupling fixed in §9.2, and
+it survived that fix entirely.
+
+**Fix**: `CollisionManager.compute_softmin_jacobian` now computes `d_safe_dynamic_r` and
+`d_safe_dynamic_l` independently, each from only that arm's own `current_v[idx_right]` /
+`current_v[idx_left]` norm. `QPFormulator.build_and_solve` takes both and applies each to
+its own row. The grasp-margin SoftMin shift (per-pair negative margin during a controlled
+grasp contact) now looks up which arm actually owns the gripper side of that pair
+(`_arm_membership`) and uses that arm's own dynamic margin, instead of the old combined
+value (falls back to `max(d_safe_dynamic_r, d_safe_dynamic_l)` if membership is ambiguous —
+should not occur in practice). `/qp_debug/d_safe_dynamic` is now a 2-element
+`Float64MultiArray` `[d_safe_R, d_safe_L]` (was a single `Float64`); the plotter's "Dynamic
+Safety Margin" row now plots both.
+
+**A third, currently-inert channel was found and documented but NOT changed**: in
+`QPFormulator._schedule_weights`, `weight_slack_l`'s schedule uses
+`max(self._lam_col_f, self._lam_jl_f)`, where `_lam_col_f` is the LPF of
+`last_lambda_col = max(lambda_cbf_right, lambda_cbf_left)` — i.e. the ACTIVE arm's CBF
+shadow price can affect the IDLE arm's slack-weight schedule. This is currently masked in
+the reported "one active, one idle" scenario because a frozen arm's slack weight is pinned
+unconditionally to `MAX_WEIGHT_SLACK` (see `right_frozen`/`left_frozen` in
+`build_and_solve`), bypassing the dynamic schedule entirely. It only becomes live if BOTH
+arms are simultaneously active (neither frozen) — not the reported bug's scenario. Flagged
+here for whoever eventually revisits simultaneous-bimanual-teleop tuning; not touched now to
+keep this fix minimal and testable.
+
+**New diagnostic tool (plotter.py, 2026-07-01)**: row 2 of the "Joint Data" window
+("Raw Encoder vel") is REMOVED — Gazebo's simulated joint encoder velocities are
+known-broken (see §8.1) and added no diagnostic value. Replaced with "QP Solution
+(q_dot_safe)": the EXACT joint velocity vector the QP solved and sent to the TSID
+controllers this tick (sourced from the existing `/qp_debug/qdot_cmd` topic, previously
+only used for the row-3 servo-error computation). This lets the next diagnosis step
+directly distinguish "the QP itself commands nonzero idle-arm velocity" (a further
+QP-side coupling bug) from "the QP commands ~0 for the idle arm but the simulator/
+robot moves it anyway" (a simulator/inertia/PID-tuning issue, out of the QP's scope).
+
 ### 9.1 Sensing constraints (real-hardware honesty, 2026-06-29)
 
 **No Gazebo ground-truth is ever read** (`/gazebo/model_states`, `GetEntityState`, etc. — none
@@ -785,7 +839,7 @@ visible, so at most one frame is dropped.
 
 | Issue | Description | Proposed Fix |
 |-------|-------------|-------------|
-| **Residual inactive-arm motion** | ✅ **FIXED (2026-07-01)** — see §9.2. Was caused by the single shared scalar SoftMin CBF row mixing both arms' Jacobian columns. Replaced with two independent per-arm SoftMin rows (`J_soft_r`/`J_soft_l`), routed by `_arm_membership`. A pair only pollutes an arm's row if it actually touches that arm's geometry (or a cylinder it holds); genuine inter-arm pairs still contribute to both rows, preserving the desired "arm A may yield to help arm B" behavior. **Please re-verify in practice** (fast active-arm motion near an unrelated obstacle should no longer perturb the idle arm) and report back if any residual coupling remains. | Done — verify in testing. |
+| **Residual inactive-arm motion** | ⚠️ **PARTIALLY FIXED, one more channel found and closed (2026-07-01)**. Step 1 (§9.2): replaced the single shared scalar SoftMin CBF row with two independent per-arm rows (`J_soft_r`/`J_soft_l`) — this decoupled the *Jacobian columns* but the operator still observed idle-arm oscillation on fast active-arm motion. Step 2 (§9.3, this entry): found that `d_safe_dynamic` (the velocity-inflated CBF margin) was STILL a single scalar computed from the COMBINED both-arm velocity norm and shared by both rows — so a fast active arm inflated the idle arm's own margin/threshold even though its Jacobian was already zero-columned there. Split into `d_safe_dynamic_r`/`d_safe_dynamic_l`, each from only that arm's own joint velocities. **Please re-verify in practice** (fast active-arm motion near an unrelated obstacle should no longer perturb the idle arm) — if oscillation still persists, the NEW `plotter.py` row 2 ("QP Solution (q_dot_safe)", replacing the broken-in-sim raw encoder plot) will show directly whether it's present in the QP's own solved velocity (further QP-side coupling, e.g. `_schedule_weights`'s shared `last_lambda_col` feedback — see §9.3 note) or only downstream in the simulator/robot response. | Re-verify; if still present, check the plotter's new QP-solution row first. |
 | **Gazebo dual attach** | The IFRA_LinkAttacher plugin has a global `IsAttached` boolean allowing only ONE attachment. A patched `gazebo_link_attacher.cpp` was provided (per-pair gating, vector erase in Detach) — confirmed working by the operator. | Done. |
 | **No independent grasp confirmation** | Grasp success is decided PURELY geometrically (FK-derived contact distance/angle vs. the robot's own *believed* cylinder pose) — there is no force/torque sensing on the arm chains and no vision confirmation wired in yet, so a "successful" grasp can still be a miss if the geometric gates are satisfied by coincidence. Gates were tightened ~10% (2026-06-29) as a stopgap. | Wire `head_control/object_detector.py` (or similar) as an independent post-close confirmation (does the detected cylinder pose match "in the gripper"?), and/or measure the grasped cylinder's real axis at attach time instead of assuming world +Z (see §9.1). |
 | **Platform placement (dual arm)** | `GoalSet.set_grasped` / `clear_grasped` tracks one grasped color at a time. The per-arm context save/restore (`_ctx_goalset`) handles this for one-arm-active-at-a-time, but a true simultaneous dual-arm placement (both arms holding and both wanting to place concurrently) is NOT supported. | For the current "one active at a time" policy this is fine. If needed: extend GoalSet to hold per-arm grasped state (two axes, two z-offsets). |
