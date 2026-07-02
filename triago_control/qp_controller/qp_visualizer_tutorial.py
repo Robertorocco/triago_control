@@ -383,22 +383,39 @@ class QPVisualizer:
         # leaving permanent ghosts. Four DISTINCT namespaces here (two per
         # arm) can never collide with each other or with "qp_debug".
         def render_arm_gripper(ref_pos, ref_rot, frozen, side):
+            """Add the correct gripper markers (blue or grey) for one arm
+            directly into the `markers` MarkerArray, plus DELETE markers for
+            the alternate namespace — all in the SAME array, so everything
+            goes out in a SINGLE publish (no separate _delete_marker_group
+            calls that would flood the topic with extra publishes and cause
+            RViz subscriber-queue starvation / visual lag)."""
             blue_ns = f"qp_debug_gripper_{side}"
             grey_ns = f"frozen_gripper_{side}"
+
+            def _inline_delete(ns, start_id, count):
+                for i in range(count):
+                    m = Marker()
+                    m.header.frame_id = self.ref_frame
+                    m.header.stamp = timestamp
+                    m.ns = ns
+                    m.id = start_id + i
+                    m.action = Marker.DELETE
+                    markers.markers.append(m)
+
             if ref_pos is None or ref_rot is None:
-                self._delete_marker_group(blue_ns, start_id=0, count=3)
-                self._delete_marker_group(grey_ns, start_id=0, count=3)
+                _inline_delete(blue_ns, 0, 3)
+                _inline_delete(grey_ns, 0, 3)
                 return
             if frozen:
                 grey_markers = self._build_gripper(
                     ref_pos, ref_rot, 0.5, 0, timestamp,
                     color=ColorRGBA(r=0.6, g=0.6, b=0.6, a=0.5), ns=grey_ns)
                 markers.markers.extend(grey_markers)
-                self._delete_marker_group(blue_ns, start_id=0, count=3)
+                _inline_delete(blue_ns, 0, 3)
             else:
                 blue_markers = self._build_gripper(ref_pos, ref_rot, 0.8, 0, timestamp, ns=blue_ns)
                 markers.markers.extend(blue_markers)
-                self._delete_marker_group(grey_ns, start_id=0, count=3)
+                _inline_delete(grey_ns, 0, 3)
 
         render_arm_gripper(self.ref_pos_right, self.ref_rot_right, self.frozen_right, "right")
         render_arm_gripper(self.ref_pos_left, self.ref_rot_left, self.frozen_left, "left")
