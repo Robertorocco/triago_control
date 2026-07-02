@@ -42,7 +42,7 @@
 # =============================================================================
 
 # --- WHICH TEST TO RUN -------------------------------------------------------
-active_preset: "crossing_swap"
+active_preset: "local_minima_behind"
 
 # --- GLOBAL BEHAVIOUR FLAGS --------------------------------------------------
 # Lambda-driven time scaling (dynamic_trajectory / DYNAMIC_TRAJECTORY flag).
@@ -66,7 +66,7 @@ task_dimension: 6.0
 ref_frame: "base_footprint"
 
 # --- TRAJECTORY SHAPE / TIMING ----------------------------------------------
-duration: 10.0       # [s] virtual time to complete the quintic motion
+duration: 1.0        # [s] virtual time to complete the quintic motion (fast → instantaneous feel)
 delay_start: 1.0     # [s] settle window used to sample the real start pose
 cube_size: 0.1       # [m] edge of the random perturbation cube (swap_perturbed)
 
@@ -172,3 +172,71 @@ presets:
     left:  [0.5, 0.5, 0.3]
     rpy_right: [3.1416, 0.0, 1.5708]    # approach-left (crossing to left side)
     rpy_left:  [0.0, 1.5708, 0.0]       # top-grasp (lowered position)
+
+
+  # ==========================================================================
+  # LOCAL MINIMA TESTS (2026-07-01)
+  # ==========================================================================
+  # These presets are designed to trigger QP-CLF-CBF local minima — situations
+  # where the QP cannot make progress toward the target because the CLF's
+  # gradient direction is blocked by a hard constraint (joint limit and/or CBF
+  # obstacle) and no feasible joint velocity can simultaneously decrease V(e)
+  # AND satisfy all barrier constraints. The robot "parks" with a nonzero
+  # tracking error it cannot reduce — a local minimum in the CLF's landscape
+  # restricted to the CBF-safe set.
+  #
+  # Use with:
+  #   - ENABLE_REFERENCE_GOVERNOR = False (so the raw, far-away reference hits
+  #     the CLF directly with a huge error, maximizing the chance of conflict)
+  #   - duration: 1.0 s (reference slides fast → error appears instantly)
+  #   - Start from 'home' pose first, then switch active_preset here and re-run.
+  #
+  # Case 1: BEHIND THE ROBOT (joint limit + obstacle conflict)
+  #   The right hand is commanded to a position BEHIND the robot's own body
+  #   (negative X, i.e. behind the shoulder), with the approach axis pointing
+  #   straight UP (world +Z). This demands:
+  #     - All shoulder joints to rotate past/near their limits (the workspace
+  #       behind the torso is at the edge of the kinematic envelope)
+  #     - Simultaneous orientation change to gripper-up (90° pitch from the
+  #       usual forward-down start)
+  #   The CBF against the torso/body blocks backward motion of links 3-4-5,
+  #   while the joint-limit barriers on joints 1-2 block the shoulder rotation
+  #   → the QP is stuck: the CLF wants to go backward+reorient, every path
+  #   there is blocked by either the body or a joint limit.
+  # --------------------------------------------------------------------------
+  local_minima_behind:
+    category: out_of_workspace
+    description: "LOCAL MINIMA TEST 1: right hand behind the robot with
+                  gripper pointing UP. The CLF demands backward+reorient motion
+                  that is simultaneously blocked by the torso CBF and shoulder
+                  joint limits. Expected: robot parks with large tracking error."
+    arms: right
+    mode: absolute
+    right: [-0.1, -0.3, 1.0]
+    left:  [0.6,  0.5, 0.8]
+    rpy_right: [0.0, -1.5708, 0.0]      # gripper approach axis pointing UP (+Z world)
+    rpy_left:  [3.1416, 0.0, 0.0]       # left holds forward-down (inactive)
+
+  # Case 2: THROUGH THE TABLE (obstacle conflict, no joint-limit issue)
+  #   The right hand is commanded to a position INSIDE the table's volume
+  #   (X=1.0, which is the table centre, at Z=0.75 which is just above the
+  #   table surface) with the gripper pointing DOWN (top-grasp). The arm can
+  #   reach X=1.0 kinematically (it's in the forward workspace) BUT:
+  #     - The table CBF blocks penetration into the table volume
+  #     - The cylinder CBF blocks lateral paths that would go around the table
+  #       (cylinders sit at X=0.8, Y=±0.2)
+  #   The CLF wants to push the EE forward+down into the table — the CBF
+  #   pushes it back — equilibrium = local minimum with a large position error.
+  # --------------------------------------------------------------------------
+  local_minima_table:
+    category: out_of_workspace
+    description: "LOCAL MINIMA TEST 2: right hand commanded INSIDE the table
+                  volume (X=1.0, Z=0.75) with gripper pointing down. The CLF
+                  wants forward+down, the table CBF pushes back → stuck.
+                  Expected: robot parks near the table surface with error."
+    arms: right
+    mode: absolute
+    right: [1.0, -0.2, 0.75]
+    left:  [0.6,  0.5, 0.8]
+    rpy_right: [0.0, 1.5708, 0.0]       # top-grasp (approach axis pointing DOWN)
+    rpy_left:  [3.1416, 0.0, 0.0]       # left holds forward-down (inactive)

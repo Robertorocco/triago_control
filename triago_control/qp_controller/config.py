@@ -101,7 +101,7 @@ GAMMA_FILTER_TAU = 0.125       # Low-pass time constant for the gamma scheduler
 # reference velocity/acceleration that the CLF must handle, preserving QP
 # feasibility guarantees even under aggressive/discontinuous commands.
 # See triago_control/qp_controller/reference_governor.py for the full design.
-ENABLE_REFERENCE_GOVERNOR = True       # Master switch (False = raw passthrough, no filtering)
+ENABLE_REFERENCE_GOVERNOR = False      # Master switch (False = raw passthrough, no filtering)
 
 # --- Velocity shaping: clamp the reference velocity magnitude (direction preserved) ---
 GOV_V_MAX_LIN = 0.20                  # [m/s] max linear reference velocity passed to the CLF
