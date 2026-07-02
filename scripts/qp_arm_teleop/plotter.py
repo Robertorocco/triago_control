@@ -1268,9 +1268,9 @@ def main(args=None):
         ax.set_ylabel(ylabel, fontsize=9)
         ax.grid(True, alpha=0.3)
         ax.axhline(0, color='k', linewidth=0.5, alpha=0.4)
-        l_r, = ax.plot([], [], 'r-', linewidth=1.5, label='Right arm')
-        l_l, = ax.plot([], [], 'b-', linewidth=1.5, label='Left arm')
-        ax.legend(loc='upper right', fontsize=9)
+        l_r, = ax.plot([], [], 'r-', linewidth=1.5, label='R')
+        l_l, = ax.plot([], [], 'b-', linewidth=1.5, label='L')
+        ax.legend(loc='upper right', fontsize=7)
         lines_map[f'gov_norm_r_{row_i}'] = l_r
         lines_map[f'gov_norm_l_{row_i}'] = l_l
     axs7[-1].set_xlabel('Time [s]', fontsize=9)
