@@ -115,8 +115,11 @@ class SafetyQPController(Node):
         # Bounds position/orientation error, reference velocity/acceleration so
         # the CLF row's demand is always bounded → QP feasibility preserved.
         # One instance per arm (each has its own velocity memory for accel limiting).
-        self.gov_right = ReferenceGovernor('right')
-        self.gov_left = ReferenceGovernor('left')
+        # Now also hosts the RRT planner (joint-space path planning for local-minima escape).
+        self.gov_right = ReferenceGovernor('right', model=self.kin.model,
+                                           ee_frame_name=cfg.RIGHT_TCP_FRAME)
+        self.gov_left = ReferenceGovernor('left', model=self.kin.model,
+                                          ee_frame_name=cfg.LEFT_TCP_FRAME)
 
         # --- CONTROL MODE / REFERENCES ---
         self.orientation_ctrl = cfg.ORIENTATION_CTRL
@@ -178,6 +181,14 @@ class SafetyQPController(Node):
         # Layout: [pos_diff_R(3), ori_diff_R(3), vel_diff_R(3), wvel_diff_R(3),
         #          pos_diff_L(3), ori_diff_L(3), vel_diff_L(3), wvel_diff_L(3)] = 24 floats
         self.pub_gov_telemetry = self.create_publisher(Float64MultiArray, '/qp_debug/governor', 10)
+
+        # Purple gripper marker (RRT planned waypoint visualization, 2026-07-01)
+        from visualization_msgs.msg import Marker, MarkerArray
+        self.pub_rrt_gripper = self.create_publisher(MarkerArray, '/rrt_planned_waypoint', 10)
+        # RRT planner telemetry for the dedicated plotter window (2026-07-01):
+        # [planning_time_ms, path_length_m, waypoint_progress_frac, samples_used,
+        #  smoothed_waypoints_count, execution_elapsed_s] = 6 floats
+        self.pub_rrt_telemetry = self.create_publisher(Float64MultiArray, '/qp_debug/rrt_planner', 10)
 
         # --- SUBSCRIBERS ---
         self.create_subscription(JointState, '/joint_states', self.joint_callback, 10)
@@ -385,6 +396,65 @@ class SafetyQPController(Node):
         payload = ";".join(f"{n}:{lo:.4f}:{hi:.4f}" for n, lo, hi in zip(names, lower, upper))
         self.pub_joint_limits.publish(String(data=payload))
         self.timer_joint_limits.cancel()
+
+    def _publish_rrt_telemetry(self, rrt_wp_r, rrt_wp_l):
+        """Publish the purple gripper marker + RRT performance telemetry."""
+        from visualization_msgs.msg import Marker, MarkerArray
+        from std_msgs.msg import ColorRGBA
+        from scipy.spatial.transform import Rotation as R_scipy
+
+        ma = MarkerArray()
+        now = self.get_clock().now().to_msg()
+
+        def build_purple_gripper(wp_pos, marker_id):
+            if wp_pos is None:
+                # DELETE the marker when no waypoint is active
+                m = Marker()
+                m.header.frame_id = cfg.REF_FRAME
+                m.header.stamp = now
+                m.ns = "rrt_planned_gripper"
+                m.id = marker_id
+                m.action = Marker.DELETE
+                return [m]
+            # Simple sphere at the planned waypoint position (purple)
+            m = Marker()
+            m.header.frame_id = cfg.REF_FRAME
+            m.header.stamp = now
+            m.ns = "rrt_planned_gripper"
+            m.id = marker_id
+            m.type = Marker.SPHERE
+            m.action = Marker.ADD
+            m.pose.position.x = float(wp_pos[0])
+            m.pose.position.y = float(wp_pos[1])
+            m.pose.position.z = float(wp_pos[2])
+            m.pose.orientation.w = 1.0
+            m.scale.x = 0.06
+            m.scale.y = 0.06
+            m.scale.z = 0.06
+            m.color = ColorRGBA(r=0.6, g=0.0, b=0.9, a=0.9)  # purple
+            return [m]
+
+        ma.markers.extend(build_purple_gripper(rrt_wp_r, 0))
+        ma.markers.extend(build_purple_gripper(rrt_wp_l, 1))
+        self.pub_rrt_gripper.publish(ma)
+
+        # RRT performance telemetry: [planning_time_ms, path_length_m,
+        # waypoint_progress_frac, samples_used, smoothed_wps, exec_elapsed_s]
+        # Use the right arm's data if available, else left, else zeros.
+        gov = self.gov_right if self.gov_right.rrt_last_result is not None else self.gov_left
+        res = gov.rrt_last_result
+        if res is not None:
+            data = [
+                res.planning_time_s * 1000.0,       # planning time [ms]
+                res.total_cartesian_length,          # path length [m]
+                gov.rrt_wp_progress,                 # waypoint progress [0-1]
+                float(res.samples_used),             # samples
+                float(res.smoothed_path_length),     # smoothed waypoints count
+                gov._wp_execution_elapsed,           # execution elapsed [s]
+            ]
+        else:
+            data = [0.0] * 6
+        self.pub_rrt_telemetry.publish(Float64MultiArray(data=data))
 
     def _freeze_arm(self, side):
         """Snapshot one arm's CURRENT EE pose as its held reference (zero velocity).
@@ -632,6 +702,23 @@ class SafetyQPController(Node):
             self.qp.posture_scale_right = 1.0
             self.qp.posture_scale_left = 1.0
 
+        # --- RRT PLANNER UPDATE (2026-07-01) ---
+        # Check if the planner should trigger (posture correction insufficient +
+        # reference still), pick up results, advance waypoint queue.
+        rrt_wp_r = None
+        rrt_wp_l = None
+        if cfg.ENABLE_RRT_PLANNER and cfg.ENABLE_LOCAL_MINIMA_ESCAPE:
+            if x_gov_r is not None and self.kin.ee_id_right is not None and self.kin.current_q is not None:
+                rrt_wp_r = self.gov_right.update_rrt_planner(
+                    self.x_ref_right, self.xdot_ref_right,
+                    np.array(self.kin.data.oMf[self.kin.ee_id_right].translation),
+                    self.kin.current_q, self.col.cmodel, dt, logger=print)
+            if x_gov_l is not None and self.kin.ee_id_left is not None and self.kin.current_q is not None:
+                rrt_wp_l = self.gov_left.update_rrt_planner(
+                    self.x_ref_left, self.xdot_ref_left,
+                    np.array(self.kin.data.oMf[self.kin.ee_id_left].translation),
+                    self.kin.current_q, self.col.cmodel, dt, logger=print)
+
         # Compute CLF task errors from the GOVERNED references (not the raw ones).
         # task_dim_eff_{right,left} may be overridden to 3.0 (position-only) by
         # the local-minima escape above when an obstacle-induced minimum is
@@ -717,6 +804,9 @@ class SafetyQPController(Node):
                 self.pub_gov_telemetry.publish(Float64MultiArray(data=gov_data))
             else:
                 self.pub_gov_telemetry.publish(Float64MultiArray(data=[0.0] * 24))
+
+            # --- RRT planner telemetry + purple gripper marker (2026-07-01) ---
+            self._publish_rrt_telemetry(rrt_wp_r, rrt_wp_l)
 
         # --- 6. Evolve the digital twin (ideal kinematics) ---
         if cfg.SIMULATE_IDEAL_KINEMATICS:

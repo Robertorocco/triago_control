@@ -133,7 +133,7 @@ ENABLE_LOCAL_MINIMA_ESCAPE = True    # Master switch (independent of ENABLE_REFE
 LME_ERROR_TRIGGER = 0.15             # [m] error norm above which "stuck" is considered
 LME_ERROR_STUCK_WINDOW = 2.0         # [s] time window checked for a near-constant error
 LME_ERROR_STUCK_TOLERANCE = 0.02     # [m] max variation within the window to call it "stuck"
-LME_ERROR_RECOVERED = 0.10           # [m] error norm below which the escape ends (success)
+LME_ERROR_RECOVERED = 0.05           # [m] error norm below which the escape ends (success)
 LME_MAX_ESCAPE_DURATION = 10.0       # [s] max time the escape correction is held before giving up
 
 # --- Categorization (shadow prices from the PREVIOUS QP solve, same
@@ -151,6 +151,35 @@ LME_RAMP_TAU = 0.3                   # [s] smooth ramp time-constant for the pos
 
 # --- Console reporting ---
 LME_CONSOLE_PERIOD = 3.0             # [s] throttle period for the non-spam status print while escaping
+
+# =============================================================================
+# 3d. RRT-CONNECT JOINT-SPACE PLANNER (2026-07-01)
+# =============================================================================
+# A bidirectional RRT-Connect that plans in the FULL 7D joint-space of one arm,
+# using the SAME hppfcl collision model the CBF uses — so the planner and the
+# real-time controller agree on what's safe. Runs asynchronously in a background
+# thread, triggered by the local-minima escape when the posture correction alone
+# fails AND the reference is approximately still. Output: a sequence of Cartesian
+# waypoints (derived from the planned collision-free joint configs via FK) fed to
+# the governor's waypoint queue.
+ENABLE_RRT_PLANNER = True             # Master switch (requires ENABLE_LOCAL_MINIMA_ESCAPE too)
+RRT_PLANNING_BUDGET_S = 1.5           # [s] max wall-clock time the planner thread is allowed
+RRT_STEP_SIZE = 0.15                  # [rad] max step per RRT extend in joint-space
+RRT_GOAL_BIAS = 0.10                  # probability of sampling the goal directly (vs random)
+RRT_GOAL_POS_TOLERANCE = 0.03         # [m] EE position tolerance for "goal reached" in the tree
+RRT_COLLISION_MARGIN = 0.005          # [m] extra safety margin ON TOP of D_SAFE_BASE for the planner
+                                      #   (so the planned path is more conservative than the CBF)
+RRT_MAX_SAMPLES = 8000                # absolute sample cap (fallback if wall-clock budget is generous)
+RRT_SHORTCUT_ITERS = 50              # smoothing passes after a raw path is found
+RRT_WAYPOINT_ADVANCE_THRESH = 0.04    # [m] ||x_real - x_wp|| below which the governor advances
+                                      #   to the next waypoint in the queue
+RRT_EXECUTION_ERROR_EXIT = 0.03       # [m] error below which the planned-path execution ends (success)
+RRT_EXECUTION_TIMEOUT = 20.0          # [s] max time following the planned waypoints before giving up
+RRT_REF_STILL_VELOCITY = 0.02         # [m/s] reference velocity norm below which "still" is declared
+                                      #   (allows for small hand oscillation on the haptic device)
+RRT_TRIGGER_DELAY_S = 4.0             # [s] time the local-minima escape must be active (posture
+                                      #   correction already applied) before the RRT planner kicks in
+                                      #   (gives the cheap heuristic a chance to work first)
 
 # =============================================================================
 # 4. LOOP / TELEMETRY SETTINGS

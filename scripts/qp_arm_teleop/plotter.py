@@ -211,6 +211,11 @@ class TriagoDashboard(Node):
         self.gov_time = deque(maxlen=self.history_len)
         self.create_subscription(Float64MultiArray, '/qp_debug/governor', self.gov_callback, qos_profile)
 
+        # --- RRT Planner telemetry (2026-07-01) ---
+        self.rrt_buffer = deque(maxlen=self.history_len)
+        self.rrt_time = deque(maxlen=self.history_len)
+        self.create_subscription(Float64MultiArray, '/qp_debug/rrt_planner', self.rrt_callback, qos_profile)
+
         # --- Topic sanity check (2026-07-01): logs once, ~6s after startup,
         # comparing the /joint_states update rate of a representative arm
         # joint against the two gripper finger joints. ---
@@ -287,6 +292,13 @@ class TriagoDashboard(Node):
         if len(msg.data) >= 24:
             self.gov_time.append(self.get_time())
             self.gov_buffer.append(list(msg.data[:24]))
+
+    # --- RRT Planner telemetry (2026-07-01) ---
+    def rrt_callback(self, msg):
+        """[planning_time_ms, path_length_m, wp_progress, samples, smoothed_wps, exec_elapsed_s]"""
+        if len(msg.data) >= 6:
+            self.rrt_time.append(self.get_time())
+            self.rrt_buffer.append(list(msg.data[:6]))
 
     def get_time(self):
         """Returns the current time in seconds, normalized to start exactly at t=0.0"""
@@ -856,6 +868,28 @@ def update_plot(frame, node, lines_map, axs1, axs2, axs3, ax_pairs, dyn_plots, f
                 ax.autoscale_view(scalex=False, scaley=True)
             figs[6].canvas.draw_idle()
 
+    # --- PART 9: RRT Planner performance (figs[7]) ---
+    if node.rrt_time:
+        t_rrt = list(node.rrt_time)
+        data_rrt = list(node.rrt_buffer)
+        m = min(len(t_rrt), len(data_rrt))
+        if m > 0:
+            arr = np.array(data_rrt[:m], dtype=float)  # (m, 6)
+            t_view = t_rrt[:m]
+            # [0]=plan_time_ms, [1]=path_len_m, [2]=wp_progress, [3]=samples,
+            # [4]=smoothed_wps, [5]=exec_elapsed_s
+            lines_map['rrt_wp_progress'].set_data(t_view, arr[:, 2])
+            lines_map['rrt_exec_time'].set_data(t_view, arr[:, 5])
+            lines_map['rrt_plan_ms'].set_data(t_view, arr[:, 0])
+            max_t = t_view[-1]
+            for ax in figs[7].axes:
+                ax.set_xlim(max(0, max_t - window), max_t + 0.1)
+                ax.relim()
+                ax.autoscale_view(scalex=False, scaley=True)
+            # Keep progress plot's y-axis fixed at [0, 1]
+            figs[7].axes[0].set_ylim(-0.05, 1.05)
+            figs[7].canvas.draw_idle()
+
     return artists
 
 
@@ -1276,9 +1310,45 @@ def main(args=None):
     axs7[-1].set_xlabel('Time [s]', fontsize=9)
 
     # ===================================================================
+    # WINDOW 8: "RRT Planner" — performance metrics when triggered
+    # ===================================================================
+    # Populates only when the joint-space RRT planner is triggered (local
+    # minima + still reference). Shows: waypoint progress, execution time,
+    # planning time snapshot, path length.
+    fig8, axs8 = plt.subplots(3, 1, sharex=True, figsize=(7, 5))
+    fig8.canvas.manager.set_window_title('RRT Planner Performance')
+    fig8.suptitle('RRT Planner (joint-space)')
+
+    # Row 0: Waypoint progress [0-1]
+    l_wp_prog, = axs8[0].plot([], [], color='#9b59b6', linewidth=2.0, label='WP progress')
+    axs8[0].set_ylabel('Progress [-]', fontsize=8)
+    axs8[0].set_ylim(-0.05, 1.05)
+    axs8[0].set_title('Waypoint queue progress', fontsize=9)
+    axs8[0].grid(True, alpha=0.3)
+    axs8[0].legend(loc='upper left', fontsize=7)
+    lines_map['rrt_wp_progress'] = l_wp_prog
+
+    # Row 1: Execution elapsed [s] + path length [m] (dual y-axis)
+    l_exec_t, = axs8[1].plot([], [], color='#e74c3c', linewidth=1.5, label='Exec time [s]')
+    axs8[1].set_ylabel('Time [s]', fontsize=8)
+    axs8[1].set_title('Execution elapsed', fontsize=9)
+    axs8[1].grid(True, alpha=0.3)
+    axs8[1].legend(loc='upper left', fontsize=7)
+    lines_map['rrt_exec_time'] = l_exec_t
+
+    # Row 2: Planning time [ms] + samples used (text-style: just the latest value as a step)
+    l_plan_ms, = axs8[2].plot([], [], color='#3498db', linewidth=1.5, label='Plan time [ms]')
+    axs8[2].set_ylabel('Time [ms]', fontsize=8)
+    axs8[2].set_title('Planning time (per call)', fontsize=9)
+    axs8[2].grid(True, alpha=0.3)
+    axs8[2].legend(loc='upper left', fontsize=7)
+    axs8[2].set_xlabel('Time [s]', fontsize=8)
+    lines_map['rrt_plan_ms'] = l_plan_ms
+
+    # ===================================================================
     # WINDOW PLACEMENT (from wmctrl, slightly aligned)
     # ===================================================================
-    figs = [fig1, fig2, fig3, fig4, fig5, fig6, fig7]
+    figs = [fig1, fig2, fig3, fig4, fig5, fig6, fig7, fig8]
 
     place_window(fig1, 86, 126, 851, 1131)    # Left: Joint Data
     place_window(fig2, 893, 118, 542, 1131)   # Center: QP Data
@@ -1287,6 +1357,7 @@ def main(args=None):
     place_window(fig5, 350, 350, 700, 380)    # Debug: Task authority (floats on top)
     place_window(fig6, 400, 400, 900, 620)    # Debug: Joint Positions slider GUI
     place_window(fig7, 450, 450, 700, 600)    # Debug: Reference Governor
+    place_window(fig8, 500, 500, 650, 450)    # Debug: RRT Planner
 
     # ===================================================================
     # ANIMATION

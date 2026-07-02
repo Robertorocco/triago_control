@@ -46,16 +46,21 @@ All four operate on the SE(3) reference BEFORE it reaches extract_task_errors.
 import numpy as np
 import pinocchio as pin
 from collections import deque
+import time
 import triago_control.qp_controller.config as cfg
+from triago_control.qp_controller.rrt_planner import RRTPlanner, RRTPlannerResult
 
 
 class ReferenceGovernor:
     """Per-arm reference governor instance. Stateful (velocity memory for accel limiting)."""
 
-    def __init__(self, arm_side: str):
+    def __init__(self, arm_side: str, model=None, ee_frame_name=None):
         """
         Args:
             arm_side: 'right' or 'left' (used only for logging/debug identity).
+            model: Pinocchio model (needed for RRT planner). Can be None if
+                   ENABLE_RRT_PLANNER is False.
+            ee_frame_name: e.g. 'gripper_right_grasping_link' (for FK in the planner).
         """
         self.arm_side = arm_side
 
@@ -86,6 +91,28 @@ class ReferenceGovernor:
         self._lme_posture_scale = 1.0          # ramped actual multiplier (returned to the caller)
         self._lme_last_console_time = -1e9     # forces an immediate print on the first report
 
+        # --- RRT-Connect planner (2026-07-01) ---
+        # Joint-space planner for escaping local minima that the posture-weight
+        # correction alone cannot resolve. Runs asynchronously in a background
+        # thread, produces Cartesian waypoints consumed by govern().
+        self._rrt = None
+        if cfg.ENABLE_RRT_PLANNER and model is not None and ee_frame_name is not None:
+            self._rrt = RRTPlanner(arm_side, model, ee_frame_name)
+        # Waypoint queue: an ordered list of 3D positions the governor feeds to
+        # the CLF one-by-one (priority=1.0, position-only). Populated by the RRT
+        # result; consumed/advanced in govern().
+        self._wp_queue = []               # list of np.ndarray(3)
+        self._wp_index = 0                # current waypoint being tracked
+        self._wp_active = False           # True while executing the planned path
+        self._wp_execution_elapsed = 0.0  # [s] time since waypoint execution started
+        self._wp_original_x_ref = None    # the original target the user asked for (restore on exit)
+        # RRT trigger tracking: the planner fires only after the posture correction
+        # has been active for RRT_TRIGGER_DELAY_S and still hasn't solved the problem.
+        self._rrt_triggered = False
+        # Performance telemetry (read by the plotter / console)
+        self.rrt_last_result = None       # RRTPlannerResult (read-only for external consumers)
+        self.rrt_wp_progress = 0.0        # fraction [0, 1] through the waypoint queue
+
     # =====================================================================
     # PUBLIC API
     # =====================================================================
@@ -109,8 +136,46 @@ class ReferenceGovernor:
         if x_ref is None:
             return None, None, None, None
 
+        # --- RRT WAYPOINT QUEUE CONSUMPTION (2026-07-01) ---
+        # If the planner produced a waypoint queue and we're actively executing
+        # it, the WAYPOINT becomes the position reference (overriding the raw
+        # x_ref) until the queue is exhausted or aborted. Orientation is left
+        # free (position-only, task_dim=3.0 is handled by the local-minima
+        # escape's task_dim_override — set when the RRT is triggered).
+        if self._wp_active and self._wp_queue:
+            self._wp_execution_elapsed += dt
+            # ABORT CHECK: if the raw reference is MOVING (user resumed teleop),
+            # drop the planned path and return to normal tracking immediately.
+            v_ref_norm = np.linalg.norm(v_ref) if v_ref is not None else 0.0
+            if v_ref_norm > cfg.RRT_REF_STILL_VELOCITY:
+                self._abort_waypoint_execution(reason="reference moved (user override)")
+            # EXIT CHECK: error below threshold → success
+            elif x_real is not None and np.linalg.norm(x_ref - x_real) < cfg.RRT_EXECUTION_ERROR_EXIT:
+                self._abort_waypoint_execution(reason="error below exit threshold (success)")
+            # EXIT CHECK: timeout
+            elif self._wp_execution_elapsed >= cfg.RRT_EXECUTION_TIMEOUT:
+                self._abort_waypoint_execution(reason="execution timeout")
+            else:
+                # ADVANCE: if the EE is close to the current waypoint, step to the next
+                current_wp = self._wp_queue[self._wp_index]
+                if x_real is not None and np.linalg.norm(x_real - current_wp) < cfg.RRT_WAYPOINT_ADVANCE_THRESH:
+                    if self._wp_index < len(self._wp_queue) - 1:
+                        self._wp_index += 1
+                    else:
+                        # Reached the last waypoint → done, resume tracking original target
+                        self._abort_waypoint_execution(reason="final waypoint reached (success)")
+
+        # Determine the effective position reference: planned waypoint or raw
+        if self._wp_active and self._wp_queue and self._wp_index < len(self._wp_queue):
+            x_effective = self._wp_queue[self._wp_index]
+            # Progress telemetry
+            self.rrt_wp_progress = (self._wp_index + 1) / len(self._wp_queue)
+        else:
+            x_effective = x_ref
+            self.rrt_wp_progress = 0.0
+
         # Work on copies so we never mutate the caller's arrays
-        x_gov = np.array(x_ref, dtype=float)
+        x_gov = np.array(x_effective, dtype=float)
         rpy_gov = np.array(rpy_ref, dtype=float) if rpy_ref is not None else None
         v_gov = np.array(v_ref, dtype=float) if v_ref is not None else np.zeros(3)
         w_gov = np.array(w_ref, dtype=float) if w_ref is not None else np.zeros(3)
@@ -131,6 +196,19 @@ class ReferenceGovernor:
 
         return x_gov, rpy_gov, v_gov, w_gov
 
+    def _abort_waypoint_execution(self, reason=""):
+        """End the RRT waypoint execution, returning to normal CLF tracking."""
+        self._wp_active = False
+        self._wp_queue = []
+        self._wp_index = 0
+        self._wp_execution_elapsed = 0.0
+        self._rrt_triggered = False
+        self.rrt_wp_progress = 0.0
+        if self._rrt is not None:
+            self._rrt.abort()
+        print(f"\033[95m[RRT][{self.arm_side.upper()}] Waypoint execution ended: {reason}\033[0m",
+              flush=True)
+
     def reset(self):
         """Reset internal state (call on arm switch / re-anchor / watchdog freeze)."""
         self._v_lin_prev = np.zeros(3)
@@ -148,6 +226,16 @@ class ReferenceGovernor:
         self._lme_category = None
         self._lme_escape_elapsed = 0.0
         self._lme_posture_scale = 1.0
+        # RRT planner: abort any running plan and clear the waypoint queue.
+        if self._rrt is not None:
+            self._rrt.abort()
+        self._wp_queue = []
+        self._wp_index = 0
+        self._wp_active = False
+        self._wp_execution_elapsed = 0.0
+        self._wp_original_x_ref = None
+        self._rrt_triggered = False
+        self.rrt_wp_progress = 0.0
 
     # =====================================================================
     # WAYPOINT INJECTION INTERFACE (STUB — future planning hook)
@@ -363,6 +451,97 @@ class ReferenceGovernor:
     def local_minima_state(self):
         """('normal'|'escaping', category or None) -- for external telemetry/logging."""
         return self._lme_state, self._lme_category
+
+    # =====================================================================
+    # RRT PLANNER TRIGGER + INTEGRATION (2026-07-01)
+    # =====================================================================
+
+    def update_rrt_planner(self, x_ref, v_ref, x_real, current_q_full, cmodel, dt, logger=None):
+        """Check whether to trigger/consume the RRT planner. Called every tick
+        AFTER update_local_minima_escape.
+
+        The planner fires when ALL of the following are true simultaneously:
+          - ENABLE_RRT_PLANNER is True
+          - The local-minima escape is in 'escaping' state (posture correction active)
+          - The escape has been active for >= RRT_TRIGGER_DELAY_S (gave the cheap
+            heuristic a chance)
+          - The reference velocity is below RRT_REF_STILL_VELOCITY (user's hand
+            is approximately still — no point planning toward a moving target)
+          - The planner is not already running or has not already produced a result
+            for this escape episode
+
+        Args:
+            x_ref: (3,) the raw target position (the GOAL for the planner).
+            v_ref: (3,) the raw reference velocity (for still-detection).
+            x_real: (3,) the current EE position (for error check on result pickup).
+            current_q_full: full-model configuration (pin.neutral size).
+            cmodel: the collision GeometryModel (shared, read-only).
+            dt: control timestep [s].
+            logger: optional callable(str) for console output.
+
+        Returns:
+            current_planned_waypoint: np.ndarray(3) or None — the waypoint the
+                purple gripper RViz marker should be drawn at (None if no
+                planned path is being executed).
+        """
+        if self._rrt is None or not cfg.ENABLE_RRT_PLANNER:
+            return None
+
+        # --- Pick up a completed planning result (from the background thread) ---
+        if self._rrt.is_running:
+            pass  # still computing, nothing to pick up
+        elif not self._wp_active and self._rrt_triggered:
+            # The planner was triggered and has finished (or was never started
+            # due to abort). Check if there's a result to use.
+            result = self._rrt.result
+            if result is not None and result.success and result.cartesian_waypoints:
+                self.rrt_last_result = result
+                self._wp_queue = list(result.cartesian_waypoints)
+                self._wp_index = 0
+                self._wp_active = True
+                self._wp_execution_elapsed = 0.0
+                self._wp_original_x_ref = np.array(x_ref) if x_ref is not None else None
+                if logger is not None:
+                    logger(f"\033[95m[RRT][{self.arm_side.upper()}] Path found! "
+                          f"{result.smoothed_path_length} waypoints, "
+                          f"Cartesian length={result.total_cartesian_length:.3f}m, "
+                          f"planning time={result.planning_time_s*1000:.0f}ms, "
+                          f"samples={result.samples_used}. Executing...\033[0m")
+            elif result is not None and not result.success:
+                self.rrt_last_result = result
+                self._rrt_triggered = False  # allow re-trigger on next escape cycle
+                if logger is not None:
+                    logger(f"\033[91m[RRT][{self.arm_side.upper()}] Planning FAILED "
+                          f"(samples={result.samples_used}, "
+                          f"time={result.planning_time_s*1000:.0f}ms). "
+                          f"Staying with posture correction only.\033[0m")
+
+        # --- TRIGGER CONDITION: start a new planning call ---
+        if (self._lme_state == 'escaping'
+                and not self._wp_active
+                and not self._rrt_triggered
+                and not self._rrt.is_running
+                and self._lme_escape_elapsed >= cfg.RRT_TRIGGER_DELAY_S):
+            # Check reference is approximately still
+            v_norm = np.linalg.norm(v_ref) if v_ref is not None else 0.0
+            if v_norm <= cfg.RRT_REF_STILL_VELOCITY and x_ref is not None:
+                self._rrt_triggered = True
+                # Create a FRESH cdata for the planner thread (thread-safety:
+                # the control loop uses its own cdata, the planner gets a copy).
+                import pinocchio as pin
+                cdata_plan = cmodel.createData()
+                for req in cdata_plan.distanceRequests:
+                    req.enable_nearest_points = True
+                self._rrt.plan_async(current_q_full, np.array(x_ref), cmodel, cdata_plan)
+                if logger is not None:
+                    logger(f"\033[95m[RRT][{self.arm_side.upper()}] Planner TRIGGERED "
+                          f"(escape active for {self._lme_escape_elapsed:.1f}s, "
+                          f"ref still, error not resolved). Planning in background...\033[0m")
+
+        # --- Return the current waypoint for visualization (purple gripper) ---
+        if self._wp_active and self._wp_queue and self._wp_index < len(self._wp_queue):
+            return self._wp_queue[self._wp_index]
+        return None
 
     # =====================================================================
     # INTERNAL FEATURE IMPLEMENTATIONS
