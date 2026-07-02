@@ -477,6 +477,13 @@ class SafetyQPController(Node):
             return np.zeros(3), np.zeros(3)
         x_real = self.kin.data.oMf[ee_id].translation
         e_pos = x_ref - x_real
+        # task_dim == 3.0: POSITION-ONLY CLF, orientation fully relaxed. Used by
+        # the local-minima escape (2026-07-01) to give up the orientation task
+        # entirely during an obstacle-induced escape (see solve_and_publish's
+        # task_dim_eff_right/left override). Checked BEFORE the normal
+        # orientation_ctrl branch so it applies even when orientation_ctrl=True.
+        if task_dim == 3.0:
+            return e_pos, xdot_ref
         if self.orientation_ctrl and rpy_ref is not None:
             R_real = self.kin.data.oMf[ee_id].rotation
             R_des = pin.rpy.rpyToMatrix(rpy_ref[0], rpy_ref[1], rpy_ref[2])
@@ -591,11 +598,48 @@ class SafetyQPController(Node):
             x_gov_l, rpy_gov_l, v_gov_l, w_gov_l = (
                 self.x_ref_left, self.rpy_ref_left, self.xdot_ref_left, self.w_ref_left)
 
-        # Compute CLF task errors from the GOVERNED references (not the raw ones)
+        # --- LOCAL MINIMA ESCAPE (2026-07-01) ---
+        # Detect a possible QP-CLF-CBF local minimum from the 3D position
+        # error (per instruction, position-only for now) and the shadow
+        # prices from the QP's PREVIOUS solve (self.qp.last_lambda_cbf_*
+        # and last_lambda_joints_* are exactly last tick's values -- the
+        # current tick hasn't solved yet). If detected, apply a smooth,
+        # PER-ARM posture-weight correction (and, for an obstacle-induced
+        # minimum, force a position-only task_dim) until the error recovers
+        # or the max escape duration elapses.
+        task_dim_eff_right = self.task_dim_right
+        task_dim_eff_left = self.task_dim_left
+        if cfg.ENABLE_LOCAL_MINIMA_ESCAPE:
+            if x_gov_r is not None and self.kin.ee_id_right is not None:
+                err_norm_r = float(np.linalg.norm(
+                    x_gov_r - np.array(self.kin.data.oMf[self.kin.ee_id_right].translation)))
+                pscale_r, tdim_override_r = self.gov_right.update_local_minima_escape(
+                    err_norm_r, self.qp.last_lambda_cbf_right, self.qp.last_lambda_joints_right,
+                    dt, logger=print)
+                self.qp.posture_scale_right = pscale_r
+                if tdim_override_r is not None:
+                    task_dim_eff_right = tdim_override_r
+            if x_gov_l is not None and self.kin.ee_id_left is not None:
+                err_norm_l = float(np.linalg.norm(
+                    x_gov_l - np.array(self.kin.data.oMf[self.kin.ee_id_left].translation)))
+                pscale_l, tdim_override_l = self.gov_left.update_local_minima_escape(
+                    err_norm_l, self.qp.last_lambda_cbf_left, self.qp.last_lambda_joints_left,
+                    dt, logger=print)
+                self.qp.posture_scale_left = pscale_l
+                if tdim_override_l is not None:
+                    task_dim_eff_left = tdim_override_l
+        else:
+            self.qp.posture_scale_right = 1.0
+            self.qp.posture_scale_left = 1.0
+
+        # Compute CLF task errors from the GOVERNED references (not the raw ones).
+        # task_dim_eff_{right,left} may be overridden to 3.0 (position-only) by
+        # the local-minima escape above when an obstacle-induced minimum is
+        # detected -- this is what "gives up orientation" during the escape.
         e_r, v_r = self._arm_task_error(self.kin.ee_id_right, x_gov_r, rpy_gov_r,
-                                        v_gov_r, w_gov_r, self.task_dim_right)
+                                        v_gov_r, w_gov_r, task_dim_eff_right)
         e_l, v_l = self._arm_task_error(self.kin.ee_id_left, x_gov_l, rpy_gov_l,
-                                        v_gov_l, w_gov_l, self.task_dim_left)
+                                        v_gov_l, w_gov_l, task_dim_eff_left)
 
         # --- 3. Build + solve the CLF-CBF-QP ---
         # Smoothly ramp the posture-task weight scale: drop toward POSTURE_GRASP_SCALE

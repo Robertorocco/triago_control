@@ -915,6 +915,89 @@ bounds — so the QP is transparently steered out of local minima without ever
 receiving an infeasible/discontinuous command. The blending logic will be
 implemented when the planning module is built.
 
+### 9.9 Local Minima Escape (governor extension, 2026-07-01)
+
+Extends the Reference Governor (§9.8) with a state machine that detects a
+possible QP-CLF-CBF local minimum and applies a temporary, PER-ARM posture-
+weight correction to help escape it. Implemented in
+`reference_governor.ReferenceGovernor.update_local_minima_escape` (one state
+machine per arm, same as the rest of the governor).
+
+**Two known local-minima causes** (identified before implementing, confirmed
+by the operator via manual teleoperation trigger — not encoded as fixed test
+scenarios):
+1. A CBF obstacle blocks the direct path to the reference (high `lambda_cbf`).
+2. A joint-limit barrier blocks the required joint rotation (high
+   `lambda_joints`).
+3. Both simultaneously — **obstacle takes priority** per instruction.
+
+**Detection** (3D position error only, per instruction — orientation/velocity
+error not handled yet): the error norm `||x_ref_governed − x_real||` is
+tracked over a rolling `LME_ERROR_STUCK_WINDOW=2.0s` window. "Stuck" = error
+`> LME_ERROR_TRIGGER=0.15m` AND has varied by less than
+`LME_ERROR_STUCK_TOLERANCE=0.02m` across the whole window (not just moving
+slowly — genuinely not decreasing).
+
+**Categorization**: read from the shadow prices produced by the QP's
+**PREVIOUS** solve (`qp.last_lambda_cbf_right/left`, `qp.last_lambda_joints_
+right/left` — the current tick hasn't solved yet when the governor runs).
+Thresholds (`LME_LAMBDA_CBF_THRESHOLD=10.0`, `LME_LAMBDA_JOINT_THRESHOLD=1.0`)
+are **operator-tuned for the CURRENT parameter set** — if `GAMMA_CBF`,
+`D_SAFE_BASE`, `P_GAIN_LIMITS`, `MAX_WEIGHT_SLACK`, etc. are retuned, these
+may need to be revisited (explicitly flagged by the operator).
+
+**Escape action** (posture task ONLY — verified no other module writes to
+`qp.posture_scale_right`/`_left`, so no conflict):
+
+| Category | Posture weight | Task dimension |
+|----------|----------------|-----------------|
+| Obstacle | `x0.2` (`LME_POSTURE_SCALE_OBSTACLE`) — more redundancy to slip past | forced to `3.0` (position-only, orientation fully relaxed — `LME_TASK_DIM_OBSTACLE`) |
+| Joint limit | `x5.0` (`LME_POSTURE_SCALE_JOINT`) — push harder away from the limit | unchanged |
+| Unknown (stuck but neither threshold exceeded) | unchanged (ramped back to `1.0`) | unchanged |
+
+The multiplier is **smoothly ramped** (first-order low-pass, `LME_RAMP_TAU=
+0.3s` — same technique as the existing grasp-phase `POSTURE_SCALE_TAU` ramp)
+rather than stepped, so the QP cost function never sees a discontinuity.
+
+**Per-arm posture weight (`qp_formulator.py` extension)**: `QPFormulator`
+previously had only a single GLOBAL `posture_scale` (used for the grasp-phase
+ramp, shared by both arms). Added `posture_scale_right`/`posture_scale_left`
+(default `1.0`), which multiply the GLOBAL scale **on that arm's joints only**
+— composed as `w_center_vec[idx_right] = W_CENTER * posture_scale * posture_
+scale_right`, i.e. a per-joint weight vector instead of a single scalar. The
+soft-task energy telemetry (`task_energies[1]`, the posture share on the
+"Task Authority" plot) was updated to use a proper weighted quadratic form
+(`np.dot(w_center_vec, dq_post**2)`) since the weight is no longer uniform.
+
+**Exit conditions**: the escape ends (state → `'normal'`) when the error drops
+below `LME_ERROR_RECOVERED=0.10m` (success) **or** `LME_MAX_ESCAPE_DURATION=
+10.0s` elapses (give up — avoid holding a distorted posture weight forever if
+the correction didn't work), whichever comes first. On exit, the governor
+immediately resumes checking for a NEW local minimum (no cooldown) — this is
+what "back to the normal execution state" means per instruction.
+
+**Console reporting** (non-spam, per instruction): a colored one-shot message
+on DETECTION (categorized: obstacle / joint limit / unknown), a colored
+one-shot message on EXIT (recovered vs. timed out), and a **throttled status
+line every `LME_CONSOLE_PERIOD=3.0s`** while an escape is in progress (posture
+scale value, current error, elapsed/max duration). No plot was added for this
+weight per instruction — console only.
+
+**Master switch**: `cfg.ENABLE_LOCAL_MINIMA_ESCAPE` (independent of
+`cfg.ENABLE_REFERENCE_GOVERNOR` — the escape mechanism does not depend on the
+velocity/error/acceleration bounding features being active, though in
+practice it operates on the GOVERNED reference `x_gov_r`/`x_gov_l`, so if the
+main governor is off, `x_gov == raw reference` and the escape still works
+correctly against the raw error).
+
+**Integration point** (`main_qp_controller.py`): computed right after the
+governor's `govern()` call, using `x_gov_r`/`x_gov_l` (the governed reference)
+vs. the real EE position for the error norm. The resulting
+`task_dim_eff_right`/`_left` (raw `task_dim` unless overridden to `3.0`) feeds
+`_arm_task_error` for THIS tick only — `self.task_dim_right`/`_left` (the raw
+value from the cartesian-reference topic) is never mutated, so the escape is
+fully transparent to any other consumer of that state.
+
 ### 9.1 Sensing constraints (real-hardware honesty, 2026-06-29)
 
 **No Gazebo ground-truth is ever read** (`/gazebo/model_states`, `GetEntityState`, etc. — none
@@ -1096,7 +1179,7 @@ visible, so at most one frame is dropped.
 
 | Area | Status | Notes |
 |------|--------|-------|
-| QP bimanual arm control | ✅ Working | Full 6-DOF tracking with CBF safety; per-arm cost decoupling (inactive arm: 2×DAMP, MAX slack, GAMMA_MAX); grasp-boost (active arm pinned to MAX during align/approach). Posture task: gradient potential field (not a home spring). **Reference Governor** (§9.8): velocity/error/acceleration/orientation bounds between the raw reference and the CLF, preserving feasibility guarantees under aggressive commands. |
+| QP bimanual arm control | ✅ Working | Full 6-DOF tracking with CBF safety; per-arm cost decoupling (inactive arm: 2×DAMP, MAX slack, GAMMA_MAX); grasp-boost (active arm pinned to MAX during align/approach). Posture task: gradient potential field (not a home spring), now with a PER-ARM multiplier (`posture_scale_right/left`, §9.9). **Reference Governor** (§9.8): velocity/error/acceleration/orientation bounds between the raw reference and the CLF, preserving feasibility guarantees under aggressive commands. **Local Minima Escape** (§9.9, 🔧 new/untested by operator): detects a stuck 3D position error + categorizes via shadow prices (obstacle vs. joint-limit) + applies a temporary per-arm posture-weight correction. |
 | Bimanual arm switching | ✅ Working | Double-click Haption left button → switch active arm. Per-arm FSM + belief (frozen inactive arm). QP always publishes qdot for both arms (no zero-overwrite). Inactive arm CLF-held at frozen EE pose. |
 | Shared autonomy (belief + grasp) | ✅ Working | Two independent GraspStateMachine + BeliefEstimator per arm. Union goal exclusion. GRASP_ALIGN tolerances relaxed 10%. Side-grasp manifold 3 cm from cylinder centre. |
 | Grasp pipeline (full cycle) | ✅ Working | PRE_GRASP → ALIGN → APPROACH → CLOSE → LIFT → HOLDING. Tracking boost (MAX gamma+slack) during align. Align timeout 12s. |

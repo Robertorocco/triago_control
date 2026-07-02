@@ -116,6 +116,43 @@ GOV_A_MAX_LIN = 2.0                   # [m/s²] max linear acceleration of the g
 GOV_A_MAX_ANG = 8.0                   # [rad/s²] max angular acceleration of the governed reference
 
 # =============================================================================
+# 3c. LOCAL MINIMA ESCAPE (governor extension, 2026-07-01)
+# =============================================================================
+# Detects a possible QP-CLF-CBF local minimum (a large, near-constant 3D
+# position tracking error) and applies a temporary, PER-ARM posture-weight
+# correction to help escape it. See reference_governor.ReferenceGovernor.
+# update_local_minima for the full state machine.
+#
+# NOTE: the lambda thresholds below are tuned by the operator for the
+# CURRENT parameter set (GAMMA_CBF, D_SAFE_BASE, P_GAIN_LIMITS, etc. in
+# section 2, and MAX_WEIGHT_SLACK etc. in section 3). If those are retuned,
+# these thresholds may need to be revisited.
+ENABLE_LOCAL_MINIMA_ESCAPE = True    # Master switch (independent of ENABLE_REFERENCE_GOVERNOR)
+
+# --- Trigger: "stuck" detection (3D position error only, per instruction) ---
+LME_ERROR_TRIGGER = 0.15             # [m] error norm above which "stuck" is considered
+LME_ERROR_STUCK_WINDOW = 2.0         # [s] time window checked for a near-constant error
+LME_ERROR_STUCK_TOLERANCE = 0.02     # [m] max variation within the window to call it "stuck"
+LME_ERROR_RECOVERED = 0.10           # [m] error norm below which the escape ends (success)
+LME_MAX_ESCAPE_DURATION = 10.0       # [s] max time the escape correction is held before giving up
+
+# --- Categorization (shadow prices from the PREVIOUS QP solve, same
+# convention as the slack/gamma scheduler). Obstacle takes priority if BOTH
+# conditions are met simultaneously. ---
+LME_LAMBDA_CBF_THRESHOLD = 10.0      # lambda_cbf > this -> obstacle-induced minimum
+LME_LAMBDA_JOINT_THRESHOLD = 1.0     # lambda_joints > this -> joint-limit-induced minimum
+
+# --- Escape corrections (posture task ONLY -- no other weight touched) ---
+LME_POSTURE_SCALE_OBSTACLE = 0.2     # x1/5 posture weight (more redundancy to slip past the obstacle)
+LME_POSTURE_SCALE_JOINT = 5.0        # x5 posture weight (push harder away from the limit)
+LME_TASK_DIM_OBSTACLE = 3.0          # force position-only CLF (give up orientation) during obstacle escape
+LME_RAMP_TAU = 0.3                   # [s] smooth ramp time-constant for the posture-scale change
+                                     #   (same first-order technique as the grasp-phase POSTURE_SCALE_TAU ramp)
+
+# --- Console reporting ---
+LME_CONSOLE_PERIOD = 3.0             # [s] throttle period for the non-spam status print while escaping
+
+# =============================================================================
 # 4. LOOP / TELEMETRY SETTINGS
 # =============================================================================
 CONTROL_FREQ_DEFAULT = 300.0   # Default control loop frequency [Hz] (was hard-coded 1/300)
