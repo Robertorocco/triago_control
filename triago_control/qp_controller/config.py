@@ -94,6 +94,28 @@ BETA_GAMMA = 5.0               # How quickly gamma drops as the collision lambda
 GAMMA_FILTER_TAU = 0.125       # Low-pass time constant for the gamma scheduler
 
 # =============================================================================
+# 3b. REFERENCE GOVERNOR (intermediate CLF-safety layer, 2026-07-01)
+# =============================================================================
+# An intermediate filter between the raw cartesian reference topic and the
+# CLF's actual perceived reference. Bounds the position/orientation error and
+# reference velocity/acceleration that the CLF must handle, preserving QP
+# feasibility guarantees even under aggressive/discontinuous commands.
+# See triago_control/qp_controller/reference_governor.py for the full design.
+ENABLE_REFERENCE_GOVERNOR = True       # Master switch (False = raw passthrough, no filtering)
+
+# --- Velocity shaping: clamp the reference velocity magnitude (direction preserved) ---
+GOV_V_MAX_LIN = 0.20                  # [m/s] max linear reference velocity passed to the CLF
+GOV_V_MAX_ANG = 1.2                   # [rad/s] max angular reference velocity passed to the CLF
+
+# --- Position/orientation error bounding: the CLF never sees an error larger than this ---
+GOV_E_MAX_POS = 0.30                  # [m] max allowed position error norm (30 cm)
+GOV_E_MAX_ORI = 0.524                 # [rad] max allowed orientation error norm (~30 deg)
+
+# --- Acceleration limiting: rate-limit the velocity change between ticks ---
+GOV_A_MAX_LIN = 2.0                   # [m/s²] max linear acceleration of the governed reference
+GOV_A_MAX_ANG = 8.0                   # [rad/s²] max angular acceleration of the governed reference
+
+# =============================================================================
 # 4. LOOP / TELEMETRY SETTINGS
 # =============================================================================
 CONTROL_FREQ_DEFAULT = 300.0   # Default control loop frequency [Hz] (was hard-coded 1/300)

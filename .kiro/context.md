@@ -433,6 +433,7 @@ main_qp_controller.py
            triago_control.qp_controller.qp_formulator.QPFormulator
            triago_control.qp_controller.shared_autonomy_handler.SharedAutonomyHandler
            triago_control.qp_controller.visualization_engine.VisualizationEngine
+           triago_control.qp_controller.reference_governor.ReferenceGovernor
 
 main_shared_autonomy.py
   imports: triago_control.shared_autonomy.belief_estimator.BeliefEstimator
@@ -863,6 +864,57 @@ per-arm routing** (verified before coding, not discovered after a bug):
   change was needed; the existing "everything not in idx_right/idx_left is
   locked" invariant already generalizes correctly to the head.
 
+### 9.8 Reference Governor — CLF-safety intermediate layer (2026-07-01)
+
+An intermediate filter between the raw cartesian reference (`/arm_{right,left}/
+cartesian_reference` — from teleop / trajectory_generator / planner) and the
+CLF's actual perceived reference inside `extract_task_errors`. Bounds the
+position/orientation error and reference velocity/acceleration that the CLF must
+handle, preserving QP feasibility guarantees even under aggressive, discontinuous,
+or far-away commands.
+
+**New module**: `triago_control/qp_controller/reference_governor.py`, class
+`ReferenceGovernor`. One instance per arm (`gov_right`/`gov_left` in
+`main_qp_controller.py`), each with its own velocity memory for acceleration
+limiting. Master switch: `cfg.ENABLE_REFERENCE_GOVERNOR` (default `True`).
+
+**Four active features** (all independently tunable via config.py §3b):
+
+| Feature | Mechanism | Config |
+|---------|-----------|--------|
+| Velocity shaping | Clamp reference velocity magnitude (direction preserved) | `GOV_V_MAX_LIN=0.20 m/s`, `GOV_V_MAX_ANG=1.2 rad/s` |
+| Position error bounding | Project x_ref onto ball of radius E_MAX centered at x_real | `GOV_E_MAX_POS=0.30 m` (30 cm) |
+| Acceleration limiting | Rate-limit velocity change per tick: `‖Δv‖ ≤ A_MAX·dt` | `GOV_A_MAX_LIN=2.0 m/s²`, `GOV_A_MAX_ANG=8.0 rad/s²` |
+| Orientation clamping | If `‖log3(R_des·R_real^T)‖ > THETA_MAX`, shrink via exp3 on the same axis | `GOV_E_MAX_ORI=0.524 rad` (~30°) |
+
+**Integration point**: inside `solve_and_publish`, right before the CLF task
+errors are computed. The RAW references (`self.x_ref_right`, etc.) are PRESERVED
+(for future plotting / other consumers); the governed versions are used ONLY for
+the CLF task-error computation and the feedforward velocity passed into
+`build_and_solve`. Governor is reset (velocity memory cleared) on `_freeze_arm`
+(arm switch / watchdog stale / startup hold).
+
+**Telemetry**: `/qp_debug/governor` (`Float64MultiArray`, 24 floats) publishes
+the raw-minus-governed difference each downsampled tick. Layout:
+`[pos_diff_R(3), ori_diff_R(3), vel_diff_R(3), wvel_diff_R(3),
+  pos_diff_L(3), ori_diff_L(3), vel_diff_L(3), wvel_diff_L(3)]`.
+All zeros when the governor is off or all bounds are satisfied (passthrough).
+
+**Plotter**: dedicated Window 7 ("Reference Governor: raw − governed") with 4
+stacked subplots (position diff / orientation diff / linear velocity diff /
+angular velocity diff), each showing 3 components per arm (R = red shades,
+L = blue shades/dashed). Lets the operator see WHICH bound is active, on WHICH
+arm, at any instant.
+
+**Waypoint injection interface (STUB, for future planning)**: `set_waypoint(pos,
+rpy, priority)` / `clear_waypoint()` / `waypoint_active` property are defined
+but NOT yet wired into `govern()`'s output. When a high-level planner (future
+RRT/PRM/potential-field escape) calls `set_waypoint`, the governor will blend the
+raw reference toward the waypoint while respecting all velocity/error/accel
+bounds — so the QP is transparently steered out of local minima without ever
+receiving an infeasible/discontinuous command. The blending logic will be
+implemented when the planning module is built.
+
 ### 9.1 Sensing constraints (real-hardware honesty, 2026-06-29)
 
 **No Gazebo ground-truth is ever read** (`/gazebo/model_states`, `GetEntityState`, etc. — none
@@ -1044,7 +1096,7 @@ visible, so at most one frame is dropped.
 
 | Area | Status | Notes |
 |------|--------|-------|
-| QP bimanual arm control | ✅ Working | Full 6-DOF tracking with CBF safety; per-arm cost decoupling (inactive arm: 2×DAMP, MAX slack, GAMMA_MAX); grasp-boost (active arm pinned to MAX during align/approach). Posture task: gradient potential field (not a home spring). |
+| QP bimanual arm control | ✅ Working | Full 6-DOF tracking with CBF safety; per-arm cost decoupling (inactive arm: 2×DAMP, MAX slack, GAMMA_MAX); grasp-boost (active arm pinned to MAX during align/approach). Posture task: gradient potential field (not a home spring). **Reference Governor** (§9.8): velocity/error/acceleration/orientation bounds between the raw reference and the CLF, preserving feasibility guarantees under aggressive commands. |
 | Bimanual arm switching | ✅ Working | Double-click Haption left button → switch active arm. Per-arm FSM + belief (frozen inactive arm). QP always publishes qdot for both arms (no zero-overwrite). Inactive arm CLF-held at frozen EE pose. |
 | Shared autonomy (belief + grasp) | ✅ Working | Two independent GraspStateMachine + BeliefEstimator per arm. Union goal exclusion. GRASP_ALIGN tolerances relaxed 10%. Side-grasp manifold 3 cm from cylinder centre. |
 | Grasp pipeline (full cycle) | ✅ Working | PRE_GRASP → ALIGN → APPROACH → CLOSE → LIFT → HOLDING. Tracking boost (MAX gamma+slack) during align. Align timeout 12s. |

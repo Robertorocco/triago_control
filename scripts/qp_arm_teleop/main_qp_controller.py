@@ -42,6 +42,7 @@ from triago_control.qp_controller.collision_manager import CollisionManager
 from triago_control.qp_controller.shared_autonomy_handler import SharedAutonomyHandler
 from triago_control.qp_controller.qp_formulator import QPFormulator
 from triago_control.qp_controller.visualization_engine import VisualizationEngine
+from triago_control.qp_controller.reference_governor import ReferenceGovernor
 
 
 class SafetyQPController(Node):
@@ -110,6 +111,13 @@ class SafetyQPController(Node):
         self.hri = SharedAutonomyHandler(self, self.col, self.kin, self.viz)
         self.qp = QPFormulator(self.kin.model)
 
+        # --- REFERENCE GOVERNOR (2026-07-01, per-arm CLF-safety layer) ---
+        # Bounds position/orientation error, reference velocity/acceleration so
+        # the CLF row's demand is always bounded → QP feasibility preserved.
+        # One instance per arm (each has its own velocity memory for accel limiting).
+        self.gov_right = ReferenceGovernor('right')
+        self.gov_left = ReferenceGovernor('left')
+
         # --- CONTROL MODE / REFERENCES ---
         self.orientation_ctrl = cfg.ORIENTATION_CTRL
         self.x_ref_right = None; self.rpy_ref_right = None; self.xdot_ref_right = None; self.w_ref_right = None
@@ -163,6 +171,13 @@ class SafetyQPController(Node):
         # numbers the joint-limit CBF rows in qp_formulator enforce.
         self.pub_joint_limits = self.create_publisher(String, '/qp_debug/joint_limits', 10)
         self.timer_joint_limits = self.create_timer(2.0, self._publish_joint_limits)
+
+        # Reference governor telemetry (2026-07-01): publishes the DIFFERENCE
+        # between raw and governed references (6D each arm: [dx,dy,dz,droll,dpitch,dyaw])
+        # so the dedicated plotter window can show when/where the governor clamps.
+        # Layout: [pos_diff_R(3), ori_diff_R(3), vel_diff_R(3), wvel_diff_R(3),
+        #          pos_diff_L(3), ori_diff_L(3), vel_diff_L(3), wvel_diff_L(3)] = 24 floats
+        self.pub_gov_telemetry = self.create_publisher(Float64MultiArray, '/qp_debug/governor', 10)
 
         # --- SUBSCRIBERS ---
         self.create_subscription(JointState, '/joint_states', self.joint_callback, 10)
@@ -392,12 +407,14 @@ class SafetyQPController(Node):
             self.right_imposed_motion = True
             self.last_right_msg_time = time.time()
             self.right_frozen = True
+            self.gov_right.reset()  # Clear velocity memory (arm is now stationary)
         else:
             self.x_ref_left = pos; self.rpy_ref_left = rpy
             self.xdot_ref_left = np.zeros(3); self.w_ref_left = np.zeros(3)
             self.left_imposed_motion = True
             self.last_left_msg_time = time.time()
             self.left_frozen = True
+            self.gov_left.reset()  # Clear velocity memory (arm is now stationary)
 
     def active_arm_cb(self, msg):
         """Arm switch: freeze the now-inactive arm at its current pose."""
@@ -548,10 +565,39 @@ class SafetyQPController(Node):
                 attached_object_arm=self.hri.attached_object_arm)
 
         # --- 2. Task errors ---
-        e_r, v_r, e_l, v_l = self.extract_task_errors()
+        # REFERENCE GOVERNOR (2026-07-01): apply velocity/error/acceleration
+        # bounds BEFORE the CLF sees the reference. The RAW references
+        # (self.x_ref_right, etc.) are PRESERVED for future plotting / consumers;
+        # the governed versions are used ONLY for the CLF task-error computation
+        # below (and passed to build_and_solve as the feedforward velocities).
+        dt = 1.0 / self._control_freq
+        if cfg.ENABLE_REFERENCE_GOVERNOR:
+            # Right arm
+            x_real_r = np.array(self.kin.data.oMf[self.kin.ee_id_right].translation) if self.kin.ee_id_right else None
+            R_real_r = self.kin.data.oMf[self.kin.ee_id_right].rotation if self.kin.ee_id_right else None
+            x_gov_r, rpy_gov_r, v_gov_r, w_gov_r = self.gov_right.govern(
+                self.x_ref_right, self.rpy_ref_right, self.xdot_ref_right, self.w_ref_right,
+                x_real_r, R_real_r, dt)
+            # Left arm
+            x_real_l = np.array(self.kin.data.oMf[self.kin.ee_id_left].translation) if self.kin.ee_id_left else None
+            R_real_l = self.kin.data.oMf[self.kin.ee_id_left].rotation if self.kin.ee_id_left else None
+            x_gov_l, rpy_gov_l, v_gov_l, w_gov_l = self.gov_left.govern(
+                self.x_ref_left, self.rpy_ref_left, self.xdot_ref_left, self.w_ref_left,
+                x_real_l, R_real_l, dt)
+        else:
+            # Passthrough (no filtering): governed == raw
+            x_gov_r, rpy_gov_r, v_gov_r, w_gov_r = (
+                self.x_ref_right, self.rpy_ref_right, self.xdot_ref_right, self.w_ref_right)
+            x_gov_l, rpy_gov_l, v_gov_l, w_gov_l = (
+                self.x_ref_left, self.rpy_ref_left, self.xdot_ref_left, self.w_ref_left)
+
+        # Compute CLF task errors from the GOVERNED references (not the raw ones)
+        e_r, v_r = self._arm_task_error(self.kin.ee_id_right, x_gov_r, rpy_gov_r,
+                                        v_gov_r, w_gov_r, self.task_dim_right)
+        e_l, v_l = self._arm_task_error(self.kin.ee_id_left, x_gov_l, rpy_gov_l,
+                                        v_gov_l, w_gov_l, self.task_dim_left)
 
         # --- 3. Build + solve the CLF-CBF-QP ---
-        dt = 1.0 / self._control_freq
         # Smoothly ramp the posture-task weight scale: drop toward POSTURE_GRASP_SCALE
         # during autonomous precision phases (grasp/lift), restore to 1.0 otherwise.
         target_scale = cfg.POSTURE_GRASP_SCALE if self.grasp_active else 1.0
@@ -603,6 +649,30 @@ class SafetyQPController(Node):
         self.last_qdot_cmd_14 = np.concatenate((cmd_data_r, cmd_data_l))
         if self.publish_counter % self.publish_every_n == 0:
             self.pub_qdot_cmd.publish(Float64MultiArray(data=self.last_qdot_cmd_14.tolist()))
+
+            # --- Reference governor telemetry (2026-07-01): publishes the RAW-minus-
+            # GOVERNED difference so the plotter can show when/where the governor
+            # clamps. Layout: [pos_diff_R(3), ori_diff_R(3), vel_diff_R(3),
+            # wvel_diff_R(3), pos_diff_L(3), ori_diff_L(3), vel_diff_L(3),
+            # wvel_diff_L(3)] = 24 floats. All zeros when the governor is off or
+            # the raw reference is already within bounds (passthrough).
+            if cfg.ENABLE_REFERENCE_GOVERNOR:
+                def _gov_diff(raw, gov):
+                    if raw is None or gov is None:
+                        return [0.0, 0.0, 0.0]
+                    return (np.asarray(raw) - np.asarray(gov)).tolist()
+                gov_data = (
+                    _gov_diff(self.x_ref_right, x_gov_r) +
+                    _gov_diff(self.rpy_ref_right, rpy_gov_r) +
+                    _gov_diff(self.xdot_ref_right, v_gov_r) +
+                    _gov_diff(self.w_ref_right, w_gov_r) +
+                    _gov_diff(self.x_ref_left, x_gov_l) +
+                    _gov_diff(self.rpy_ref_left, rpy_gov_l) +
+                    _gov_diff(self.xdot_ref_left, v_gov_l) +
+                    _gov_diff(self.w_ref_left, w_gov_l))
+                self.pub_gov_telemetry.publish(Float64MultiArray(data=gov_data))
+            else:
+                self.pub_gov_telemetry.publish(Float64MultiArray(data=[0.0] * 24))
 
         # --- 6. Evolve the digital twin (ideal kinematics) ---
         if cfg.SIMULATE_IDEAL_KINEMATICS:

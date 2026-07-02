@@ -204,6 +204,13 @@ class TriagoDashboard(Node):
         self.joint_limits = {}   # name -> (lower, upper)
         self.create_subscription(String, '/qp_debug/joint_limits', self.joint_limits_callback, qos_profile)
 
+        # --- Reference Governor telemetry (2026-07-01) ---
+        # [pos_diff_R(3), ori_diff_R(3), vel_diff_R(3), wvel_diff_R(3),
+        #  pos_diff_L(3), ori_diff_L(3), vel_diff_L(3), wvel_diff_L(3)] = 24 floats
+        self.gov_buffer = deque(maxlen=self.history_len)
+        self.gov_time = deque(maxlen=self.history_len)
+        self.create_subscription(Float64MultiArray, '/qp_debug/governor', self.gov_callback, qos_profile)
+
         # --- Topic sanity check (2026-07-01): logs once, ~6s after startup,
         # comparing the /joint_states update rate of a representative arm
         # joint against the two gripper finger joints. ---
@@ -274,6 +281,12 @@ class TriagoDashboard(Node):
                     self.joint_limits[parts[0]] = (float(parts[1]), float(parts[2]))
                 except ValueError:
                     pass
+
+    def gov_callback(self, msg):
+        """Reference Governor telemetry: raw-minus-governed difference (24 floats)."""
+        if len(msg.data) >= 24:
+            self.gov_time.append(self.get_time())
+            self.gov_buffer.append(list(msg.data[:24]))
 
     def get_time(self):
         """Returns the current time in seconds, normalized to start exactly at t=0.0"""
@@ -820,6 +833,28 @@ def update_plot(frame, node, lines_map, axs1, axs2, axs3, ax_pairs, dyn_plots, f
                 ax.set_xlim(max(0, max_t - window), max_t + 0.1)
             figs[4].canvas.draw_idle()
 
+    # --- PART 8: Reference Governor (raw − governed difference, figs[6]) ---
+    if node.gov_time:
+        t_g = list(node.gov_time)
+        data_g = list(node.gov_buffer)
+        m = min(len(t_g), len(data_g))
+        if m > 0:
+            arr = np.array(data_g[:m], dtype=float)  # (m, 24)
+            t_view = t_g[:m]
+            # Layout per row: R arm channels [offset..offset+3], L arm [offset+12..offset+15]
+            for row_i in range(4):
+                for ci in range(3):
+                    idx_r = row_i * 3 + ci           # R: 0..2, 3..5, 6..8, 9..11
+                    idx_l = 12 + row_i * 3 + ci      # L: 12..14, 15..17, 18..20, 21..23
+                    lines_map[f'gov_r_{row_i}_{ci}'].set_data(t_view, arr[:, idx_r])
+                    lines_map[f'gov_l_{row_i}_{ci}'].set_data(t_view, arr[:, idx_l])
+            max_t = t_view[-1]
+            for ax in figs[6].axes:
+                ax.set_xlim(max(0, max_t - window), max_t + 0.1)
+                ax.relim()
+                ax.autoscale_view(scalex=False, scaley=True)
+            figs[6].canvas.draw_idle()
+
     return artists
 
 
@@ -1210,9 +1245,49 @@ def main(args=None):
             slider_limits[jname] = (lo, hi)
 
     # ===================================================================
+    # WINDOW 7: "Reference Governor" — raw vs governed 6D pose/velocity diff
+    # ===================================================================
+    # Shows the difference (raw - governed) for each DOF of each arm. When
+    # the governor is idle (raw reference already within bounds), all traces
+    # sit at zero. When it clamps (velocity/error/accel/orientation bound
+    # hit), the corresponding trace departs from zero — letting the operator
+    # see WHICH bound is active, on WHICH arm, at any instant.
+    # Layout: 4 subplots stacked vertically, each showing R (red) and L (blue):
+    #   row 0: position difference x/y/z  [m]
+    #   row 1: orientation difference r/p/y [rad]
+    #   row 2: linear velocity difference vx/vy/vz [m/s]
+    #   row 3: angular velocity difference wx/wy/wz [rad/s]
+    fig7, axs7 = plt.subplots(4, 1, sharex=True, figsize=(7, 7))
+    fig7.canvas.manager.set_window_title('Reference Governor (raw − governed)')
+    fig7.suptitle('Reference Governor: raw − governed')
+    gov_labels = [
+        ('Position diff', '[m]', ['x', 'y', 'z']),
+        ('Orientation diff', '[rad]', ['r', 'p', 'y']),
+        ('Lin. velocity diff', '[m/s]', ['vx', 'vy', 'vz']),
+        ('Ang. velocity diff', '[rad/s]', ['wx', 'wy', 'wz']),
+    ]
+    gov_colors_r = ['#e63946', '#ff6b6b', '#ffa07a']   # 3 shades of red for R x/y/z
+    gov_colors_l = ['#1d3557', '#457b9d', '#a8dadc']   # 3 shades of blue for L x/y/z
+    for row_i, (title, ylabel, comps) in enumerate(gov_labels):
+        ax = axs7[row_i]
+        ax.set_title(title, fontsize='small')
+        ax.set_ylabel(ylabel, fontsize='x-small')
+        ax.grid(True, alpha=0.3)
+        ax.axhline(0, color='k', linewidth=0.5, alpha=0.4)
+        for ci, comp in enumerate(comps):
+            l_r, = ax.plot([], [], color=gov_colors_r[ci], linewidth=1.0,
+                           label=f'R {comp}')
+            l_l, = ax.plot([], [], color=gov_colors_l[ci], linewidth=1.0,
+                           label=f'L {comp}', linestyle='--')
+            lines_map[f'gov_r_{row_i}_{ci}'] = l_r
+            lines_map[f'gov_l_{row_i}_{ci}'] = l_l
+        ax.legend(loc='upper right', fontsize=5, ncol=6)
+    axs7[-1].set_xlabel('Time [s]')
+
+    # ===================================================================
     # WINDOW PLACEMENT (from wmctrl, slightly aligned)
     # ===================================================================
-    figs = [fig1, fig2, fig3, fig4, fig5, fig6]
+    figs = [fig1, fig2, fig3, fig4, fig5, fig6, fig7]
 
     place_window(fig1, 86, 126, 851, 1131)    # Left: Joint Data
     place_window(fig2, 893, 118, 542, 1131)   # Center: QP Data
@@ -1220,6 +1295,7 @@ def main(args=None):
     place_window(fig4, 300, 300, 700, 380)    # Debug: CBF active pairs (floats on top)
     place_window(fig5, 350, 350, 700, 380)    # Debug: Task authority (floats on top)
     place_window(fig6, 400, 400, 900, 620)    # Debug: Joint Positions slider GUI
+    place_window(fig7, 450, 450, 700, 600)    # Debug: Reference Governor
 
     # ===================================================================
     # ANIMATION
