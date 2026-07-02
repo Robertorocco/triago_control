@@ -167,6 +167,13 @@ RRT_PLANNING_BUDGET_S = 1.5           # [s] max wall-clock time the planner thre
 RRT_STEP_SIZE = 0.15                  # [rad] max step per RRT extend in joint-space
 RRT_GOAL_BIAS = 0.10                  # probability of sampling the goal directly (vs random)
 RRT_GOAL_POS_TOLERANCE = 0.03         # [m] EE position tolerance for "goal reached" in the tree
+# --- Goal-configuration IK (damped least-squares, position-only) ---
+# The goal config is found by DLS IK (FK(q).translation -> x_goal), NOT by
+# uniform random rejection sampling (which cannot hit a 3cm Cartesian ball in
+# 7D and always failed with samples=0). Restarts from random seeds if a solve
+# converges into collision or stalls.
+RRT_IK_DAMPING = 0.05                 # DLS damping (rad·s/m-ish): larger = more stable near singularities
+RRT_IK_MAX_STEP = 0.20                # [rad] per-iteration joint step cap for the IK integrator
 RRT_COLLISION_MARGIN = 0.005          # [m] extra safety margin ON TOP of D_SAFE_BASE for the planner
                                       #   (so the planned path is more conservative than the CBF)
 RRT_MAX_SAMPLES = 8000                # absolute sample cap (fallback if wall-clock budget is generous)

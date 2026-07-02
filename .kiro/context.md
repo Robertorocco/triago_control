@@ -1,7 +1,18 @@
 # AI Agent Context — triago_control
 
 > **This file is maintained by the AI agent. Do not edit manually.**
-> Last updated: 2026-07-01 (§9.7: head chain added to the ARM QP as a quasi-static
+> Last updated: 2026-07-02 (§9.10: RRT-Connect planner fixed — the always-fail
+> `samples=0` goal finder (uniform random rejection sampling, which cannot hit a
+> 3cm Cartesian ball in 7D) was replaced with damped least-squares position IK
+> (`_find_goal_config_ik`, random restarts on collision/stall); the per-tick
+> re-launch spam on failure was replaced with ONE planning attempt per escape
+> episode; `abort()` is now fully NON-BLOCKING (no `join` in the 300Hz loop) and
+> in-flight threads are fenced by a monotonic epoch; the planner thread is wrapped
+> so no failure can propagate to the QP; an in-flight plan is aborted the moment
+> the reference resumes moving. On planner failure the controller simply HOLDS the
+> obstacle-escape posture correction (lowered posture weight + task_dim=3) and
+> tracks nothing — the QP-CLF-CBF is fully insulated. See §9.10.)
+> Earlier: 2026-07-01 (§9.7: head chain added to the ARM QP as a quasi-static
 > CBF obstacle — the arms now avoid the head chain via live-FK capsules, WITHOUT
 > adding any head joint to the QP's decision vector; `arm_right_1`/`arm_left_1`
 > excluded from head pairs per instruction; head capsules tinted yellow in Meshcat.
@@ -997,6 +1008,63 @@ vs. the real EE position for the error norm. The resulting
 `_arm_task_error` for THIS tick only — `self.task_dim_right`/`_left` (the raw
 value from the cartesian-reference topic) is never mutated, so the escape is
 fully transparent to any other consumer of that state.
+
+### 9.10 RRT-Connect planner fixes (2026-07-02) — the "samples=0 / QP crash" bug
+
+Follow-up on §3d/§9.9's joint-space RRT-Connect planner (the local-minima escape's
+last-resort). The operator reported the planner ALWAYS failing with `samples=0`
+(~300ms each) and re-triggering forever, and — critically — destabilising the
+QP-CLF-CBF (which must never happen). Three independent defects were found and fixed
+(`triago_control/qp_controller/rrt_planner.py` + `reference_governor.py`).
+
+**Defect 1 — goal finder could never succeed (`samples=0`).** `samples` is only
+incremented in the RRT-Connect main loop, which runs AFTER a goal configuration is
+found. The goal finder used **uniform random rejection sampling**: draw a random 7-DOF
+joint config, keep it if `‖FK(q).translation − x_goal‖ < 3cm`. The probability of a
+uniformly-random 7-DOF config landing the EE inside a 3cm Cartesian ball is
+astronomically small, so all 2000 tries missed → `q_goal_arm=None` → `success=False`
+with `samples=0`; the ~300ms was just 2000 FK+collision checks. **The RRT never even
+started.**
+- **Fix**: `RRTPlanner._find_goal_config_ik` — damped least-squares position-only IK
+  (`dq = Jᵀ(JJᵀ + λ²I)⁻¹·e` on the arm's own Jacobian columns), seeded from the stuck
+  config, with random restarts if a solve converges into collision or stalls. New
+  config: `RRT_IK_DAMPING=0.05`, `RRT_IK_MAX_STEP=0.20`. If IK cannot reach the target
+  collision-free (genuinely unreachable / inside an obstacle) the planner fails
+  cleanly — which is fine, the caller then just holds the posture correction.
+
+**Defect 2 — per-tick re-launch spam + control-loop stalls (the "crash").** On failure
+the old code set `self._rrt_triggered = False`, which **re-armed the trigger every
+tick**: at 300Hz a fresh background thread + `GeometryData` + 2000-sample collision
+sweep was spawned continuously, starving the real-time loop. Compounding it, `abort()`
+did `self._thread.join(timeout=0.5)` and was called from `plan_async`/`reset`/
+`_abort_waypoint_execution` — **all on the 300Hz control loop** — so it could block the
+controller for up to half a second.
+- **Fix A (one attempt per episode)**: `reference_governor` gained `_rrt_episode_attempted`.
+  The planner is launched EXACTLY ONCE per local-minima episode; a failed plan does NOT
+  relaunch. The latch clears only when the escape ends (`_lme_state` back to `'normal'`),
+  re-arming for the NEXT episode.
+- **Fix B (non-blocking abort)**: `abort()` no longer joins — it sets the abort flag and
+  bumps a monotonic `_plan_epoch`. The daemon thread captures its epoch and fences itself
+  out (`_should_abort`) the instant the epoch changes; `_finish` only publishes a result
+  if its epoch is still current, so a superseded/aborted thread's result is discarded.
+
+**Defect 3 — a planner failure could reach the QP.** The planning thread's body is now
+wrapped in a blanket `try/except` that resolves ANY failure (unreachable target,
+numerical issue, abort) to a well-defined `success=False` result and can never
+propagate. The control loop only ever READS the result, so the QP-CLF-CBF is fully
+insulated from the planner.
+
+**On planner failure the behaviour is now exactly what the operator asked for**: track
+NOTHING (no waypoint queue activated), and simply keep the obstacle-category escape
+correction — lowered posture weight (`LME_POSTURE_SCALE_OBSTACLE=0.2`) + `task_dim=3.0`
+(position-only) — driven independently by `update_local_minima_escape`. The planner
+never touches the QP formulation.
+
+**Reference-resumed handling**: if the operator moves the reference
+(`‖v_ref‖ > RRT_REF_STILL_VELOCITY`) while a plan is still computing, the in-flight plan
+is aborted immediately (non-blocking) and control returns to tracking the (always-live)
+blue reference gripper. During waypoint execution the same still-velocity check aborts
+the path (unchanged, §govern).
 
 ### 9.1 Sensing constraints (real-hardware honesty, 2026-06-29)
 

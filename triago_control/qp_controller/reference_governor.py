@@ -109,6 +109,13 @@ class ReferenceGovernor:
         # RRT trigger tracking: the planner fires only after the posture correction
         # has been active for RRT_TRIGGER_DELAY_S and still hasn't solved the problem.
         self._rrt_triggered = False
+        # ONE ATTEMPT PER ESCAPE EPISODE (2026-07-02 fix): once the planner has
+        # been launched for the current local-minima episode, it is NOT relaunched
+        # every tick if it fails — that per-tick relaunch (the old behaviour) spun
+        # up a fresh background thread + 2000-sample collision sweep continuously,
+        # starving the 300Hz control loop. This flag stays True until the escape
+        # ends (state back to 'normal'), at which point a NEW episode may plan again.
+        self._rrt_episode_attempted = False
         # Performance telemetry (read by the plotter / console)
         self.rrt_last_result = None       # RRTPlannerResult (read-only for external consumers)
         self.rrt_wp_progress = 0.0        # fraction [0, 1] through the waypoint queue
@@ -235,6 +242,7 @@ class ReferenceGovernor:
         self._wp_execution_elapsed = 0.0
         self._wp_original_x_ref = None
         self._rrt_triggered = False
+        self._rrt_episode_attempted = False
         self.rrt_wp_progress = 0.0
 
     # =====================================================================
@@ -487,12 +495,36 @@ class ReferenceGovernor:
         if self._rrt is None or not cfg.ENABLE_RRT_PLANNER:
             return None
 
+        # --- RE-ARM for a NEW escape episode ---
+        # Once the local-minima escape ends (state back to 'normal') and we are
+        # not executing a planned path, clear the per-episode attempt latch so the
+        # planner may try again on the NEXT episode. Within a single episode the
+        # planner attempts EXACTLY ONCE (see _rrt_episode_attempted below): a
+        # failed plan does NOT re-launch every tick.
+        if self._lme_state != 'escaping' and not self._wp_active:
+            self._rrt_episode_attempted = False
+            self._rrt_triggered = False
+
+        # --- ABORT an in-flight plan if the user resumed motion ---
+        # The blue reference gripper is live at all times; if the operator starts
+        # moving the reference again while we are still planning, drop the plan
+        # immediately so the arm tracks the user instead of a soon-to-be-stale path.
+        v_norm = np.linalg.norm(v_ref) if v_ref is not None else 0.0
+        if self._rrt.is_running and v_norm > cfg.RRT_REF_STILL_VELOCITY:
+            self._rrt.abort()
+            self._rrt_triggered = False
+            if logger is not None:
+                logger(f"\033[95m[RRT][{self.arm_side.upper()}] Planning aborted mid-solve "
+                      f"(reference moved, |v_ref|={v_norm:.3f} m/s). User has control.\033[0m")
+            return None
+
         # --- Pick up a completed planning result (from the background thread) ---
         if self._rrt.is_running:
             pass  # still computing, nothing to pick up
         elif not self._wp_active and self._rrt_triggered:
-            # The planner was triggered and has finished (or was never started
-            # due to abort). Check if there's a result to use.
+            # The planner was triggered and has finished. Consume its result ONCE
+            # (_rrt_triggered is cleared either way, so we never re-enter here for
+            # the same plan; _rrt_episode_attempted stays True to block re-trigger).
             result = self._rrt.result
             if result is not None and result.success and result.cartesian_waypoints:
                 self.rrt_last_result = result
@@ -501,31 +533,41 @@ class ReferenceGovernor:
                 self._wp_active = True
                 self._wp_execution_elapsed = 0.0
                 self._wp_original_x_ref = np.array(x_ref) if x_ref is not None else None
+                self._rrt_triggered = False
                 if logger is not None:
                     logger(f"\033[95m[RRT][{self.arm_side.upper()}] Path found! "
                           f"{result.smoothed_path_length} waypoints, "
                           f"Cartesian length={result.total_cartesian_length:.3f}m, "
                           f"planning time={result.planning_time_s*1000:.0f}ms, "
                           f"samples={result.samples_used}. Executing...\033[0m")
-            elif result is not None and not result.success:
-                self.rrt_last_result = result
-                self._rrt_triggered = False  # allow re-trigger on next escape cycle
+            else:
+                # FAILED (or empty). Do NOT track anything and do NOT re-launch:
+                # the caller keeps the posture-only correction (lowered posture
+                # weight + task_dim=3 from the obstacle-category escape). We only
+                # try again once the CURRENT escape episode ends and a new one
+                # begins (see the RE-ARM block above).
+                if result is not None:
+                    self.rrt_last_result = result
+                self._rrt_triggered = False
                 if logger is not None:
+                    samples = result.samples_used if result is not None else 0
+                    t_ms = result.planning_time_s * 1000 if result is not None else 0.0
                     logger(f"\033[91m[RRT][{self.arm_side.upper()}] Planning FAILED "
-                          f"(samples={result.samples_used}, "
-                          f"time={result.planning_time_s*1000:.0f}ms). "
-                          f"Staying with posture correction only.\033[0m")
+                          f"(samples={samples}, time={t_ms:.0f}ms). Holding posture "
+                          f"correction only (no path tracked); will retry only on the "
+                          f"NEXT escape episode.\033[0m")
 
-        # --- TRIGGER CONDITION: start a new planning call ---
+        # --- TRIGGER CONDITION: start a new planning call (ONCE per episode) ---
         if (self._lme_state == 'escaping'
                 and not self._wp_active
                 and not self._rrt_triggered
+                and not self._rrt_episode_attempted
                 and not self._rrt.is_running
                 and self._lme_escape_elapsed >= cfg.RRT_TRIGGER_DELAY_S):
             # Check reference is approximately still
-            v_norm = np.linalg.norm(v_ref) if v_ref is not None else 0.0
             if v_norm <= cfg.RRT_REF_STILL_VELOCITY and x_ref is not None:
                 self._rrt_triggered = True
+                self._rrt_episode_attempted = True
                 # Create a FRESH cdata for the planner thread (thread-safety:
                 # the control loop uses its own cdata, the planner gets a copy).
                 import pinocchio as pin
@@ -536,7 +578,8 @@ class ReferenceGovernor:
                 if logger is not None:
                     logger(f"\033[95m[RRT][{self.arm_side.upper()}] Planner TRIGGERED "
                           f"(escape active for {self._lme_escape_elapsed:.1f}s, "
-                          f"ref still, error not resolved). Planning in background...\033[0m")
+                          f"ref still, error not resolved). Planning in background "
+                          f"(one attempt this episode)...\033[0m")
 
         # --- Return the current waypoint for visualization (purple gripper) ---
         if self._wp_active and self._wp_queue and self._wp_index < len(self._wp_queue):
