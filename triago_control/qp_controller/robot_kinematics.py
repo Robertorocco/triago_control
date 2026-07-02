@@ -219,6 +219,32 @@ class RobotKinematics:
             xdot_err_6 = np.concatenate((np.dot(J_r, v_err_full), np.dot(J_l, v_err_full)))
         return qdot_err_14, xdot_err_6
 
+    def get_joint_limits(self, joint_names):
+        """Return (lower_list, upper_list) for the given single-DOF joint names,
+        read directly from the Pinocchio model built from the live URDF (the
+        SAME limits the joint-limit CBF rows in qp_formulator enforce).
+
+        Used to feed the plotter's live joint-position slider GUI real limits
+        instead of a hard-coded placeholder range. Unbounded (continuous)
+        joints or missing names fall back to a sane +/-3.15 rad display range.
+        """
+        lower, upper = [], []
+        for name in joint_names:
+            if self.model.existJointName(name):
+                jid = self.model.getJointId(name)
+                idx_q = self.model.joints[jid].idx_q
+                lo = float(self.model.lowerPositionLimit[idx_q])
+                hi = float(self.model.upperPositionLimit[idx_q])
+                if lo <= -1e10 or hi >= 1e10:
+                    lo, hi = -3.15, 3.15
+                lower.append(lo)
+                upper.append(hi)
+            else:
+                print(f"[WARN] get_joint_limits: joint '{name}' not found in model.")
+                lower.append(-3.15)
+                upper.append(3.15)
+        return lower, upper
+
     def print_joint_limits_table(self, logger=None):
         # Print a formatted table of the URDF lower/upper position limits for both arms.
         log = logger.info if logger is not None else print

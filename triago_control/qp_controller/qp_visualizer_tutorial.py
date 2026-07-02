@@ -21,18 +21,29 @@ class QPVisualizer:
         self.ee_pos_left = None
         self.ee_vel_left = None
 
-        # --- State variables to hold the COMMANDED telemetry ---
-        self.cmd_pos = None
-        self.cmd_rot_matrix = None
-        self.active_arm = 'right'
-
-        # Frozen (inactive) arm's held pose — shown as a grey gripper in RViz.
-        # Updated when the active arm switches: the old active arm's last known
-        # reference becomes the frozen pose for the grey gripper.
-        self.frozen_pos = None
-        self.frozen_rot_matrix = None
-        self._inactive_last_pos = None
-        self._inactive_last_rot = None
+        # --- State variables to hold the COMMANDED/REFERENCE telemetry ---
+        # PER-ARM, INDEPENDENT (2026-07-01 redesign): each arm has its OWN
+        # reference pose and its OWN frozen flag, decoupled from any notion of
+        # a single global "active_arm". This is what lets BOTH grippers render
+        # BLUE simultaneously when both arms are actively driven (e.g. by
+        # trajectory_generator.py), while STILL rendering exactly one blue +
+        # one grey in the single-arm teleop paradigm (one arm frozen by the
+        # CLF hold, the other tracking live input) — the old design only ever
+        # tracked one arm's pose at a time (cmd_pos/frozen_pos + active_arm),
+        # so a second simultaneously-active arm's reference was silently
+        # routed to the "frozen" grey slot instead of getting its own blue
+        # gripper.
+        self.ref_pos_right = None
+        self.ref_rot_right = None
+        self.ref_pos_left = None
+        self.ref_rot_left = None
+        # True == that arm's CLF is currently holding a FROZEN pose (draw
+        # grey); False == that arm is actively tracking a live reference
+        # (draw blue). Sourced from main_qp_controller's own right_frozen /
+        # left_frozen state (the ground truth), via /qp_debug/arm_frozen —
+        # NOT re-derived here from topic activity, which would be guesswork.
+        self.frozen_right = False
+        self.frozen_left = False
 
         # --- Subscribe directly to the controller's published data ---
         self.ee_sub = node.create_subscription(
@@ -55,11 +66,12 @@ class QPVisualizer:
             self.cmd_callback_left,
             10
         )
-        # --- Subscribe to the active-arm switch topic ---
+        # --- Subscribe to the per-arm frozen/active state (ground truth from
+        # main_qp_controller.py's right_frozen / left_frozen) ---
         node.create_subscription(
-            String,
-            '/shared_autonomy/active_arm',
-            self.active_arm_cb,
+            Float64MultiArray,
+            '/qp_debug/arm_frozen',
+            self.frozen_state_cb,
             10
         )
 
@@ -87,28 +99,16 @@ class QPVisualizer:
             self.ee_pos_left = np.array(msg.data[6:9])
             self.ee_vel_left = np.array(msg.data[9:12])
 
-    def active_arm_cb(self, msg):
-        """Switches which arm's commanded reference is visualized.
-        The old active arm's last known cmd_pos becomes the grey frozen gripper."""
-        if msg.data in ('right', 'left') and msg.data != self.active_arm:
-            # Snapshot: the arm we're leaving becomes the frozen grey gripper.
-            self.frozen_pos = self.cmd_pos.copy() if self.cmd_pos is not None else None
-            self.frozen_rot_matrix = self.cmd_rot_matrix.copy() if self.cmd_rot_matrix is not None else None
-            # Also start tracking the inactive arm's reference for the frozen gripper
-            # (if the inactive arm receives reference updates from _freeze_arm, we
-            # pick those up in the non-active callback and keep frozen_pos fresh).
-            self.active_arm = msg.data
-            # Reset active-arm cmd so it re-anchors from the new arm's next message.
-            self.cmd_pos = None
-            self.cmd_rot_matrix = None
-            # BUG FIX: without an explicit DELETE, the blue "qp_debug_gripper"
-            # markers drawn for the arm we just left stay on screen FOREVER —
-            # publish_debug only re-ADDs at the SAME ns/id when cmd_pos is set, and
-            # here we just set it to None, so nothing ever overwrites/removes the
-            # old blue gripper. Clear it explicitly on every switch.
-            self._delete_marker_group("qp_debug_gripper", start_id=0, count=3)
+    def frozen_state_cb(self, msg):
+        """[right_frozen, left_frozen] as 0.0/1.0 floats -- ground truth from
+        main_qp_controller.py's self.right_frozen / self.left_frozen. Drives
+        which color (blue=active, grey=frozen) each arm's OWN gripper is drawn
+        in, independently of the other arm."""
+        if len(msg.data) >= 2:
+            self.frozen_right = msg.data[0] > 0.5
+            self.frozen_left = msg.data[1] > 0.5
 
-    def _delete_marker_group(self, ns, start_id, count):
+    def _delete_marker_group(self, ns, start_id, count, pub=None):
         """Publish DELETE for `count` markers in `ns` starting at `start_id`."""
         ma = MarkerArray()
         now = self.node.get_clock().now().to_msg()
@@ -120,35 +120,24 @@ class QPVisualizer:
             m.id = start_id + i
             m.action = Marker.DELETE
             ma.markers.append(m)
-        self.pub.publish(ma)
+        (pub if pub is not None else self.pub).publish(ma)
 
     def cmd_callback_right(self, msg):
-        """Updates commanded pose from the right-arm reference."""
+        """Updates the RIGHT arm's own reference pose. Independent of the left
+        arm's state -- each arm always gets its own gripper marker, colored by
+        its own frozen flag (see publish_debug)."""
         if len(msg.data) < 6:
             return
-        pos = np.array(msg.data[0:3])
-        rot = R.from_euler('xyz', np.array(msg.data[3:6]), degrees=False).as_matrix()
-        if self.active_arm == 'right':
-            self.cmd_pos = pos
-            self.cmd_rot_matrix = rot
-        else:
-            # Inactive arm: keep the frozen grey gripper at its held pose.
-            self.frozen_pos = pos
-            self.frozen_rot_matrix = rot
+        self.ref_pos_right = np.array(msg.data[0:3])
+        self.ref_rot_right = R.from_euler('xyz', np.array(msg.data[3:6]), degrees=False).as_matrix()
 
     def cmd_callback_left(self, msg):
-        """Updates commanded pose from the left-arm reference."""
+        """Updates the LEFT arm's own reference pose. Independent of the right
+        arm's state -- see cmd_callback_right."""
         if len(msg.data) < 6:
             return
-        pos = np.array(msg.data[0:3])
-        rot = R.from_euler('xyz', np.array(msg.data[3:6]), degrees=False).as_matrix()
-        if self.active_arm == 'left':
-            self.cmd_pos = pos
-            self.cmd_rot_matrix = rot
-        else:
-            # Inactive arm: keep the frozen grey gripper at its held pose.
-            self.frozen_pos = pos
-            self.frozen_rot_matrix = rot
+        self.ref_pos_left = np.array(msg.data[0:3])
+        self.ref_rot_left = R.from_euler('xyz', np.array(msg.data[3:6]), degrees=False).as_matrix()
 
     def _build_gripper(self, p_center, R_mat, opacity, start_id, timestamp,
                        color=None, ns="qp_debug_gripper"):
@@ -224,72 +213,56 @@ class QPVisualizer:
     # TELEOPERATION VISUALIZATION
     def publish_teleop_tether(self):
         """
-        Publishes a dynamic 3D tether connecting the real End-Effector to the commanded pose.
-        The tether changes color (Green -> Red) and thickness based on the tracking error.
+        Publishes a dynamic 3D tether connecting each arm's real End-Effector
+        to its own commanded/reference pose (PER-ARM, independent -- draws up
+        to TWO tethers, one per arm, whichever has a reference). The tether
+        changes color (Green -> Red) and thickness based on the tracking error.
         A 0.4m error corresponds to the max 10N force (Kp = 25 N/m).
         """
-        # Ensure we have both real and commanded positions before computing
-        if self.cmd_pos is None:
-            return
-        # Use the active arm's EE position
-        ee_pos = self.ee_pos_right if self.active_arm == 'right' else self.ee_pos_left
-        if ee_pos is None:
-            return
-
         markers = MarkerArray()
         timestamp = self.node.get_clock().now().to_msg()
-        
-        # 1. Compute the Cartesian Position Error
-        error_vec = self.cmd_pos - ee_pos
-        error_mag = np.linalg.norm(error_vec)
 
-        # 2. Compute the Error Ratio (0.0 to 1.0)
-        # Max error is 0.4m. We use min() to clamp the ratio at 1.0 so colors don't overflow.
-        max_error = 0.4
-        ratio = min(error_mag / max_error, 1.0)
+        def build_tether(ref_pos, ee_pos, marker_id):
+            if ref_pos is None or ee_pos is None:
+                return None
+            error_vec = ref_pos - ee_pos
+            error_mag = np.linalg.norm(error_vec)
+            max_error = 0.4
+            ratio = min(error_mag / max_error, 1.0)
+            r_color = float(ratio)
+            g_color = float(1.0 - ratio)
+            b_color = 0.0
+            min_thick = 0.005
+            max_thick = 0.030
+            thickness = min_thick + (ratio * (max_thick - min_thick))
 
-        # 3. Interpolate Color (Green -> Yellow -> Red)
-        # At ratio=0.0: r=0.0, g=1.0 (Green)
-        # At ratio=1.0: r=1.0, g=0.0 (Red)
-        r_color = float(ratio)
-        g_color = float(1.0 - ratio)
-        b_color = 0.0
+            tether = Marker()
+            tether.header.frame_id = self.ref_frame
+            tether.header.stamp = timestamp
+            tether.ns = "teleop_tether"
+            tether.id = marker_id
+            tether.type = Marker.ARROW
+            tether.action = Marker.ADD
+            tether.scale.x = thickness
+            tether.scale.y = 0.0
+            tether.scale.z = 0.0
+            tether.color = ColorRGBA(r=r_color, g=g_color, b=b_color, a=0.8)
+            tether.points = [
+                Point(x=float(ee_pos[0]), y=float(ee_pos[1]), z=float(ee_pos[2])),
+                Point(x=float(ref_pos[0]), y=float(ref_pos[1]), z=float(ref_pos[2])),
+            ]
+            return tether
 
-        # 4. Interpolate Thickness
-        # Starts as a thin 5mm string, grows up to a thick 3cm cylinder at max force
-        min_thick = 0.005
-        max_thick = 0.030
-        thickness = min_thick + (ratio * (max_thick - min_thick))
-
-        # 5. Build the Tether Marker
-        tether = Marker()
-        tether.header.frame_id = self.ref_frame
-        tether.header.stamp = timestamp
-        tether.ns = "teleop_tether"
-        tether.id = 0
-        
-        # We use the ARROW type but hide the head to create a perfect cylinder between 2 points
-        tether.type = Marker.ARROW
-        tether.action = Marker.ADD
-        
-        # scale.x is shaft diameter, scale.y is head diameter, scale.z is head length
-        tether.scale.x = thickness
-        tether.scale.y = 0.0 
-        tether.scale.z = 0.0 
-        
-        tether.color = ColorRGBA(r=r_color, g=g_color, b=b_color, a=0.8)
-
-        # Define the start (Real TCP) and end (Commanded TCP) points
-        p_start = Point(x=float(ee_pos[0]), 
-                        y=float(ee_pos[1]), 
-                        z=float(ee_pos[2]))
-        
-        p_end = Point(x=float(self.cmd_pos[0]), 
-                      y=float(self.cmd_pos[1]), 
-                      z=float(self.cmd_pos[2]))
-
-        tether.points = [p_start, p_end]
-        markers.markers.append(tether)
+        t_r = build_tether(self.ref_pos_right, self.ee_pos_right, 0)
+        t_l = build_tether(self.ref_pos_left, self.ee_pos_left, 1)
+        if t_r is not None:
+            markers.markers.append(t_r)
+        else:
+            self._delete_marker_group("teleop_tether", start_id=0, count=1, pub=self.teleop_pub)
+        if t_l is not None:
+            markers.markers.append(t_l)
+        else:
+            self._delete_marker_group("teleop_tether", start_id=1, count=1, pub=self.teleop_pub)
 
         # Publish to the dedicated teleop channel
         self.teleop_pub.publish(markers)
@@ -387,33 +360,48 @@ class QPVisualizer:
         process_arm(self.ee_pos_right, self.ee_vel_right, target_right)
         process_arm(self.ee_pos_left, self.ee_vel_left, target_left)
 
-        # --- 4. COMMANDED GRIPPER VISUALIZATION (Blue, follows active arm) ---
-        # BUG FIX: these two grippers use a FIXED start_id (0), NOT the shared
-        # `idx` counter. `idx` accumulates from the conditional markers above
-        # (collision line/text, joint-limit sphere/text — each appears only
-        # SOMETIMES), so under the old code the gripper's id shifted tick to
-        # tick even though its ns ("qp_debug_gripper" / "frozen_gripper") never
-        # changed. RViz treats (ns, id) as the marker's identity, so a shifting
-        # id meant a NEW marker was created every time instead of overwriting
-        # the previous one — the old id was never touched again (no lifetime,
-        # no DELETE) and stayed on screen forever. Both namespaces are unique to
-        # these two grippers, so a fixed id=0..2 here cannot collide with the
-        # "qp_debug" markers above (different namespace).
-        if self.cmd_pos is not None and self.cmd_rot_matrix is not None:
-            gripper_markers = self._build_gripper(self.cmd_pos, self.cmd_rot_matrix, 0.8, 0, timestamp)
-            markers.markers.extend(gripper_markers)
-        else:
-            self._delete_marker_group("qp_debug_gripper", start_id=0, count=3)
+        # --- 4/5. PER-ARM GRIPPER VISUALIZATION (2026-07-01 redesign) ---
+        # Each arm gets its OWN gripper marker, colored independently by its
+        # OWN frozen flag (self.frozen_right / self.frozen_left, sourced from
+        # main_qp_controller's ground-truth right_frozen/left_frozen state):
+        #   frozen=False (actively tracking a live reference) -> BLUE, ns
+        #     "qp_debug_gripper_right"/"_left"
+        #   frozen=True  (CLF holding a fixed pose)            -> GREY, ns
+        #     "frozen_gripper_right"/"_left"
+        # This is what lets BOTH grippers render BLUE simultaneously when both
+        # arms are actively driven (e.g. trajectory_generator.py publishing to
+        # both /arm_right and /arm_left cartesian_reference at once), while
+        # STILL rendering exactly one blue + one grey in the classic
+        # single-arm teleop paradigm (the inactive arm is frozen by the CLF
+        # hold). Each arm ALWAYS occupies exactly one of the two mutually
+        # exclusive namespaces at a time; the other is explicitly DELETEd so
+        # switching states never leaves a stale marker on screen.
+        #
+        # Fixed ids (0..2) per namespace -- see the historical bug-fix note
+        # this replaced: a shifting id (from the shared conditional `idx`
+        # counter above) meant RViz never overwrote the previous marker,
+        # leaving permanent ghosts. Four DISTINCT namespaces here (two per
+        # arm) can never collide with each other or with "qp_debug".
+        def render_arm_gripper(ref_pos, ref_rot, frozen, side):
+            blue_ns = f"qp_debug_gripper_{side}"
+            grey_ns = f"frozen_gripper_{side}"
+            if ref_pos is None or ref_rot is None:
+                self._delete_marker_group(blue_ns, start_id=0, count=3)
+                self._delete_marker_group(grey_ns, start_id=0, count=3)
+                return
+            if frozen:
+                grey_markers = self._build_gripper(
+                    ref_pos, ref_rot, 0.5, 0, timestamp,
+                    color=ColorRGBA(r=0.6, g=0.6, b=0.6, a=0.5), ns=grey_ns)
+                markers.markers.extend(grey_markers)
+                self._delete_marker_group(blue_ns, start_id=0, count=3)
+            else:
+                blue_markers = self._build_gripper(ref_pos, ref_rot, 0.8, 0, timestamp, ns=blue_ns)
+                markers.markers.extend(blue_markers)
+                self._delete_marker_group(grey_ns, start_id=0, count=3)
 
-        # --- 5. FROZEN (INACTIVE) ARM GRIPPER (Grey, shows where the CLF holds it) ---
-        # Disappears when the arm becomes active (cmd_pos takes over → blue gripper).
-        if self.frozen_pos is not None and self.frozen_rot_matrix is not None:
-            grey_markers = self._build_gripper(
-                self.frozen_pos, self.frozen_rot_matrix, 0.5, 0, timestamp,
-                color=ColorRGBA(r=0.6, g=0.6, b=0.6, a=0.5), ns="frozen_gripper")
-            markers.markers.extend(grey_markers)
-        else:
-            self._delete_marker_group("frozen_gripper", start_id=0, count=3)
+        render_arm_gripper(self.ref_pos_right, self.ref_rot_right, self.frozen_right, "right")
+        render_arm_gripper(self.ref_pos_left, self.ref_rot_left, self.frozen_left, "left")
             
         # =========================================================
         # --- 5. PINHOLE TASK ENVIRONMENT (STATIC OBSTACLES) ---

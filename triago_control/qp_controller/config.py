@@ -133,10 +133,34 @@ RIGHT_JOINTS = ['arm_right_1_joint', 'arm_right_2_joint', 'arm_right_3_joint',
                 'arm_right_4_joint', 'arm_right_5_joint', 'arm_right_6_joint', 'arm_right_7_joint']
 LEFT_JOINTS  = ['arm_left_1_joint', 'arm_left_2_joint', 'arm_left_3_joint',
                 'arm_left_4_joint', 'arm_left_5_joint', 'arm_left_6_joint', 'arm_left_7_joint']
+# Head + gripper-finger joint names (for the slider GUI's live limit lookup
+# only -- these are NOT part of the arm QP's decision vector).
+HEAD_JOINTS = ['arm_head_1_joint', 'arm_head_2_joint', 'arm_head_3_joint',
+               'arm_head_4_joint', 'arm_head_5_joint', 'arm_head_6_joint', 'arm_head_7_joint']
+GRIPPER_FINGER_JOINTS = ['gripper_left_finger_joint', 'gripper_right_finger_joint']
 
 RIGHT_TCP_FRAME = 'gripper_right_grasping_link'
 LEFT_TCP_FRAME  = 'gripper_left_grasping_link'
 REF_FRAME = 'base_footprint'
+
+# --- Live joint-position slider GUI layout (plotter.py "Joint Positions" window) ---
+# Shared, single source of truth for BOTH main_qp_controller.py (which computes
+# and publishes the real limits from the live Pinocchio model via
+# RobotKinematics.get_joint_limits) and plotter.py (which lays out the grid).
+# Mirrors the reference control-panel image's column/row arrangement:
+#   col 0 = left arm (7), col 1 = head (7), col 2 = right arm (7),
+#   col 3 = gripper fingers only, at rows 5-6 (rows 0-4 blank: the image's
+#   torso_lift_joint slider and joystick widget are INTENTIONALLY not encoded
+#   here per instruction). `None` = empty grid cell.
+SLIDER_LAYOUT = [
+    ['arm_left_1_joint', 'arm_head_1_joint', 'arm_right_1_joint', None],
+    ['arm_left_2_joint', 'arm_head_2_joint', 'arm_right_2_joint', None],
+    ['arm_left_3_joint', 'arm_head_3_joint', 'arm_right_3_joint', None],
+    ['arm_left_4_joint', 'arm_head_4_joint', 'arm_right_4_joint', None],
+    ['arm_left_5_joint', 'arm_head_5_joint', 'arm_right_5_joint', None],
+    ['arm_left_6_joint', 'arm_head_6_joint', 'arm_right_6_joint', 'gripper_left_finger_joint'],
+    ['arm_left_7_joint', 'arm_head_7_joint', 'arm_right_7_joint', 'gripper_right_finger_joint'],
+]
 
 # =============================================================================
 # 6. GEOMETRY + WORKSPACE

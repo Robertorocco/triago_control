@@ -80,8 +80,14 @@ class QPFormulator:
         # CLF convergence rate (updated by the dynamic scheduler)
         self.gamma_clf = cfg.GAMMA_CLF_DEFAULT
 
-        # Telemetry: the representative slack weight published to the dashboard
+        # Telemetry: the representative (averaged) slack weight, kept for any
+        # legacy consumer. PER-ARM values (2026-07-01) are the ones actually
+        # used in the QP cost -- weight_slack_r weights ONLY delta_r and
+        # weight_slack_l weights ONLY delta_l (see the slack block in
+        # build_and_solve) -- and are now ALSO stored here for telemetry.
         self.weight_slack = cfg.BASE_WEIGHT_SLACK
+        self.weight_slack_r = cfg.BASE_WEIGHT_SLACK
+        self.weight_slack_l = cfg.BASE_WEIGHT_SLACK
 
         # Joint-limit helpers + constant constraint blocks for the limit rows
         self.dq_max_safe = np.zeros(self.n_joints)
@@ -208,8 +214,13 @@ class QPFormulator:
         elif tracking_boost_arm == 'left':
             weight_slack_l = cfg.MAX_WEIGHT_SLACK
             gamma_l = cfg.GAMMA_MAX
-        # Representative slack weight for telemetry (average of both arms)
+        # Telemetry: representative (averaged, legacy) + per-arm slack weights.
+        # weight_slack_r/l are the EXACT values used in the Hessian's slack
+        # block below (delta_r weighted by weight_slack_r alone, delta_l by
+        # weight_slack_l alone) -- see §A.
         self.weight_slack = (weight_slack_r + weight_slack_l) / 2.0
+        self.weight_slack_r = weight_slack_r
+        self.weight_slack_l = weight_slack_l
 
         # =========================================================
         # A. COST FUNCTION (damping + posture spring + slack penalty)

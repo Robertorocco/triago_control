@@ -1,11 +1,15 @@
 # AI Agent Context — triago_control
 
 > **This file is maintained by the AI agent. Do not edit manually.**
-> Last updated: 2026-07-01 (per-arm dynamic CBF safety-margin split — second coupling channel,
-> found after the per-arm SoftMin Jacobian split alone did not eliminate the reported
-> idle-arm oscillation; see §9.3. Also: fixed a `NameError` on a stale `b_col` reference left
-> over from the Jacobian split (PR #8), and replaced plotter.py's broken-in-sim raw-encoder
-> plot with the QP-solved joint velocity for direct QP-vs-simulator diagnosis.
+> Last updated: 2026-07-01 (per-arm coupling fix CONFIRMED working by the operator — fast
+> active-arm motion no longer perturbs the idle arm. Follow-up UX/telemetry pass: fixed the
+> RViz visualizer to draw BOTH grippers blue when both arms are actively driven — was a
+> visualization-only bug, not a QP bug — see §9.4; split the "Slack Weight" plot into per-arm
+> R/L traces (confirmed the QP already weights delta_r/delta_l independently, §9.4); replaced
+> the "Joint Data" position line-plots with a dedicated slider-panel GUI using REAL joint
+> limits from the live Pinocchio model, §9.5. Also (earlier this day): per-arm dynamic CBF
+> safety-margin split (§9.3), fixed a `NameError` on a stale `b_col` reference (PR #8), and
+> replaced plotter.py's broken-in-sim raw-encoder plot with the QP-solved joint velocity.
 > STABLE v1 checkpoint tagged 2026-06-30 at commit "STABLE v1: teleoperation + grasping backup
 > checkpoint" — roll back there if this or a later change regresses the system)
 
@@ -638,6 +642,80 @@ directly distinguish "the QP itself commands nonzero idle-arm velocity" (a furth
 QP-side coupling bug) from "the QP commands ~0 for the idle arm but the simulator/
 robot moves it anyway" (a simulator/inertia/PID-tuning issue, out of the QP's scope).
 
+### 9.4 Per-arm gripper visualization + per-arm slack telemetry (2026-07-01)
+
+**Bug reported**: running `trajectory_generator.py` (which publishes references to
+BOTH arms simultaneously) showed only ONE blue commanded gripper in RViz, with the
+other arm rendered grey (as if frozen), even though the QP was correctly tracking
+both arms.
+
+**Root cause**: `qp_visualizer_tutorial.QPVisualizer` was built for the single-
+active-arm teleop paradigm — it held ONE `cmd_pos`/`cmd_rot_matrix` (blue) and ONE
+`frozen_pos`/`frozen_rot_matrix` (grey), gated by a single `self.active_arm`
+("right"/"left") that only ever changed on a `/shared_autonomy/active_arm`
+message. `trajectory_generator.py` never publishes that topic, so `active_arm`
+stayed at its default "right": the right arm's reference always went to the blue
+slot, and the left arm's reference was *always* routed to the grey "frozen" slot
+regardless of whether it was actually frozen.
+
+**Fix**: `QPVisualizer` now tracks each arm's reference pose and frozen flag
+**independently** — `ref_pos_right/left`, `ref_rot_right/left`, `frozen_right/left`
+(no more `active_arm`/`cmd_pos`/`frozen_pos`). The frozen flags are populated from
+a NEW topic, `/qp_debug/arm_frozen` (`[right_frozen, left_frozen]` as 0.0/1.0
+floats), published by `main_qp_controller.py` from its own ground-truth
+`self.right_frozen`/`self.left_frozen` state — the same state that actually drives
+the QP's cost decoupling (§8.5) — rather than re-derived/guessed in the visualizer.
+Each arm now renders its own gripper marker on its own pair of namespaces
+(`qp_debug_gripper_{right,left}` for blue, `frozen_gripper_{right,left}` for grey);
+whichever state isn't active is explicitly `DELETE`d so switching never leaves a
+ghost. Result: BOTH grippers render blue when both arms are actively driven
+(trajectory_generator, dual teleop), while the classic single-arm teleop paradigm
+(one arm frozen by the CLF hold) still shows exactly one blue + one grey, as
+before. `publish_teleop_tether` was similarly split into two independent
+tethers (ns `teleop_tether`, ids 0=right/1=left).
+
+**Slack weight telemetry (confirmed per-arm, now shown as such)**: confirmed by
+reading `qp_formulator.build_and_solve`'s Hessian slack block —
+`weight_slack_r` weights ONLY `delta_r` (the right-arm CLF slack) and
+`weight_slack_l` weights ONLY `delta_l`, fully independently; they were already
+computed independently by the per-arm dynamic scheduler (§10). The bug was
+telemetry-only: `/qp_debug/dynamic_weights` published just their AVERAGE
+(`[weight_slack_avg, gamma_clf]`). Now publishes `[weight_slack_r, weight_slack_l,
+gamma_clf]`; `QPFormulator` also stores `self.weight_slack_r`/`self.weight_slack_l`
+alongside the legacy averaged `self.weight_slack`. The plotter's "Slack Weight"
+row in the "Task Error & Adaptation" window now plots both (red=R, blue=L),
+matching the convention used for every other per-arm quantity in the dashboard
+(λ_CBF, λ_Joints, d_safe_dynamic).
+
+### 9.5 Plotter: joint-position slider GUI (replaces the position line plots)
+
+The scrolling 14-line position plot in the "Joint Data" window (Figure 1) was
+reported hard to read at a glance. Removed the "L/R- Position" rows entirely;
+Figure 1 is now a 3×2 grid (velocity / QP solution / servo error only — see
+§9.2's diagnostic-plot note for the QP-solution row).
+
+**New Window 6, "Joint Positions"**: a read-only slider-panel GUI matching the
+layout of a reference control-panel image — one `matplotlib.widgets.Slider` per
+joint, arranged in a grid: col 0 = left arm (`arm_left_1..7_joint`), col 1 = head
+(`arm_head_1..7_joint`), col 2 = right arm (`arm_right_1..7_joint`), col 3 = the
+two gripper finger joints (`gripper_{left,right}_finger_joint`, rows 5-6 only,
+matching the reference image). The grid itself (`cfg.SLIDER_LAYOUT`, a list-of-
+lists with `None` for empty cells) lives in `config.py` as the single source of
+truth for both the plotter's layout and any future consumer. **Per instruction,
+the reference image's `torso_lift_joint` slider and joystick widget are NOT
+encoded** (rows 0-4 of column 3 are intentionally blank).
+
+Sliders are **display-only** (`eventson=False`; the handle position is set
+programmatically from live `/joint_states` each animation frame — dragging them
+does nothing). Slider **ranges use the REAL joint limits** read from the live
+Pinocchio model (`RobotKinematics.get_joint_limits`, the exact same limits the
+joint-limit CBF rows in `qp_formulator` enforce), published once (latched via a
+self-cancelling 2 s timer) on a new topic `/qp_debug/joint_limits` as a
+semicolon/colon-encoded `String` (`"name:lower:upper;..."` — chosen over a new
+custom message type since this is a low-rate, non-critical debug topic). Falls
+back to a placeholder `[-3.15, 3.15]` range until that message arrives, then
+snaps to the real limits.
+
 ### 9.1 Sensing constraints (real-hardware honesty, 2026-06-29)
 
 **No Gazebo ground-truth is ever read** (`/gazebo/model_states`, `GetEntityState`, etc. — none
@@ -825,7 +903,7 @@ visible, so at most one frame is dropped.
 | Grasp pipeline (full cycle) | ✅ Working | PRE_GRASP → ALIGN → APPROACH → CLOSE → LIFT → HOLDING. Tracking boost (MAX gamma+slack) during align. Align timeout 12s. |
 | Grasp failure | ✅ Working | Clear `[GRASP FAILED]` log. ABORT_RETREAT: backs out along reverse approach axis (gripper open, CBF bypass active during retreat, then restore). |
 | Post-grasp (LIFT + HOLDING + place) | ✅ Working | 9 cm slow lift → HOLDING resumes shared autonomy → Platform placement manifold → release → RELEASE_LIFT → SHARED_AUTONOMY |
-| RViz visualization | ✅ Working | Light-green=EE robot policy (own topic `/robot_policy_marker`), Light-blue=reference guidance (own topic `/guidance_policy_marker`), Blue=active commanded gripper, Grey=inactive frozen CLF pose. Belief-opacity goal grippers + grasp-ready cue on `/shared_policy_markers`. Grasp-guidance move/rotate arrows REMOVED (cluttered the view). Periodic DELETEALL sweep every 3s on all 3 marker topics (self-heals stuck/ghost markers). Dual belief subplot (active colored, inactive greyscale). Task-authority soft-cost plot (`/qp_debug/task_authority`). |
+| RViz visualization | ✅ Working | Light-green=EE robot policy (own topic `/robot_policy_marker`), Light-blue=reference guidance (own topic `/guidance_policy_marker`). Commanded gripper is now PER-ARM (2026-07-01, §9.4): each arm independently Blue=actively tracking / Grey=frozen (`right_frozen`/`left_frozen` ground truth via `/qp_debug/arm_frozen`) — both render blue simultaneously under `trajectory_generator.py` or dual teleop, exactly one blue+one grey in single-arm teleop. Belief-opacity goal grippers + grasp-ready cue on `/shared_policy_markers`. Grasp-guidance move/rotate arrows REMOVED (cluttered the view). Periodic DELETEALL sweep every 3s on all 3 marker topics (self-heals stuck/ghost markers). Dual belief subplot (active colored, inactive greyscale). Task-authority soft-cost plot (`/qp_debug/task_authority`). Plotter dashboard also has a NEW "Joint Positions" slider-panel GUI window (§9.5, real Pinocchio joint limits) and per-arm "Slack Weight" (R/L) traces. |
 | Haption teleoperation | ✅ Working | `teleop_triago_clutch.py` + `haptic_force_manager_tutorial.py`. Force layers: F_guide (velocity-field, v_max_user 0.04/0.10) + F_fixture (position spring near goal). Handle drag during autonomous phases (KP+KD velocity-following). |
 | Head control (visual servoing) | 🔧 Active dev | `qp_head_visual_servo.py`: QP-based hand-tracking, independent loop. Starting point — no image processing yet. |
 | Mobile base integration | 🔧 Partial | `base_controller.py` exists but not QP-certified |
@@ -839,7 +917,7 @@ visible, so at most one frame is dropped.
 
 | Issue | Description | Proposed Fix |
 |-------|-------------|-------------|
-| **Residual inactive-arm motion** | ⚠️ **PARTIALLY FIXED, one more channel found and closed (2026-07-01)**. Step 1 (§9.2): replaced the single shared scalar SoftMin CBF row with two independent per-arm rows (`J_soft_r`/`J_soft_l`) — this decoupled the *Jacobian columns* but the operator still observed idle-arm oscillation on fast active-arm motion. Step 2 (§9.3, this entry): found that `d_safe_dynamic` (the velocity-inflated CBF margin) was STILL a single scalar computed from the COMBINED both-arm velocity norm and shared by both rows — so a fast active arm inflated the idle arm's own margin/threshold even though its Jacobian was already zero-columned there. Split into `d_safe_dynamic_r`/`d_safe_dynamic_l`, each from only that arm's own joint velocities. **Please re-verify in practice** (fast active-arm motion near an unrelated obstacle should no longer perturb the idle arm) — if oscillation still persists, the NEW `plotter.py` row 2 ("QP Solution (q_dot_safe)", replacing the broken-in-sim raw encoder plot) will show directly whether it's present in the QP's own solved velocity (further QP-side coupling, e.g. `_schedule_weights`'s shared `last_lambda_col` feedback — see §9.3 note) or only downstream in the simulator/robot response. | Re-verify; if still present, check the plotter's new QP-solution row first. |
+| **Residual inactive-arm motion** | ✅ **FIXED, CONFIRMED by the operator (2026-07-01)**. Step 1 (§9.2): per-arm SoftMin CBF Jacobian split. Step 2 (§9.3): per-arm dynamic safety-margin split (`d_safe_dynamic_r`/`d_safe_dynamic_l`) — this was the channel that actually mattered; a single combined scalar was still inflating the idle arm's threshold from the active arm's speed alone. Operator confirmed: "the hands moves independently, and the shaking of one hand do not invoke oscillation in the others." The QP-solution plotter row (§9.2) was added as the diagnostic tool for this but wasn't ultimately needed — the math fix alone resolved it. | Done — confirmed working. |
 | **Gazebo dual attach** | The IFRA_LinkAttacher plugin has a global `IsAttached` boolean allowing only ONE attachment. A patched `gazebo_link_attacher.cpp` was provided (per-pair gating, vector erase in Detach) — confirmed working by the operator. | Done. |
 | **No independent grasp confirmation** | Grasp success is decided PURELY geometrically (FK-derived contact distance/angle vs. the robot's own *believed* cylinder pose) — there is no force/torque sensing on the arm chains and no vision confirmation wired in yet, so a "successful" grasp can still be a miss if the geometric gates are satisfied by coincidence. Gates were tightened ~10% (2026-06-29) as a stopgap. | Wire `head_control/object_detector.py` (or similar) as an independent post-close confirmation (does the detected cylinder pose match "in the gripper"?), and/or measure the grasped cylinder's real axis at attach time instead of assuming world +Z (see §9.1). |
 | **Platform placement (dual arm)** | `GoalSet.set_grasped` / `clear_grasped` tracks one grasped color at a time. The per-arm context save/restore (`_ctx_goalset`) handles this for one-arm-active-at-a-time, but a true simultaneous dual-arm placement (both arms holding and both wanting to place concurrently) is NOT supported. | For the current "one active at a time" policy this is fine. If needed: extend GoalSet to hold per-arm grasped state (two axes, two z-offsets). |

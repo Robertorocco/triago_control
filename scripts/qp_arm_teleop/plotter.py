@@ -6,7 +6,9 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
 from sensor_msgs.msg import JointState
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
-from matplotlib.lines import Line2D  
+from matplotlib.lines import Line2D
+from matplotlib.widgets import Slider
+from matplotlib.gridspec import GridSpec
 import threading
 from collections import deque
 import numpy as np
@@ -23,6 +25,18 @@ class TriagoDashboard(Node):
         self.left_joints = [f'arm_left_{i}_joint' for i in range(1, 8)]
         self.right_joints = [f'arm_right_{i}_joint' for i in range(1, 8)]
         self.all_joints = self.left_joints + self.right_joints
+
+        # --- Live joint-position slider GUI (2026-07-01) ---
+        # Superset of joints tracked ONLY for the slider panel (Window 6),
+        # independent of the strict all_joints gate below (arm+head+gripper
+        # fingers are not guaranteed to arrive in the SAME /joint_states
+        # message as the two arms on every robot config, so this set is
+        # updated opportunistically per-message rather than gated).
+        self.head_joints = [f'arm_head_{i}_joint' for i in range(1, 8)]
+        self.gripper_finger_joints = ['gripper_left_finger_joint', 'gripper_right_finger_joint']
+        self.slider_joint_names = (self.left_joints + self.head_joints +
+                                   self.right_joints + self.gripper_finger_joints)
+        self.slider_positions = {name: 0.0 for name in self.slider_joint_names}
         
         # --- Shared Autonomy Time Tracking ---
         self.start_time = None  # Holds the absolute start time for continuous tracking
@@ -174,6 +188,22 @@ class TriagoDashboard(Node):
             10
         )
 
+        # --- Live joint limits for the slider GUI (from the real Pinocchio model) ---
+        self.joint_limits = {}   # name -> (lower, upper)
+        self.create_subscription(String, '/qp_debug/joint_limits', self.joint_limits_callback, qos_profile)
+
+    def joint_limits_callback(self, msg):
+        """Parse 'name:lower:upper;name:lower:upper;...' into self.joint_limits."""
+        for entry in msg.data.split(';'):
+            if not entry:
+                continue
+            parts = entry.split(':')
+            if len(parts) == 3:
+                try:
+                    self.joint_limits[parts[0]] = (float(parts[1]), float(parts[2]))
+                except ValueError:
+                    pass
+
     def get_time(self):
         """Returns the current time in seconds, normalized to start exactly at t=0.0"""
         current_time = self.get_clock().now().nanoseconds / 1e9
@@ -208,9 +238,16 @@ class TriagoDashboard(Node):
 
     # --- NEW: Adaptive Controller Callbacks ---
     def dyn_weights_callback(self, msg):
+        """[weight_slack_r, weight_slack_l, gamma_clf] -- PER-ARM slack weights
+        (2026-07-01; was [weight_slack_avg, gamma_clf]). Confirmed: weight_slack_r
+        weights ONLY delta_r and weight_slack_l weights ONLY delta_l in the QP
+        Hessian's slack block (qp_formulator.build_and_solve)."""
         t = self.get_time()
+        data = list(msg.data)
+        if len(data) < 3:
+            data = (data + [0.0, 0.0, 0.0])[:3]
         self.dyn_weights_time.append(t)
-        self.dyn_weights_buffer.append(list(msg.data))
+        self.dyn_weights_buffer.append(data)
 
     def time_scale_callback(self, msg):
         t = self.get_time()
@@ -360,6 +397,15 @@ class TriagoDashboard(Node):
 
         if len(msg.name) != len(msg.position): return
         name_to_idx = {name: i for i, name in enumerate(msg.name)}
+
+        # --- Live joint-position slider GUI (2026-07-01): opportunistic update,
+        # independent of the strict all_joints gate below. Whatever subset of
+        # {arms, head, gripper fingers} is present in THIS message updates its
+        # own slider; missing joints simply keep their last known value. ---
+        for name in self.slider_joint_names:
+            if name in name_to_idx:
+                self.slider_positions[name] = msg.position[name_to_idx[name]]
+
         if not all(j in name_to_idx for j in self.all_joints):
             return
 
@@ -387,7 +433,9 @@ def update_plot(frame, node, lines_map, axs1, axs2, axs3, ax_pairs, dyn_plots, f
     artists = []
     window = 10.0
 
-    # --- PART 1: Joint positions + velocities (rows 0-1 of axs1) ---
+    # --- PART 1: Joint velocity from driver (row 0 of axs1) ---
+    # (Position rows REMOVED 2026-07-01 -- live positions now shown in the
+    # dedicated slider GUI, Window 6. See update_sliders below.)
     if node.time_buffer:
         t = list(node.time_buffer)
 
@@ -399,14 +447,10 @@ def update_plot(frame, node, lines_map, axs1, axs2, axs3, ax_pairs, dyn_plots, f
                     lines_map[j + suffix].set_data(t[:min_len], y[:min_len])
                     artists.append(lines_map[j + suffix])
 
-        # Row 0: positions
-        update_subset(node.left_joints, node.q_buffers, '_pos')
-        update_subset(node.right_joints, node.q_buffers, '_pos')
-        # Row 1: velocity from driver
         update_subset(node.left_joints, node.dq_buffers, '_vel')
         update_subset(node.right_joints, node.dq_buffers, '_vel')
 
-    # --- PART 2: QP Solution + Servo Error (rows 2-3 of axs1) ---
+    # --- PART 2: QP Solution + Servo Error (rows 1-2 of axs1) ---
     if node.time_buffer:
         t_meas = list(node.time_buffer)
 
@@ -606,14 +650,22 @@ def update_plot(frame, node, lines_map, axs1, axs2, axs3, ax_pairs, dyn_plots, f
 
         for idx, (key, ylabel, title) in enumerate(dyn_plots):
             if key == 'weight_slack':
+                # PER-ARM (2026-07-01): data_dw entries are
+                # [weight_slack_r, weight_slack_l, gamma_clf]. Confirmed these
+                # are the EXACT weights the QP applies to delta_r / delta_l
+                # independently (see qp_formulator.build_and_solve's slack
+                # block) -- so plot both, red=R blue=L like every other
+                # per-arm quantity in this dashboard.
                 min_len = min(len(t_dw), len(data_dw))
                 if min_len > 0:
-                    y_data = [d[0] for d in data_dw[:min_len]]
-                    lines_map[f'dyn_{key}'].set_data(t_dw[:min_len], y_data)
+                    y_r = [d[0] for d in data_dw[:min_len]]
+                    y_l = [d[1] for d in data_dw[:min_len]]
+                    lines_map[f'dyn_{key}_r'].set_data(t_dw[:min_len], y_r)
+                    lines_map[f'dyn_{key}_l'].set_data(t_dw[:min_len], y_l)
             elif key == 'gamma_clf':
                 min_len = min(len(t_dw), len(data_dw))
                 if min_len > 0:
-                    y_data = [d[1] for d in data_dw[:min_len]]
+                    y_data = [d[2] for d in data_dw[:min_len]]
                     lines_map[f'dyn_{key}'].set_data(t_dw[:min_len], y_data)
             elif key == 'd_safe_dynamic':
                 min_len = min(len(t_ds), len(data_ds))
@@ -706,67 +758,49 @@ def main(args=None):
     # ===================================================================
     # WINDOW 1 (left): "Joint Data" — 4x2 subplot matrix
     # ===================================================================
-    fig1, axs1 = plt.subplots(4, 2, sharex=True)
+    # (2026-07-01) "L/R- Position" rows REMOVED from this time-series figure --
+    # a scrolling 14-line position plot was too hard to read at a glance. Live
+    # joint positions now live in their OWN dedicated slider GUI (Window 6,
+    # "Joint Positions" -- see below), matching the reference control-panel
+    # layout. Figure 1 is now a 3x2 grid: velocity / QP solution / servo error.
+    fig1, axs1 = plt.subplots(3, 2, sharex=True)
     fig1.suptitle('Joint Data')
 
-    # Row 2 was "Raw Encoder vel" -- REMOVED (2026-07-01): the Gazebo encoder
-    # velocities are known-broken in simulation (see .kiro/context.md §8.1),
-    # so plotting them added no diagnostic value. Replaced with the QP
-    # SOLUTION itself (q_dot_safe, as actually commanded to the controllers)
-    # so the operator can directly see whether an idle-arm oscillation
-    # originates in the QP's solved velocity (math/coupling issue) or only
-    # appears downstream in the simulator/robot response (inertia/PID issue).
-    row_titles = ['L- Position', 'L- Velocity from driver',
-                  'L- QP Solution (q_dot_safe)', 'L- Servo Error cmd-meas']
-    row_titles_r = ['R- Position', 'R- Velocity from driver',
-                    'R- QP Solution (q_dot_safe)', 'R- Servo Error cmd-meas']
-
-    # Row 0: Position
-    axs1[0, 0].set_title('L- Position', fontsize='small')
-    axs1[0, 1].set_title('R- Position', fontsize='small')
+    # Row 0: Velocity from driver
+    axs1[0, 0].set_title('L- Velocity from driver', fontsize='small')
+    axs1[0, 1].set_title('R- Velocity from driver', fontsize='small')
     for i, j in enumerate(node.left_joints):
         l, = axs1[0, 0].plot([], [], color=colors[i])
-        lines_map[j + '_pos'] = l
+        lines_map[j + '_vel'] = l
     for i, j in enumerate(node.right_joints):
         l, = axs1[0, 1].plot([], [], color=colors[i])
-        lines_map[j + '_pos'] = l
-
-    # Row 1: Velocity from driver
-    axs1[1, 0].set_title('L- Velocity from driver', fontsize='small')
-    axs1[1, 1].set_title('R- Velocity from driver', fontsize='small')
-    for i, j in enumerate(node.left_joints):
-        l, = axs1[1, 0].plot([], [], color=colors[i])
-        lines_map[j + '_vel'] = l
-    for i, j in enumerate(node.right_joints):
-        l, = axs1[1, 1].plot([], [], color=colors[i])
         lines_map[j + '_vel'] = l
 
-    # Row 2: QP Solution (q_dot_safe) -- replaces the broken-in-sim raw encoder
+    # Row 1: QP Solution (q_dot_safe) -- replaces the broken-in-sim raw encoder
     # velocity plot. Sourced from /qp_debug/qdot_cmd, i.e. the EXACT joint
     # velocity vector the QP solved and sent to the TSID controllers this
     # tick -- lets the operator see directly whether an idle-arm oscillation
     # is present in the QP's own solution (a real coupling/math issue) or
     # only appears further downstream (simulator dynamics / robot inertia).
-    axs1[2, 0].set_title('L- QP Solution (q_dot_safe)', fontsize='small')
-    axs1[2, 1].set_title('R- QP Solution (q_dot_safe)', fontsize='small')
+    axs1[1, 0].set_title('L- QP Solution (q_dot_safe)', fontsize='small')
+    axs1[1, 1].set_title('R- QP Solution (q_dot_safe)', fontsize='small')
     for i, j in enumerate(node.left_joints):
-        l, = axs1[2, 0].plot([], [], color=colors[i], linewidth=0.9)
+        l, = axs1[1, 0].plot([], [], color=colors[i], linewidth=0.9)
         lines_map[j + '_qpsol_l'] = l
     for i, j in enumerate(node.right_joints):
-        l, = axs1[2, 1].plot([], [], color=colors[i], linewidth=0.9)
+        l, = axs1[1, 1].plot([], [], color=colors[i], linewidth=0.9)
         lines_map[j + '_qpsol_r'] = l
 
-
-    # Row 3: Servo Error cmd-meas
-    axs1[3, 0].set_title('L- Servo Error cmd-meas', fontsize='small')
-    axs1[3, 1].set_title('R- Servo Error cmd-meas', fontsize='small')
-    axs1[3, 0].axhline(y=0, color='k', linewidth=0.5, alpha=0.5)
-    axs1[3, 1].axhline(y=0, color='k', linewidth=0.5, alpha=0.5)
+    # Row 2: Servo Error cmd-meas
+    axs1[2, 0].set_title('L- Servo Error cmd-meas', fontsize='small')
+    axs1[2, 1].set_title('R- Servo Error cmd-meas', fontsize='small')
+    axs1[2, 0].axhline(y=0, color='k', linewidth=0.5, alpha=0.5)
+    axs1[2, 1].axhline(y=0, color='k', linewidth=0.5, alpha=0.5)
     for i, j in enumerate(node.left_joints):
-        l, = axs1[3, 0].plot([], [], color=colors[i], linewidth=0.8)
+        l, = axs1[2, 0].plot([], [], color=colors[i], linewidth=0.8)
         lines_map[j + '_verr_l'] = l
     for i, j in enumerate(node.right_joints):
-        l, = axs1[3, 1].plot([], [], color=colors[i], linewidth=0.8)
+        l, = axs1[2, 1].plot([], [], color=colors[i], linewidth=0.8)
         lines_map[j + '_verr_r'] = l
 
     # Legend below the title (centered, using figure-level legend)
@@ -775,14 +809,13 @@ def main(args=None):
                 ncol=7, bbox_to_anchor=(0.5, 0.95))
 
     # Y-axis labels on every row left column only
-    axs1[0, 0].set_ylabel('[rad]')
+    axs1[0, 0].set_ylabel('[rad/s]')
     axs1[1, 0].set_ylabel('[rad/s]')
     axs1[2, 0].set_ylabel('[rad/s]')
-    axs1[3, 0].set_ylabel('[rad/s]')
 
     # X-axis label only on bottom row
-    axs1[3, 0].set_xlabel('Time [s]')
-    axs1[3, 1].set_xlabel('Time [s]')
+    axs1[2, 0].set_xlabel('Time [s]')
+    axs1[2, 1].set_xlabel('Time [s]')
 
     for ax in axs1.flatten():
         ax.grid(True, alpha=0.3)
@@ -913,10 +946,13 @@ def main(args=None):
         ax.set_ylabel(ylabel, rotation=0, ha='left', labelpad=10)
         ax.yaxis.set_label_position('right')
         ax.grid(True, alpha=0.3)
-        if key == 'd_safe_dynamic':
-            # PER-ARM margin (2026-07-01): two independent traces, R and L.
-            l_r, = ax.plot([], [], 'r-', linewidth=1.2, label=r'$d_{safe,R}^{dyn}$')
-            l_l, = ax.plot([], [], 'b-', linewidth=1.2, label=r'$d_{safe,L}^{dyn}$')
+        if key in ('d_safe_dynamic', 'weight_slack'):
+            # PER-ARM (2026-07-01): two independent traces, R (red) and L (blue),
+            # matching the convention used everywhere else in this dashboard.
+            label_r = r'$d_{safe,R}^{dyn}$' if key == 'd_safe_dynamic' else r'$w_{\delta,R}$'
+            label_l = r'$d_{safe,L}^{dyn}$' if key == 'd_safe_dynamic' else r'$w_{\delta,L}$'
+            l_r, = ax.plot([], [], 'r-', linewidth=1.2, label=label_r)
+            l_l, = ax.plot([], [], 'b-', linewidth=1.2, label=label_l)
             ax.legend(loc='upper left', fontsize='x-small')
             lines_map[f'dyn_{key}_r'] = l_r
             lines_map[f'dyn_{key}_l'] = l_l
@@ -985,22 +1021,88 @@ def main(args=None):
     lines_map['auth_slack'] = l_auth_slack
 
     # ===================================================================
+    # WINDOW 6: "Joint Positions" — live slider GUI (control-panel style)
+    # ===================================================================
+    # Read-only telemetry display mimicking the reference control-panel image:
+    # one row per joint index (1..7), one column per chain (left arm / head /
+    # right arm), plus a 4th column for the two gripper finger joints (rows
+    # 5-6 only, matching the image). Torso lift + joystick are INTENTIONALLY
+    # NOT encoded here (per instruction). Slider RANGE = the REAL joint limits
+    # from the live Pinocchio model (RobotKinematics.get_joint_limits,
+    # published on /qp_debug/joint_limits) -- the SAME limits the joint-limit
+    # CBF enforces -- falling back to [-3.15, 3.15] until that message arrives.
+    #
+    # These Slider widgets are DISPLAY-ONLY: eventson=False and the handles
+    # are moved programmatically from live /joint_states data each frame, not
+    # by the user. Dragging them has no effect on the robot.
+    layout = cfg_plot.SLIDER_LAYOUT
+    n_rows_slider = len(layout)
+    n_cols_slider = len(layout[0]) if n_rows_slider else 0
+    fig6 = plt.figure(figsize=(10.5, 7.2))
+    fig6.canvas.manager.set_window_title('Joint Positions (live, read-only)')
+    fig6.suptitle('Joint Positions', color='white')
+    fig6.patch.set_facecolor('#12181c')
+    grid = GridSpec(n_rows_slider, n_cols_slider, figure=fig6,
+                    left=0.06, right=0.97, top=0.92, bottom=0.04, hspace=0.55, wspace=0.35)
+
+    slider_widgets = {}   # joint_name -> Slider
+    slider_limits = {}    # joint_name -> (lower, upper), snapshot to detect changes
+    for r, row in enumerate(layout):
+        for c, jname in enumerate(row):
+            if jname is None:
+                continue
+            ax_s = fig6.add_subplot(grid[r, c])
+            ax_s.set_facecolor('#1c2830')
+            lo, hi = -3.15, 3.15   # placeholder until /qp_debug/joint_limits arrives
+            try:
+                # initcolor/track_color require matplotlib >= 3.5; fall back
+                # gracefully on older installs (purely cosmetic kwargs).
+                slider = Slider(ax_s, jname, lo, hi, valinit=0.0, color='#ff9f66',
+                                initcolor='none', track_color='#2d3b42')
+            except TypeError:
+                slider = Slider(ax_s, jname, lo, hi, valinit=0.0, color='#ff9f66')
+            slider.label.set_fontsize(8)
+            slider.label.set_color('white')
+            slider.valtext.set_fontsize(8)
+            slider.valtext.set_color('white')
+            slider.eventson = False   # display-only: ignore mouse drags
+            slider_widgets[jname] = slider
+            slider_limits[jname] = (lo, hi)
+
+    # ===================================================================
     # WINDOW PLACEMENT (from wmctrl, slightly aligned)
     # ===================================================================
-    figs = [fig1, fig2, fig3, fig4, fig5]
+    figs = [fig1, fig2, fig3, fig4, fig5, fig6]
 
     place_window(fig1, 86, 126, 851, 1131)    # Left: Joint Data
     place_window(fig2, 893, 118, 542, 1131)   # Center: QP Data
     place_window(fig3, 1436, 118, 498, 1131)  # Right: Task Error
     place_window(fig4, 300, 300, 700, 380)    # Debug: CBF active pairs (floats on top)
     place_window(fig5, 350, 350, 700, 380)    # Debug: Task authority (floats on top)
+    place_window(fig6, 400, 400, 900, 620)    # Debug: Joint Positions slider GUI
 
     # ===================================================================
     # ANIMATION
     # ===================================================================
+    def update_sliders(frame):
+        # Apply real limits once they arrive (joint_limits published latched,
+        # every 2s until the first successful send -- see main_qp_controller).
+        for jname, slider in slider_widgets.items():
+            lo, hi = node.joint_limits.get(jname, slider_limits[jname])
+            if (lo, hi) != slider_limits[jname]:
+                slider.ax.set_xlim(lo, hi)
+                slider.valmin, slider.valmax = lo, hi
+                slider_limits[jname] = (lo, hi)
+            val = node.slider_positions.get(jname, 0.0)
+            val = min(max(val, slider.valmin), slider.valmax)
+            slider.set_val(val)
+        fig6.canvas.draw_idle()
+        return []
+
     ani = FuncAnimation(fig1, update_plot,
                         fargs=(node, lines_map, axs1, axs2, axs3, ax_pairs, dyn_plots, figs),
                         interval=100)
+    ani_sliders = FuncAnimation(fig6, update_sliders, interval=100)
     plt.show()
 
     node.destroy_node()

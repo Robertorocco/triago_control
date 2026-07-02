@@ -140,6 +140,18 @@ class SafetyQPController(Node):
         self.pub_qdot_cmd = self.create_publisher(Float64MultiArray, '/qp_debug/qdot_cmd', 10)
         self.pub_task_authority = self.create_publisher(Float64MultiArray, '/qp_debug/task_authority', 10)
         self.pub_shared_col = self.create_publisher(Float64MultiArray, '/collision_constraints', 10)
+        # Per-arm frozen/active ground truth for the RViz visualizer (2026-07-01):
+        # [right_frozen, left_frozen] as 0.0/1.0. Lets qp_visualizer_tutorial draw
+        # BOTH grippers blue when both arms are actively driven (e.g. by
+        # trajectory_generator.py), not just whichever arm a stale single
+        # "active_arm" notion pointed at.
+        self.pub_arm_frozen = self.create_publisher(Float64MultiArray, '/qp_debug/arm_frozen', 10)
+        # Live joint limits for the plotter's slider GUI (latched, published
+        # once + on every late-subscriber via a slow timer): the REAL limits
+        # from the Pinocchio model built from the live URDF -- the SAME
+        # numbers the joint-limit CBF rows in qp_formulator enforce.
+        self.pub_joint_limits = self.create_publisher(String, '/qp_debug/joint_limits', 10)
+        self.timer_joint_limits = self.create_timer(2.0, self._publish_joint_limits)
 
         # --- SUBSCRIBERS ---
         self.create_subscription(JointState, '/joint_states', self.joint_callback, 10)
@@ -329,6 +341,24 @@ class SafetyQPController(Node):
     def grasp_active_cb(self, msg):
         """Tracks whether shared autonomy is autonomously driving a grasp/lift."""
         self.grasp_active = bool(msg.data)
+
+    def _publish_joint_limits(self):
+        """Publish [name:lower:upper;...] for every joint the slider GUI needs
+        (arms + head + gripper fingers), read from the live Pinocchio model
+        via RobotKinematics.get_joint_limits -- the SAME limits enforced by
+        the joint-limit CBF rows in qp_formulator.build_and_solve. A plain
+        String (semicolon/colon encoded) is used to avoid introducing a new
+        custom message type for a low-rate (2s), non-critical debug topic.
+        Runs on a slow timer (not the hot loop) and self-cancels after the
+        first successful publish -- the URDF/model never changes at runtime.
+        """
+        if self.kin.model is None:
+            return
+        names = cfg.RIGHT_JOINTS + cfg.LEFT_JOINTS + cfg.HEAD_JOINTS + cfg.GRIPPER_FINGER_JOINTS
+        lower, upper = self.kin.get_joint_limits(names)
+        payload = ";".join(f"{n}:{lo:.4f}:{hi:.4f}" for n, lo, hi in zip(names, lower, upper))
+        self.pub_joint_limits.publish(String(data=payload))
+        self.timer_joint_limits.cancel()
 
     def _freeze_arm(self, side):
         """Snapshot one arm's CURRENT EE pose as its held reference (zero velocity).
@@ -641,7 +671,16 @@ class SafetyQPController(Node):
 
         # Min distance + dynamic weights
         self.pub_min_dist.publish(Float64(data=abs_min_distance))
-        self.pub_dynamic_weights.publish(Float64MultiArray(data=[float(self.qp.weight_slack), float(self.qp.gamma_clf)]))
+        # Per-arm slack weights (2026-07-01): weight_slack_r weights ONLY delta_r
+        # and weight_slack_l weights ONLY delta_l in the QP Hessian (confirmed --
+        # see qp_formulator.build_and_solve's slack block assembly). Previously
+        # only their AVERAGE was published; now both are sent so the plotter can
+        # show them independently, matching how the QP actually uses them.
+        self.pub_dynamic_weights.publish(Float64MultiArray(
+            data=[float(self.qp.weight_slack_r), float(self.qp.weight_slack_l), float(self.qp.gamma_clf)]))
+        # Per-arm frozen/active ground truth for the RViz visualizer.
+        self.pub_arm_frozen.publish(Float64MultiArray(
+            data=[1.0 if self.right_frozen else 0.0, 1.0 if self.left_frozen else 0.0]))
         # Per-arm dynamic safety margins (2026-07-01 coupling fix): each arm's
         # margin now thickens only with ITS OWN speed. Published as a 2-element
         # array [d_safe_R, d_safe_L] (was a single shared Float64).
