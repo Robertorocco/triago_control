@@ -27,11 +27,19 @@ for the coupling-fix rationale):
   pairs' Jacobians -- so it has zero columns in the OTHER arm's joints unless a
   pair genuinely touches both.
 
-Dynamic safety margin (PRESERVED EXACTLY):
+Dynamic safety margin (PER-ARM, 2026-07-01 -- see the coupling-audit note in
+compute_softmin_jacobian):
 
-    d_safe_dynamic = d_safe_base + k_v_safe * ||v_norm||
+    d_safe_dynamic_X = d_safe_base + k_v_safe * ||v_X||      for X in {R, L}
 
-  The barrier thickens with arm speed so the robot brakes earlier when fast.
+  The barrier thickens with THAT ARM's OWN speed, so it brakes earlier when
+  fast. Previously this was a SINGLE scalar computed from the COMBINED
+  (both-arm) velocity norm and shared by both CBF rows -- a residual coupling
+  channel that survived the per-arm Jacobian split: a fast active arm inflated
+  the idle arm's margin too, tightening its (otherwise legitimately slack)
+  barrier and forcing visible idle-arm motion even when nothing new approached
+  it. Splitting this term removes that channel; see module-level notes below
+  compute_softmin_jacobian for the full analysis.
 ----------------------------------------------------------------------------
 """
 
@@ -461,22 +469,56 @@ class CollisionManager:
         the table) NEVER appears in arm B's aggregate, so arm B's barrier row has
         an EXACTLY ZERO gradient there -- eliminating the spurious coupling.
 
-        Returns: (J_soft_R, h_soft_R, J_soft_L, h_soft_L, d_safe_dynamic, abs_min_distance)
+        Returns: (J_soft_R, h_soft_R, J_soft_L, h_soft_L, d_safe_dynamic_r, d_safe_dynamic_l, abs_min_distance)
             J_soft_X : (nv,) gradient of arm X's SoftMin barrier (0 when no interaction)
             h_soft_X : scalar SoftMin distance value for arm X (1.0 when no interaction)
-            d_safe_dynamic : velocity-inflated safety margin used by both barriers
+            d_safe_dynamic_X : velocity-inflated safety margin for arm X's OWN barrier row
+                (PER-ARM, 2026-07-01 -- see the coupling audit below)
             abs_min_distance : true closest distance over ALL pairs (for telemetry)
+
+        ---------------------------------------------------------------------
+        COUPLING AUDIT (2026-07-01): why d_safe_dynamic had to be split too.
+
+        The per-arm Jacobian split (previous fix) makes J_soft_R/J_soft_L's
+        NONZERO COLUMNS correctly disjoint (modulo genuine inter-arm pairs).
+        But d_safe_dynamic was still ONE SHARED SCALAR, computed from the
+        COMBINED (both-arm) velocity norm, and used identically in BOTH rows:
+
+            b_col_X = -GAMMA_CBF * (h_soft_X - d_safe_dynamic)
+
+        If the ACTIVE arm moves fast, the combined v_norm grows, inflating
+        d_safe_dynamic for BOTH rows -- including the IDLE arm's row, even
+        though nothing changed about the idle arm's own geometry or motion.
+        h_soft_L is essentially never exactly 1.0 in a cluttered scene (the
+        idle arm always has SOME finite closest distance to the table/body/
+        other arm, just usually a large, harmless one) -- shrinking its
+        margin against that fixed h_soft_L tightens b_col_L and can flip an
+        otherwise-slack barrier active, forcing the idle arm's (few, but
+        nonzero -- e.g. via genuinely shared inter-arm pairs, or simply to
+        satisfy a now-infeasible-if-ignored row) joints to move. This was a
+        coupling channel that survived the Jacobian split entirely, and it
+        tracks exactly the reported symptom: idle-arm oscillation correlated
+        with FAST ACTIVE-ARM MOTION near ANY obstacle (its own speed, not the
+        idle arm's, is what was inflating the idle arm's threshold).
+
+        FIX: compute d_safe_dynamic per arm, from ONLY that arm's own joint
+        velocities. An idle arm (near-zero q_dot) now keeps a near-BASE
+        (tight) margin regardless of how fast the other arm is moving; only
+        an arm that is ITSELF moving fast gets an inflated margin.
+        ---------------------------------------------------------------------
         """
-        # --- Dynamic margin: thicken the barrier with arm speed (computed FIRST) ---
-        # It must be known before the SoftMin shifts, otherwise high velocity would
-        # push the robot away from a grasp target.
-        active_v = np.zeros(0)
-        if idx_right:
-            active_v = np.concatenate((active_v, current_v[idx_right]))
-        if idx_left:
-            active_v = np.concatenate((active_v, current_v[idx_left]))
-        v_norm = np.linalg.norm(active_v) if len(active_v) > 0 else 0.0
-        d_safe_dynamic = cfg.D_SAFE_BASE + (cfg.K_V_SAFE * v_norm)
+        # --- Dynamic margin: thicken the barrier with EACH ARM'S OWN speed
+        # (computed FIRST, before the SoftMin shifts, so high velocity still
+        # correctly pushes that arm away from a grasp target -- but no longer
+        # leaks into the OTHER arm's margin). ---
+        v_norm_r = np.linalg.norm(current_v[idx_right]) if idx_right else 0.0
+        v_norm_l = np.linalg.norm(current_v[idx_left]) if idx_left else 0.0
+        d_safe_dynamic_r = cfg.D_SAFE_BASE + (cfg.K_V_SAFE * v_norm_r)
+        d_safe_dynamic_l = cfg.D_SAFE_BASE + (cfg.K_V_SAFE * v_norm_l)
+        # Backward-compat combined value (grasp-margin shift math below still
+        # uses ONE d_safe_dynamic per pair; a gripper<->cylinder pair belongs
+        # to exactly one arm in practice, so use that arm's own margin -- see
+        # the shift computation, which now picks the right scalar per pair).
 
         # STEP 1: Collect candidate pairs within range, then keep the K closest
         pair_distances = [(res.min_distance, k, res)
@@ -542,8 +584,20 @@ class CollisionManager:
                 elif second in margin_targets and first in allowed_grasp_ids:
                     cyl_gid = second
                 if cyl_gid is not None:
-                    # Shift uses the DYNAMIC distance, not the static base distance
-                    shift = d_safe_dynamic - margin_targets[cyl_gid]
+                    # Shift uses the DYNAMIC distance of the GRASPING arm (not a
+                    # combined value) -- the other geometry in this pair is the
+                    # gripper/wrist/finger, whose _arm_membership tells us which
+                    # arm's own margin applies. Falls back to the max of both
+                    # (safe/conservative) if membership is somehow ambiguous.
+                    other_gid = second if cyl_gid == first else first
+                    grasp_arm = self._arm_membership(other_gid, attached_object_arm)
+                    if 'right' in grasp_arm and 'left' not in grasp_arm:
+                        d_safe_for_shift = d_safe_dynamic_r
+                    elif 'left' in grasp_arm and 'right' not in grasp_arm:
+                        d_safe_for_shift = d_safe_dynamic_l
+                    else:
+                        d_safe_for_shift = max(d_safe_dynamic_r, d_safe_dynamic_l)
+                    shift = d_safe_for_shift - margin_targets[cyl_gid]
                     if cfg.GRASP_DEBUG and publish_counter % 200 == 0:
                         if ("red_cylinder" in (name1, name2)) and \
                            ("gripper_right" in name1 or "gripper_right" in name2):
@@ -635,4 +689,4 @@ class CollisionManager:
             J_soft_l = J_soft_sum_l / sum_exp_l
             h_soft_l = -(1.0 / cfg.ALPHA_SOFTMIN) * np.log(sum_exp_l)
 
-        return J_soft_r, h_soft_r, J_soft_l, h_soft_l, d_safe_dynamic, abs_min_distance
+        return J_soft_r, h_soft_r, J_soft_l, h_soft_l, d_safe_dynamic_r, d_safe_dynamic_l, abs_min_distance

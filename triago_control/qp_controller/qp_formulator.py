@@ -170,7 +170,8 @@ class QPFormulator:
 
         return weight_slack_r, weight_slack_l
 
-    def build_and_solve(self, kin, J_soft_r, h_soft_r, J_soft_l, h_soft_l, d_safe_dynamic,
+    def build_and_solve(self, kin, J_soft_r, h_soft_r, J_soft_l, h_soft_l,
+                        d_safe_dynamic_r, d_safe_dynamic_l,
                         right_motion, left_motion, xdot_r, xdot_l,
                         e_r, v_r, e_l, v_l, dt, right_frozen=False, left_frozen=False,
                         tracking_boost_arm=None):
@@ -317,7 +318,7 @@ class QPFormulator:
 
         # =========================================================
         # C. SAFETY CONSTRAINTS (TWO INDEPENDENT per-arm SoftMin CBFs)
-        #    J_soft_X dq >= -gamma_cbf * (h_soft_X - d_safe_dynamic)   for X in {R, L}
+        #    J_soft_X dq >= -gamma_cbf * (h_soft_X - d_safe_dynamic_X)   for X in {R, L}
         #
         # Replaces the single combined SoftMin row. Each row's gradient only has
         # nonzero columns in the joints of the pairs that actually contributed to
@@ -327,6 +328,13 @@ class QPFormulator:
         # static obstacle NEVER appears in arm B's row (eliminates the spurious
         # coupling/oscillation where an idle arm twitched because the OTHER arm
         # neared an unrelated obstacle).
+        #
+        # d_safe_dynamic_X is ALSO per-arm (2026-07-01 coupling audit): each
+        # arm's margin thickens only with THAT arm's own speed, so a fast
+        # active arm no longer inflates the idle arm's threshold and forces it
+        # to react to nothing. See CollisionManager.compute_softmin_jacobian's
+        # docstring for the full analysis of why this residual channel existed
+        # even after the Jacobian split.
         # =========================================================
         C_col_r_padded = np.concatenate([J_soft_r, np.zeros(self.n_slacks)])
         C_col_l_padded = np.concatenate([J_soft_l, np.zeros(self.n_slacks)])
@@ -334,8 +342,8 @@ class QPFormulator:
             b_col_r = -10000.0  # Practically infinite slack -> barrier never activates
             b_col_l = -10000.0
         else:
-            b_col_r = -cfg.GAMMA_CBF * (h_soft_r - d_safe_dynamic)
-            b_col_l = -cfg.GAMMA_CBF * (h_soft_l - d_safe_dynamic)
+            b_col_r = -cfg.GAMMA_CBF * (h_soft_r - d_safe_dynamic_r)
+            b_col_l = -cfg.GAMMA_CBF * (h_soft_l - d_safe_dynamic_l)
 
         # =========================================================
         # D. JOINT LIMITS (velocity-aware CBF buffer, upper + lower)
