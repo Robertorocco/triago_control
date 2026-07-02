@@ -833,7 +833,7 @@ def update_plot(frame, node, lines_map, axs1, axs2, axs3, ax_pairs, dyn_plots, f
                 ax.set_xlim(max(0, max_t - window), max_t + 0.1)
             figs[4].canvas.draw_idle()
 
-    # --- PART 8: Reference Governor (raw − governed difference, figs[6]) ---
+    # --- PART 8: Reference Governor (clamping magnitude norms, figs[6]) ---
     if node.gov_time:
         t_g = list(node.gov_time)
         data_g = list(node.gov_buffer)
@@ -841,13 +841,14 @@ def update_plot(frame, node, lines_map, axs1, axs2, axs3, ax_pairs, dyn_plots, f
         if m > 0:
             arr = np.array(data_g[:m], dtype=float)  # (m, 24)
             t_view = t_g[:m]
-            # Layout per row: R arm channels [offset..offset+3], L arm [offset+12..offset+15]
-            for row_i in range(4):
-                for ci in range(3):
-                    idx_r = row_i * 3 + ci           # R: 0..2, 3..5, 6..8, 9..11
-                    idx_l = 12 + row_i * 3 + ci      # L: 12..14, 15..17, 18..20, 21..23
-                    lines_map[f'gov_r_{row_i}_{ci}'].set_data(t_view, arr[:, idx_r])
-                    lines_map[f'gov_l_{row_i}_{ci}'].set_data(t_view, arr[:, idx_l])
+            # Layout: R arm [0..11], L arm [12..23]
+            # Each arm: pos(3), ori(3), vel(3), wvel(3)
+            gov_slices = [(0, 3), (3, 6), (6, 9), (9, 12)]
+            for row_i, (s, e) in enumerate(gov_slices):
+                norm_r = np.linalg.norm(arr[:, s:e], axis=1)
+                norm_l = np.linalg.norm(arr[:, 12+s:12+e], axis=1)
+                lines_map[f'gov_norm_r_{row_i}'].set_data(t_view, norm_r)
+                lines_map[f'gov_norm_l_{row_i}'].set_data(t_view, norm_l)
             max_t = t_view[-1]
             for ax in figs[6].axes:
                 ax.set_xlim(max(0, max_t - window), max_t + 0.1)
@@ -1247,42 +1248,32 @@ def main(args=None):
     # ===================================================================
     # WINDOW 7: "Reference Governor" — raw vs governed 6D pose/velocity diff
     # ===================================================================
-    # Shows the difference (raw - governed) for each DOF of each arm. When
-    # the governor is idle (raw reference already within bounds), all traces
-    # sit at zero. When it clamps (velocity/error/accel/orientation bound
-    # hit), the corresponding trace departs from zero — letting the operator
-    # see WHICH bound is active, on WHICH arm, at any instant.
-    # Layout: 4 subplots stacked vertically, each showing R (red) and L (blue):
-    #   row 0: position difference x/y/z  [m]
-    #   row 1: orientation difference r/p/y [rad]
-    #   row 2: linear velocity difference vx/vy/vz [m/s]
-    #   row 3: angular velocity difference wx/wy/wz [rad/s]
+    # Shows the NORM of the difference (raw - governed) for position,
+    # orientation, linear velocity, and angular velocity. One scalar trace
+    # per arm per subplot (R = red, L = blue) — clean, readable at a glance.
+    # When the governor is idle (all bounds satisfied), traces sit at zero.
+    # When a bound is hit, the corresponding trace shows the clamp magnitude.
     fig7, axs7 = plt.subplots(4, 1, sharex=True, figsize=(7, 7))
     fig7.canvas.manager.set_window_title('Reference Governor (raw − governed)')
-    fig7.suptitle('Reference Governor: raw − governed')
-    gov_labels = [
-        ('Position diff', '[m]', ['x', 'y', 'z']),
-        ('Orientation diff', '[rad]', ['r', 'p', 'y']),
-        ('Lin. velocity diff', '[m/s]', ['vx', 'vy', 'vz']),
-        ('Ang. velocity diff', '[rad/s]', ['wx', 'wy', 'wz']),
+    fig7.suptitle('Reference Governor: clamping magnitude')
+    gov_row_info = [
+        ('Position clamp', '[m]', (0, 3)),
+        ('Orientation clamp', '[rad]', (3, 6)),
+        ('Lin. velocity clamp', '[m/s]', (6, 9)),
+        ('Ang. velocity clamp', '[rad/s]', (9, 12)),
     ]
-    gov_colors_r = ['#e63946', '#ff6b6b', '#ffa07a']   # 3 shades of red for R x/y/z
-    gov_colors_l = ['#1d3557', '#457b9d', '#a8dadc']   # 3 shades of blue for L x/y/z
-    for row_i, (title, ylabel, comps) in enumerate(gov_labels):
+    for row_i, (title, ylabel, _) in enumerate(gov_row_info):
         ax = axs7[row_i]
-        ax.set_title(title, fontsize='small')
-        ax.set_ylabel(ylabel, fontsize='x-small')
+        ax.set_title(title, fontsize=10)
+        ax.set_ylabel(ylabel, fontsize=9)
         ax.grid(True, alpha=0.3)
         ax.axhline(0, color='k', linewidth=0.5, alpha=0.4)
-        for ci, comp in enumerate(comps):
-            l_r, = ax.plot([], [], color=gov_colors_r[ci], linewidth=1.0,
-                           label=f'R {comp}')
-            l_l, = ax.plot([], [], color=gov_colors_l[ci], linewidth=1.0,
-                           label=f'L {comp}', linestyle='--')
-            lines_map[f'gov_r_{row_i}_{ci}'] = l_r
-            lines_map[f'gov_l_{row_i}_{ci}'] = l_l
-        ax.legend(loc='upper right', fontsize=5, ncol=6)
-    axs7[-1].set_xlabel('Time [s]')
+        l_r, = ax.plot([], [], 'r-', linewidth=1.5, label='Right arm')
+        l_l, = ax.plot([], [], 'b-', linewidth=1.5, label='Left arm')
+        ax.legend(loc='upper right', fontsize=9)
+        lines_map[f'gov_norm_r_{row_i}'] = l_r
+        lines_map[f'gov_norm_l_{row_i}'] = l_l
+    axs7[-1].set_xlabel('Time [s]', fontsize=9)
 
     # ===================================================================
     # WINDOW PLACEMENT (from wmctrl, slightly aligned)
