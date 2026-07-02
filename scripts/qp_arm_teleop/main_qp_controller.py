@@ -136,7 +136,7 @@ class SafetyQPController(Node):
         self.pub_lambda_cbf = self.create_publisher(Float64MultiArray, '/qp_debug/lambda_cbf', 10)
         self.pub_lambda_joints = self.create_publisher(Float64MultiArray, '/qp_debug/lambda_joints', 10)
         self.pub_dynamic_weights = self.create_publisher(Float64MultiArray, '/qp_debug/dynamic_weights', 10)
-        self.pub_d_safe_dynamic = self.create_publisher(Float64, '/qp_debug/d_safe_dynamic', 10)
+        self.pub_d_safe_dynamic = self.create_publisher(Float64MultiArray, '/qp_debug/d_safe_dynamic', 10)
         self.pub_qdot_cmd = self.create_publisher(Float64MultiArray, '/qp_debug/qdot_cmd', 10)
         self.pub_task_authority = self.create_publisher(Float64MultiArray, '/qp_debug/task_authority', 10)
         self.pub_shared_col = self.create_publisher(Float64MultiArray, '/collision_constraints', 10)
@@ -498,7 +498,7 @@ class SafetyQPController(Node):
         qdot_err_14, xdot_err_6 = self.kin.compute_tracking_errors(self.last_qdot_cmd_14)
 
         # --- 1. SoftMin CBF aggregation (TWO independent per-arm barriers) ---
-        J_soft_r, h_soft_r, J_soft_l, h_soft_l, d_safe_dynamic, abs_min_distance = \
+        J_soft_r, h_soft_r, J_soft_l, h_soft_l, d_safe_dynamic_r, d_safe_dynamic_l, abs_min_distance = \
             self.col.compute_softmin_jacobian(
                 self.kin.current_v, self.kin.idx_right, self.kin.idx_left,
                 self.hri.grasp_margin_targets, self.hri.attached_objects,
@@ -525,7 +525,8 @@ class SafetyQPController(Node):
         # values (slack + gamma) so it converges tightly to the grasp reference.
         boost_arm = self.active_arm if self.grasp_active else None
         q_dot_safe, slack_r, slack_l, b_col_pair, lambda_joints_total = self.qp.build_and_solve(
-            self.kin, J_soft_r, h_soft_r, J_soft_l, h_soft_l, d_safe_dynamic,
+            self.kin, J_soft_r, h_soft_r, J_soft_l, h_soft_l,
+            d_safe_dynamic_r, d_safe_dynamic_l,
             self.right_imposed_motion, self.left_imposed_motion,
             self.xdot_ref_right, self.xdot_ref_left, e_r, v_r, e_l, v_l, dt,
             right_frozen=self.right_frozen, left_frozen=self.left_frozen,
@@ -537,7 +538,7 @@ class SafetyQPController(Node):
         if self.publish_counter % self.publish_every_n == 0:
             self._publish_telemetry(q_dot_safe, slack_r, slack_l, b_col_pair, lambda_joints_total,
                                     J_soft_r, h_soft_r, J_soft_l, h_soft_l,
-                                    d_safe_dynamic, abs_min_distance,
+                                    d_safe_dynamic_r, d_safe_dynamic_l, abs_min_distance,
                                     qdot_err_14, xdot_err_6)
 
         # --- 5. Command publishing ---
@@ -578,8 +579,10 @@ class SafetyQPController(Node):
         if self.publish_counter % self.publish_every_n == 0:
             if not cfg.DISABLE_CBF:
                 # Legacy single scalar: the WORSE (smaller) margin of the two arms.
-                margin_r = h_soft_r - d_safe_dynamic
-                margin_l = h_soft_l - d_safe_dynamic
+                # Each arm now uses its OWN dynamic margin (see the coupling audit
+                # in collision_manager.compute_softmin_jacobian).
+                margin_r = h_soft_r - d_safe_dynamic_r
+                margin_l = h_soft_l - d_safe_dynamic_l
                 self.pub_debug_h.publish(Float64(data=float(min(margin_r, margin_l))))
             self.viz.publish_debug(
                 self.kin.model, self.kin.data, self.col.cdata, self.kin.current_q,
@@ -597,7 +600,8 @@ class SafetyQPController(Node):
         #     print("===========================\n")
 
     def _publish_telemetry(self, q_dot_safe, slack_r, slack_l, b_col_pair, lambda_joints_total,
-                           J_soft_r, h_soft_r, J_soft_l, h_soft_l, d_safe_dynamic, abs_min_distance,
+                           J_soft_r, h_soft_r, J_soft_l, h_soft_l,
+                           d_safe_dynamic_r, d_safe_dynamic_l, abs_min_distance,
                            qdot_err_14, xdot_err_6):
         # Publish the full dashboard telemetry set (downsampled, off the hot path).
         # Slacks + shadow prices
@@ -638,7 +642,11 @@ class SafetyQPController(Node):
         # Min distance + dynamic weights
         self.pub_min_dist.publish(Float64(data=abs_min_distance))
         self.pub_dynamic_weights.publish(Float64MultiArray(data=[float(self.qp.weight_slack), float(self.qp.gamma_clf)]))
-        self.pub_d_safe_dynamic.publish(Float64(data=float(d_safe_dynamic)))
+        # Per-arm dynamic safety margins (2026-07-01 coupling fix): each arm's
+        # margin now thickens only with ITS OWN speed. Published as a 2-element
+        # array [d_safe_R, d_safe_L] (was a single shared Float64).
+        self.pub_d_safe_dynamic.publish(Float64MultiArray(
+            data=[float(d_safe_dynamic_r), float(d_safe_dynamic_l)]))
         # Soft-task cost decomposition [E_damp, E_posture, E_slack] for the
         # task-authority panel in the plotter (hard-constraint authority is the
         # shadow prices published above).

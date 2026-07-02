@@ -135,10 +135,10 @@ class TriagoDashboard(Node):
         self.create_subscription(Float64MultiArray, '/qp_debug/dynamic_weights', self.dyn_weights_callback, qos_profile)
         self.create_subscription(Float64, '/trajectory/time_scale', self.time_scale_callback, qos_profile)
 
-        # --- Dynamic CBF margin subscriber ---
+        # --- Dynamic CBF margin subscriber (PER-ARM, 2026-07-01: [d_safe_R, d_safe_L]) ---
         self.d_safe_buffer = deque(maxlen=self.history_len)
         self.d_safe_time = deque(maxlen=self.history_len)
-        self.create_subscription(Float64, '/qp_debug/d_safe_dynamic', self.d_safe_callback, qos_profile)
+        self.create_subscription(Float64MultiArray, '/qp_debug/d_safe_dynamic', self.d_safe_callback, qos_profile)
 
         # --- Top-3 enabled collision pairs (debug) ---
         self.top_pairs_time = deque(maxlen=self.history_len)
@@ -218,9 +218,15 @@ class TriagoDashboard(Node):
         self.time_scale_buffer.append(msg.data)
 
     def d_safe_callback(self, msg):
+        """[d_safe_dynamic_R, d_safe_dynamic_L] -- per-arm dynamic CBF margins
+        (replaces the old single shared scalar; see collision_manager's
+        coupling-audit note for why the split was necessary)."""
         t = self.get_time()
+        data = list(msg.data)
+        if len(data) < 2:
+            data = (data + [0.0, 0.0])[:2]
         self.d_safe_time.append(t)
-        self.d_safe_buffer.append(msg.data)
+        self.d_safe_buffer.append(data)
 
     @staticmethod
     def _short_pair_name(n1, n2):
@@ -400,22 +406,29 @@ def update_plot(frame, node, lines_map, axs1, axs2, axs3, ax_pairs, dyn_plots, f
         update_subset(node.left_joints, node.dq_buffers, '_vel')
         update_subset(node.right_joints, node.dq_buffers, '_vel')
 
-    # --- PART 2: Raw Encoder vel + Servo Error (rows 2-3 of axs1) ---
+    # --- PART 2: QP Solution + Servo Error (rows 2-3 of axs1) ---
     if node.time_buffer:
         t_meas = list(node.time_buffer)
 
-        # Row 2: raw encoder velocity (from /joint_states)
-        for i, j in enumerate(node.left_joints):
-            dq_data = list(node.dq_buffers[j])
-            min_len = min(len(t_meas), len(dq_data))
-            if min_len > 0:
-                lines_map[j + '_raw_vel_l'].set_data(t_meas[:min_len], dq_data[:min_len])
+        # Row 2: QP-solved joint velocity (q_dot_safe, as actually commanded
+        # to the TSID controllers this tick -- from /qp_debug/qdot_cmd).
+        # Replaces the broken-in-sim raw encoder velocity plot.
+        if node.qdot_cmd_time:
+            t_cmd_sol = list(node.qdot_cmd_time)
+            cmd_r_sol = list(node.qdot_cmd_r_buffer)
+            cmd_l_sol = list(node.qdot_cmd_l_buffer)
 
-        for i, j in enumerate(node.right_joints):
-            dq_data = list(node.dq_buffers[j])
-            min_len = min(len(t_meas), len(dq_data))
-            if min_len > 0:
-                lines_map[j + '_raw_vel_r'].set_data(t_meas[:min_len], dq_data[:min_len])
+            min_len_l = min(len(t_cmd_sol), len(cmd_l_sol))
+            if min_len_l > 0:
+                arr_l = np.array(cmd_l_sol[:min_len_l])
+                for i, j in enumerate(node.left_joints):
+                    lines_map[j + '_qpsol_l'].set_data(t_cmd_sol[:min_len_l], arr_l[:, i])
+
+            min_len_r = min(len(t_cmd_sol), len(cmd_r_sol))
+            if min_len_r > 0:
+                arr_r = np.array(cmd_r_sol[:min_len_r])
+                for i, j in enumerate(node.right_joints):
+                    lines_map[j + '_qpsol_r'].set_data(t_cmd_sol[:min_len_r], arr_r[:, i])
 
 
         # Row 3: QP command minus raw measured (servo error)
@@ -605,7 +618,10 @@ def update_plot(frame, node, lines_map, axs1, axs2, axs3, ax_pairs, dyn_plots, f
             elif key == 'd_safe_dynamic':
                 min_len = min(len(t_ds), len(data_ds))
                 if min_len > 0:
-                    lines_map[f'dyn_{key}'].set_data(t_ds[:min_len], data_ds[:min_len])
+                    y_r = [d[0] for d in data_ds[:min_len]]
+                    y_l = [d[1] for d in data_ds[:min_len]]
+                    lines_map[f'dyn_{key}_r'].set_data(t_ds[:min_len], y_r)
+                    lines_map[f'dyn_{key}_l'].set_data(t_ds[:min_len], y_l)
 
         # Window scaling for dynamic weight rows in axs3
         all_t = list(t_dw) + list(t_ds)
@@ -693,10 +709,17 @@ def main(args=None):
     fig1, axs1 = plt.subplots(4, 2, sharex=True)
     fig1.suptitle('Joint Data')
 
+    # Row 2 was "Raw Encoder vel" -- REMOVED (2026-07-01): the Gazebo encoder
+    # velocities are known-broken in simulation (see .kiro/context.md §8.1),
+    # so plotting them added no diagnostic value. Replaced with the QP
+    # SOLUTION itself (q_dot_safe, as actually commanded to the controllers)
+    # so the operator can directly see whether an idle-arm oscillation
+    # originates in the QP's solved velocity (math/coupling issue) or only
+    # appears downstream in the simulator/robot response (inertia/PID issue).
     row_titles = ['L- Position', 'L- Velocity from driver',
-                  'L- Raw Encoder vel', 'L- Servo Error cmd-meas']
+                  'L- QP Solution (q_dot_safe)', 'L- Servo Error cmd-meas']
     row_titles_r = ['R- Position', 'R- Velocity from driver',
-                    'R- Raw Encoder vel', 'R- Servo Error cmd-meas']
+                    'R- QP Solution (q_dot_safe)', 'R- Servo Error cmd-meas']
 
     # Row 0: Position
     axs1[0, 0].set_title('L- Position', fontsize='small')
@@ -718,15 +741,20 @@ def main(args=None):
         l, = axs1[1, 1].plot([], [], color=colors[i])
         lines_map[j + '_vel'] = l
 
-    # Row 2: Raw Encoder vel
-    axs1[2, 0].set_title('L- Raw Encoder vel', fontsize='small')
-    axs1[2, 1].set_title('R- Raw Encoder vel', fontsize='small')
+    # Row 2: QP Solution (q_dot_safe) -- replaces the broken-in-sim raw encoder
+    # velocity plot. Sourced from /qp_debug/qdot_cmd, i.e. the EXACT joint
+    # velocity vector the QP solved and sent to the TSID controllers this
+    # tick -- lets the operator see directly whether an idle-arm oscillation
+    # is present in the QP's own solution (a real coupling/math issue) or
+    # only appears further downstream (simulator dynamics / robot inertia).
+    axs1[2, 0].set_title('L- QP Solution (q_dot_safe)', fontsize='small')
+    axs1[2, 1].set_title('R- QP Solution (q_dot_safe)', fontsize='small')
     for i, j in enumerate(node.left_joints):
         l, = axs1[2, 0].plot([], [], color=colors[i], linewidth=0.9)
-        lines_map[j + '_raw_vel_l'] = l
+        lines_map[j + '_qpsol_l'] = l
     for i, j in enumerate(node.right_joints):
         l, = axs1[2, 1].plot([], [], color=colors[i], linewidth=0.9)
-        lines_map[j + '_raw_vel_r'] = l
+        lines_map[j + '_qpsol_r'] = l
 
 
     # Row 3: Servo Error cmd-meas
@@ -885,8 +913,16 @@ def main(args=None):
         ax.set_ylabel(ylabel, rotation=0, ha='left', labelpad=10)
         ax.yaxis.set_label_position('right')
         ax.grid(True, alpha=0.3)
-        l, = ax.plot([], [], 'm-', linewidth=1.2)
-        lines_map[f'dyn_{key}'] = l
+        if key == 'd_safe_dynamic':
+            # PER-ARM margin (2026-07-01): two independent traces, R and L.
+            l_r, = ax.plot([], [], 'r-', linewidth=1.2, label=r'$d_{safe,R}^{dyn}$')
+            l_l, = ax.plot([], [], 'b-', linewidth=1.2, label=r'$d_{safe,L}^{dyn}$')
+            ax.legend(loc='upper left', fontsize='x-small')
+            lines_map[f'dyn_{key}_r'] = l_r
+            lines_map[f'dyn_{key}_l'] = l_l
+        else:
+            l, = ax.plot([], [], 'm-', linewidth=1.2)
+            lines_map[f'dyn_{key}'] = l
 
     # X-axis label only on bottom
     axs3[-1].set_xlabel('Time [s]')
