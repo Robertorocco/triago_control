@@ -87,7 +87,8 @@ class VisualizationEngine:
                 self.vmodel.addGeometryObject(vis_obj)
 
     def color_collision_model(self, col_manager):
-        # Tint the collision capsules/obstacles: right=red, left=blue, ground=grey, workspace.
+        # Tint the collision capsules/obstacles: right=red, left=blue, head=yellow
+        # (quasi-static CBF obstacle, 2026-07-01), ground=grey, workspace.
         for geom_id in col_manager.right_geom_ids:
             if geom_id < len(self.cmodel.geometryObjects):
                 self.cmodel.geometryObjects[geom_id].meshColor = np.array([1.0, 0.0, 0.0, 0.8])
@@ -95,6 +96,14 @@ class VisualizationEngine:
         for geom_id in col_manager.left_geom_ids:
             if geom_id < len(self.cmodel.geometryObjects):
                 self.cmodel.geometryObjects[geom_id].meshColor = np.array([0.0, 0.0, 1.0, 0.8])
+                self.cmodel.geometryObjects[geom_id].overrideMaterial = True
+        # Head capsules: distinct yellow so they're visually identifiable as the
+        # NEW quasi-static obstacle (neither arm's own color), matching the
+        # SAME dominant-axis capsule geometry the arms use (see
+        # CollisionManager.build_collision_model's head_offsets branch).
+        for geom_id in getattr(col_manager, 'head_geom_ids', []):
+            if geom_id < len(self.cmodel.geometryObjects):
+                self.cmodel.geometryObjects[geom_id].meshColor = np.array([1.0, 1.0, 0.0, 0.8])
                 self.cmodel.geometryObjects[geom_id].overrideMaterial = True
         if hasattr(col_manager, 'ground_id') and col_manager.ground_id < len(self.cmodel.geometryObjects):
             self.cmodel.geometryObjects[col_manager.ground_id].meshColor = np.array([0.5, 0.5, 0.5, 0.5])

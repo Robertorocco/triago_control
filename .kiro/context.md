@@ -1,19 +1,25 @@
 # AI Agent Context — triago_control
 
 > **This file is maintained by the AI agent. Do not edit manually.**
-> Last updated: 2026-07-01 (slider-GUI polish pass, §9.6: MAX_WEIGHT_SLACK 60→100
-> (operator-tested value), fixed slider label/value overlap (label moved above the
-> track), removed the unbalanced gripper column and gave the 2 gripper sliders their
-> own de-aligned dedicated row, value readout truncated to 2 decimals, and root-caused
-> + mitigated the "laggy gripper slider" report as a topic-rate mismatch — see §9.6 for
-> the full diagnosis and the new `_check_topic_sanity` self-check. Earlier this day:
-> per-arm coupling fix CONFIRMED working by the operator (fast active-arm motion no
-> longer perturbs the idle arm); RViz visualizer fixed to draw BOTH grippers blue when
-> both arms are actively driven (§9.4); "Slack Weight" plot split into per-arm R/L
-> traces (§9.4); "Joint Data" position line-plots replaced by the slider-panel GUI using
-> REAL joint limits from the live Pinocchio model (§9.5); per-arm dynamic CBF
-> safety-margin split (§9.3); fixed a `NameError` on a stale `b_col` reference (PR #8);
-> replaced plotter.py's broken-in-sim raw-encoder plot with the QP-solved joint velocity.
+> Last updated: 2026-07-01 (§9.7: head chain added to the ARM QP as a quasi-static
+> CBF obstacle — the arms now avoid the head chain via live-FK capsules, WITHOUT
+> adding any head joint to the QP's decision vector; `arm_right_1`/`arm_left_1`
+> excluded from head pairs per instruction; head capsules tinted yellow in Meshcat.
+> No change was needed in qp_formulator — the pre-existing "everything outside
+> idx_right/idx_left is velocity-locked to zero" joint-limit mechanism already
+> makes this correct by construction; see §9.7 for the full math-soundness
+> discussion (quasi-static assumption, bounded guarantee degradation).
+> Earlier this day: fixed an RViz gripper-lag regression caused by extra
+> per-tick publishes (§9.4 follow-up); slider-GUI polish pass (§9.6:
+> MAX_WEIGHT_SLACK 60→100, label/value overlap fix, gripper row de-aligned,
+> 2-decimal value readout, gripper-lag topic-rate diagnosis + EMA mitigation);
+> per-arm coupling fix CONFIRMED working by the operator; RViz visualizer fixed
+> to draw BOTH grippers blue when both arms are actively driven (§9.4);
+> "Slack Weight" plot split into per-arm R/L traces (§9.4); "Joint Data"
+> position line-plots replaced by the slider-panel GUI using REAL joint limits
+> from the live Pinocchio model (§9.5); per-arm dynamic CBF safety-margin split
+> (§9.3); fixed a `NameError` on a stale `b_col` reference (PR #8); replaced
+> plotter.py's broken-in-sim raw-encoder plot with the QP-solved joint velocity.
 > STABLE v1 checkpoint tagged 2026-06-30 at commit "STABLE v1: teleoperation + grasping backup
 > checkpoint" — roll back there if this or a later change regresses the system)
 
@@ -783,6 +789,80 @@ Follow-up pass after the operator tried the new slider GUI:
      is outside `triago_control`'s control (PAL vendor controller
      configuration), so it is not something this package can fix directly.
 
+### 9.7 Head chain as a quasi-static CBF obstacle for the arms (2026-07-01)
+
+The arms were previously unaware of the head chain (`arm_head_1..7_link`, same
+7-DOF hardware as the L/R arms, driven by its own future vision-based
+controller, `qp_head_visual_servo.py`) — arm-vs-head collisions could occur
+silently. Per instruction, added the head as a **quasi-static geometric
+obstacle** for the arm QP, WITHOUT adding a single head joint to the QP's
+decision vector (`idx_right`/`idx_left` are untouched; `RobotKinematics` never
+maps `HEAD_JOINTS` into the actuated velocity indices).
+
+**Math soundness / guarantee trade-off (asked by the operator, answered before
+implementing)**: modeling the head as static is sound under the explicit
+assumption that the head moves slowly relative to the CBF's margin budget.
+The head's geometry is refreshed from LIVE FK every tick (not stale — `current_q`
+already contains every joint found in `/joint_states`, arms and head alike), so
+positional accuracy is exact. What is given up is *exact* forward-invariance:
+the barrier's `ḣ` is computed assuming `q̇_head = 0` (enforced by the pre-existing
+joint-limit box constraint — see below), so if the head is ACTUALLY moving at
+that instant (driven by its own separate controller), the true `ḣ` differs from
+the assumed one by an unmodeled term `∇h_head · q̇_head_actual`. This is bounded
+by the head's own commanded speed (`MAX_VELOCITY=0.15 rad/s` in
+`qp_head_visual_servo.py`) times one control tick (`dt≈3.3ms @ 300Hz`) — on the
+order of `10⁻⁴ m`, negligible against `D_SAFE_BASE=0.015 m`. Guarantee degrades
+from "exact" to "quasi-static-valid" — acceptable given the stated assumption,
+but worth remembering if the head is ever driven fast or the safety margin is
+tightened.
+
+**Implementation** (deliberately minimal — the existing architecture handles
+this by construction, confirmed by design review before coding):
+- `CollisionManager.build_collision_model` gained an optional `head_offsets`
+  parameter; reuses `calculate_offsets`/the SAME dominant-axis capsule
+  construction as the arms (the head is literally the same hardware) to build
+  `self.head_geom_ids`, kept **separate** from `right_geom_ids`/`left_geom_ids`
+  (so `_arm_membership` never classifies a head capsule as belonging to either
+  arm — it belongs to neither, by design, since it's not held/grasped).
+- `CollisionManager.define_collision_pairs` §2d: adds an arm-vs-head
+  `CollisionPair` for every (arm capsule, head capsule) combination, SKIPPING
+  any pair touching `arm_right_1` or `arm_left_1` (per instruction — that link
+  cannot collide with the head chain).
+- `main_qp_controller.py`: builds `head_offsets` via
+  `calculate_offsets(cfg.HEAD_CHAIN, cfg.HEAD_TOOL_LINK)` (new config constants;
+  `HEAD_TOOL_LINK='arm_head_tool_link'` mirrors `gripper_{side}_base_link`'s
+  role for the arms — the fixed frame past the last real link used to size that
+  link's capsule length) and passes it through; gracefully skips (with a
+  warning) if the head chain is absent from the URDF.
+- `visualization_engine.color_collision_model`: head capsules tinted **yellow**
+  in Meshcat (distinct from red=right/blue=left) so the operator can visually
+  confirm the new obstacle geometry.
+
+**Why no change was needed in `qp_formulator.py` or `compute_softmin_jacobian`'s
+per-arm routing** (verified before coding, not discovered after a bug):
+- An arm-vs-head pair's two geometries have `_arm_membership` = `{'right'}` (or
+  `{'left'}`) for the arm side and `{}` (empty) for the head side — so
+  `touched = {'right'}` (never both), meaning the pair contributes to **exactly
+  one** arm's SoftMin aggregate, exactly like an arm-vs-table pair. This is the
+  SAME per-arm routing mechanism from §9.2, unmodified.
+- `J_soft_r`/`J_soft_l` are full `model.nv`-length vectors. For an arm-vs-head
+  pair, the per-point Jacobian construction (`get_point_jacobian`, keyed on
+  each geometry's OWN parent joint) DOES populate nonzero entries at the head's
+  joint columns of that pair's distance-rate row. However, in
+  `qp_formulator.build_and_solve`'s joint-limit block (§D), EVERY joint whose
+  velocity index is not in `kin.idx_right + kin.idx_left` (`active_indices`)
+  has `dq_max_safe = dq_min_safe = 0` — i.e. is HARD-LOCKED to exactly zero
+  velocity in the solve (this pre-existing mechanism already applies to torso,
+  mobile base, and gripper fingers; the head is just one more member of that
+  set). Since the CBF row is `J_soft_X · q̇ ≥ b_col_X` and `q̇` at every head
+  index is constrained to exactly `0`, the head's nonzero Jacobian *columns*
+  contribute exactly `0` to the row's value regardless of their magnitude — the
+  barrier is satisfied ENTIRELY through the arm's own joints bending to
+  maintain distance, which is precisely the required behavior (avoid via arm
+  motion, never expect head motion). No masking, slicing, or QPFormulator
+  change was needed; the existing "everything not in idx_right/idx_left is
+  locked" invariant already generalizes correctly to the head.
+
 ### 9.1 Sensing constraints (real-hardware honesty, 2026-06-29)
 
 **No Gazebo ground-truth is ever read** (`/gazebo/model_states`, `GetEntityState`, etc. — none
@@ -973,6 +1053,7 @@ visible, so at most one frame is dropped.
 | RViz visualization | ✅ Working | Light-green=EE robot policy (own topic `/robot_policy_marker`), Light-blue=reference guidance (own topic `/guidance_policy_marker`). Commanded gripper is now PER-ARM (2026-07-01, §9.4): each arm independently Blue=actively tracking / Grey=frozen (`right_frozen`/`left_frozen` ground truth via `/qp_debug/arm_frozen`) — both render blue simultaneously under `trajectory_generator.py` or dual teleop, exactly one blue+one grey in single-arm teleop. Belief-opacity goal grippers + grasp-ready cue on `/shared_policy_markers`. Grasp-guidance move/rotate arrows REMOVED (cluttered the view). Periodic DELETEALL sweep every 3s on all 3 marker topics (self-heals stuck/ghost markers). Dual belief subplot (active colored, inactive greyscale). Task-authority soft-cost plot (`/qp_debug/task_authority`). Plotter dashboard also has a NEW "Joint Positions" slider-panel GUI window (§9.5, real Pinocchio joint limits) and per-arm "Slack Weight" (R/L) traces. |
 | Haption teleoperation | ✅ Working | `teleop_triago_clutch.py` + `haptic_force_manager_tutorial.py`. Force layers: F_guide (velocity-field, v_max_user 0.04/0.10) + F_fixture (position spring near goal). Handle drag during autonomous phases (KP+KD velocity-following). |
 | Head control (visual servoing) | 🔧 Active dev | `qp_head_visual_servo.py`: QP-based hand-tracking, independent loop. Starting point — no image processing yet. |
+| Arm-vs-head collision avoidance | ✅ Working | Head chain modeled as a quasi-static CBF obstacle in the ARM QP (§9.7): live FK-driven capsules (yellow in Meshcat), zero head joints added to the decision vector. `arm_right_1`/`arm_left_1` excluded from head pairs per instruction. Head's OWN separate controller/collision model (`qp_head_visual_servo.py`) is unchanged. |
 | Mobile base integration | 🔧 Partial | `base_controller.py` exists but not QP-certified |
 | Meshcat visualization | ✅ Working | Thread-safe, auto-reloads on grasp coloring |
 | Digital twin mode | ✅ Working | `SIMULATE_IDEAL_KINEMATICS` flag in config |

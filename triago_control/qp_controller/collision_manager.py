@@ -69,6 +69,7 @@ class CollisionManager:
         # Geometry id bookkeeping
         self.right_geom_ids = []
         self.left_geom_ids = []
+        self.head_geom_ids = []            # quasi-static obstacle capsules (see build_collision_model)
         self.body_geom_ids = []
         self.gripper_box_ids = {}          # {'right': id, 'left': id}
         self.workspace_obstacle_ids = []
@@ -129,7 +130,7 @@ class CollisionManager:
                 print(f"  Failed {link_name}: {e}")
         return offsets
 
-    def build_collision_model(self, right_offsets, left_offsets):
+    def build_collision_model(self, right_offsets, left_offsets, head_offsets=None):
         # Assemble the full collision geometry model: arms, grippers, body, ground, obstacles.
 
         # 1. ARM CAPSULES (from the calculated, joint-relative offsets)
@@ -149,6 +150,25 @@ class CollisionManager:
 
         add_arm_geoms(right_offsets, "shadow_right", self.right_geom_ids)
         add_arm_geoms(left_offsets, "shadow_left", self.left_geom_ids)
+
+        # 1b. HEAD CAPSULES (2026-07-01) -- same dominant-axis capsule geometry
+        # as the arms (the head is the SAME hardware, hence calculate_offsets
+        # is reused verbatim), but NEVER added to right_geom_ids/left_geom_ids:
+        # this keeps the head OUT of _arm_membership (it belongs to neither
+        # arm) and therefore OUT of idx_right/idx_left -- the arms' CBFs will
+        # see it purely as geometry, with NO head joint columns ever appearing
+        # in J_soft_r/J_soft_l (see compute_softmin_jacobian: a pair's
+        # Jacobian is built from get_point_jacobian on the PARENT JOINT of
+        # each geometry -- for a head capsule that is a head joint, but the
+        # pair only "counts" toward an arm's SoftMin aggregate/gradient
+        # column-wise through the OTHER geometry's (the arm's) parent joint
+        # Jacobian branch of that same distance-rate row; the head-side
+        # Jacobian columns are computed but never touch idx_right/idx_left,
+        # so build_and_solve's dq_max_safe/dq_min_safe and the QP's actual
+        # decision vector (n_joints = model.nv over idx_right+idx_left only,
+        # sliced out downstream) never move the head).
+        if head_offsets:
+            add_arm_geoms(head_offsets, "shadow_head", self.head_geom_ids)
 
         # 2. SIMPLIFIED END-EFFECTOR BOXES (PAL PRO grippers)
         for side, id_list in (('right', self.right_geom_ids), ('left', self.left_geom_ids)):
@@ -241,6 +261,27 @@ class CollisionManager:
                 self.cmodel.addCollisionPair(pin.CollisionPair(self.wall_id, arm_id))
             for obs_id in self.workspace_obstacle_ids:
                 self.cmodel.addCollisionPair(pin.CollisionPair(obs_id, arm_id))
+
+        # 2d. Arms vs Head (2026-07-01): the head is a quasi-static CBF
+        # obstacle for the arms only -- see config.py's HEAD_CHAIN docstring
+        # and compute_softmin_jacobian's _arm_membership routing (a head
+        # capsule belongs to NEITHER arm's own geometry set, so an
+        # arm-vs-head pair contributes to exactly ONE arm's SoftMin
+        # aggregate -- whichever arm's geometry is the OTHER side of the
+        # pair -- never both, and never leaks a head joint-velocity "credit"
+        # into the QP since the head's columns of the decision vector are
+        # separately hard-locked to zero by the joint-limit rows in
+        # qp_formulator, exactly like every other non-arm joint (torso,
+        # base, gripper fingers) -- see the coupling note in
+        # compute_softmin_jacobian's module docstring for the full math).
+        # Per instruction: SKIP any pair touching arm_right_1 or arm_left_1
+        # (that link cannot collide with the head chain).
+        for arm_id in all_arm_ids:
+            arm_name = self.cmodel.geometryObjects[arm_id].name
+            if "arm_right_1" in arm_name or "arm_left_1" in arm_name:
+                continue
+            for head_id in self.head_geom_ids:
+                self.cmodel.addCollisionPair(pin.CollisionPair(arm_id, head_id))
 
         # 2b. Cylinder vs Cylinder: so that when BOTH grippers hold a cylinder
         # (bimanual), the two held cylinders cannot inter-penetrate. Harmless while

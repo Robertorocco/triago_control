@@ -91,7 +91,18 @@ class SafetyQPController(Node):
 
         right_offsets = self.col.calculate_offsets(cfg.RIGHT_CHAIN, 'gripper_right_base_link')
         left_offsets = self.col.calculate_offsets(cfg.LEFT_CHAIN, 'gripper_left_base_link')
-        self.col.build_collision_model(right_offsets, left_offsets)
+        # Head chain (2026-07-01): SAME hardware/geometry recipe as the arms
+        # (calculate_offsets is reused verbatim), added as a quasi-static CBF
+        # obstacle for the arms -- see cfg.HEAD_CHAIN's docstring. The head is
+        # NEVER added to idx_right/idx_left (RobotKinematics never maps
+        # HEAD_JOINTS into the QP's actuated velocity indices), so this adds
+        # zero rows/columns to the QP decision vector.
+        head_offsets = None
+        if self.kin.model.existFrame(cfg.HEAD_CHAIN[0]):
+            head_offsets = self.col.calculate_offsets(cfg.HEAD_CHAIN, cfg.HEAD_TOOL_LINK)
+        else:
+            self.get_logger().warn("[Init] Head chain not found in URDF -- skipping head CBF obstacle.")
+        self.col.build_collision_model(right_offsets, left_offsets, head_offsets)
         self.col.define_collision_pairs()
 
         self.viz = VisualizationEngine(self, self.kin.model, self.col.cmodel, self.urdf_path)

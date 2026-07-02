@@ -145,6 +145,21 @@ RIGHT_TCP_FRAME = 'gripper_right_grasping_link'
 LEFT_TCP_FRAME  = 'gripper_left_grasping_link'
 REF_FRAME = 'base_footprint'
 
+# --- Head chain (2026-07-01): quasi-static CBF obstacle for the arms ONLY ---
+# The head is mechanically identical hardware to the L/R arms (7-DOF), but is
+# NOT part of THIS QP's decision vector -- it is driven by its own, separate
+# vision-based controller (qp_head_visual_servo.py, future work). Here it is
+# modeled purely as GEOMETRY: capsules built from the live FK of its own
+# joints every tick (see CollisionManager.calculate_offsets / build_collision_model),
+# so the arms can avoid it, without ever appearing in idx_right/idx_left (the
+# QP's actuated joints) and without adding a single row/column of head
+# velocity to the QP. `HEAD_TOOL_LINK` mirrors gripper_{side}_base_link's role
+# for the arms: the fixed frame past arm_head_7_link used to size that link's
+# capsule length.
+HEAD_CHAIN = ['arm_head_1_link', 'arm_head_2_link', 'arm_head_3_link',
+              'arm_head_4_link', 'arm_head_5_link', 'arm_head_6_link', 'arm_head_7_link']
+HEAD_TOOL_LINK = 'arm_head_tool_link'
+
 # --- Live joint-position slider GUI layout (plotter.py "Joint Positions" window) ---
 # Shared, single source of truth for BOTH main_qp_controller.py (which computes
 # and publishes the real limits from the live Pinocchio model via
