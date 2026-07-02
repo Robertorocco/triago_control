@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation
 from matplotlib.lines import Line2D
 from matplotlib.widgets import Slider
-from matplotlib.gridspec import GridSpec
+from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
 import threading
 from collections import deque
 import numpy as np
@@ -37,6 +37,18 @@ class TriagoDashboard(Node):
         self.slider_joint_names = (self.left_joints + self.head_joints +
                                    self.right_joints + self.gripper_finger_joints)
         self.slider_positions = {name: 0.0 for name in self.slider_joint_names}
+        # Smoothed (EMA) display value -- only actually filtered for the
+        # gripper row (see plotter update_sliders); arm/head sliders pass
+        # their raw value straight through (no lag observed there).
+        self.slider_display = {name: 0.0 for name in self.slider_joint_names}
+
+        # --- Topic sanity tracking (2026-07-01): per-joint update timestamps
+        # + a short rolling window of inter-arrival intervals, used to
+        # diagnose whether the reported gripper-slider "lag" is caused by
+        # gripper_{left,right}_finger_joint arriving in /joint_states at a
+        # genuinely lower rate than the arm joints (see _check_topic_sanity). ---
+        self.slider_last_update_time = {name: None for name in self.slider_joint_names}
+        self.slider_update_intervals = {name: deque(maxlen=30) for name in self.slider_joint_names}
         
         # --- Shared Autonomy Time Tracking ---
         self.start_time = None  # Holds the absolute start time for continuous tracking
@@ -191,6 +203,65 @@ class TriagoDashboard(Node):
         # --- Live joint limits for the slider GUI (from the real Pinocchio model) ---
         self.joint_limits = {}   # name -> (lower, upper)
         self.create_subscription(String, '/qp_debug/joint_limits', self.joint_limits_callback, qos_profile)
+
+        # --- Topic sanity check (2026-07-01): logs once, ~6s after startup,
+        # comparing the /joint_states update rate of a representative arm
+        # joint against the two gripper finger joints. ---
+        self._sanity_timer = self.create_timer(6.0, self._check_topic_sanity)
+
+    def _check_topic_sanity(self):
+        """Diagnose the reported gripper-slider lag: compare the median
+        /joint_states inter-arrival interval of a representative arm joint
+        against gripper_left_finger_joint / gripper_right_finger_joint.
+
+        gripper_{left,right}_finger_joint are CONTROLLER-LEVEL virtual joint
+        names (confirmed absent from the robot's own URDF finger tree, which
+        only has the real underactuated flexor/rotatory joints) -- they are
+        typically fed into /joint_states by the gripper's own
+        JointTrajectoryController state broadcaster, which can run at a
+        different (often much lower) rate than the main arm joint stream.
+        If that publisher only updates on command activity (rather than every
+        control tick), the slider will visibly step/jump between updates
+        instead of gliding -- this looks like "lag" even though each single
+        update is delivered correctly.
+        """
+        self._sanity_timer.cancel()  # one-shot
+        ref_name = self.right_joints[0] if self.right_joints else None
+        ref_intervals = self.slider_update_intervals.get(ref_name) if ref_name else None
+        if not ref_intervals:
+            self.get_logger().warn("[TOPIC SANITY] No arm-joint updates yet -- cannot compare rates.")
+            return
+        ref_dt = float(np.median(ref_intervals))
+        if ref_dt <= 0:
+            return
+        for gname in self.gripper_finger_joints:
+            g_intervals = self.slider_update_intervals.get(gname)
+            if not g_intervals:
+                self.get_logger().warn(
+                    f"[TOPIC SANITY] '{gname}' has NEVER appeared in /joint_states "
+                    f"(0 updates in {len(ref_intervals)} arm-joint ticks). It is likely "
+                    f"published on a separate topic, or not published by the running "
+                    f"gripper controller at all.")
+                continue
+            g_dt = float(np.median(g_intervals))
+            ratio = g_dt / ref_dt if ref_dt > 0 else float('inf')
+            if ratio > 3.0:
+                self.get_logger().warn(
+                    f"[TOPIC SANITY] '{gname}' updates every ~{g_dt*1000:.0f} ms in "
+                    f"/joint_states vs '{ref_name}' every ~{ref_dt*1000:.0f} ms "
+                    f"({ratio:.1f}x slower). THIS is the source of the visible "
+                    f"gripper-slider lag/step -- it is a controller-level virtual "
+                    f"joint (not in the URDF's own finger tree), almost certainly fed "
+                    f"by a separate, lower-rate JointTrajectoryController state "
+                    f"broadcaster rather than the main robot's per-tick joint state "
+                    f"stream. A short EMA smoothing has been applied on this dashboard "
+                    f"to hide the resulting steps, but the true fix (if a smoother "
+                    f"physical readout is wanted) is to raise that controller's own "
+                    f"state-publish rate.")
+            else:
+                self.get_logger().info(
+                    f"[TOPIC SANITY] '{gname}' update rate OK "
+                    f"(~{g_dt*1000:.0f} ms, ref ~{ref_dt*1000:.0f} ms).")
 
     def joint_limits_callback(self, msg):
         """Parse 'name:lower:upper;name:lower:upper;...' into self.joint_limits."""
@@ -402,9 +473,28 @@ class TriagoDashboard(Node):
         # independent of the strict all_joints gate below. Whatever subset of
         # {arms, head, gripper fingers} is present in THIS message updates its
         # own slider; missing joints simply keep their last known value. ---
+        now_wall = self.get_clock().now().nanoseconds / 1e9
         for name in self.slider_joint_names:
             if name in name_to_idx:
                 self.slider_positions[name] = msg.position[name_to_idx[name]]
+                # Topic-sanity bookkeeping: inter-arrival interval for THIS joint.
+                last_t = self.slider_last_update_time[name]
+                if last_t is not None:
+                    self.slider_update_intervals[name].append(now_wall - last_t)
+                self.slider_last_update_time[name] = now_wall
+                # EMA smoothing ONLY for the gripper finger joints: these are
+                # fed by a separate, typically lower-rate controller state
+                # broadcaster (see _check_topic_sanity), so their raw value
+                # steps visibly between updates. A short EMA hides the step
+                # without adding perceptible lag for a slowly-moving gripper.
+                # Arm/head joints pass through unfiltered (no lag reported there).
+                if name in self.gripper_finger_joints:
+                    alpha = 0.35
+                    self.slider_display[name] = (
+                        alpha * self.slider_positions[name] +
+                        (1.0 - alpha) * self.slider_display[name])
+                else:
+                    self.slider_display[name] = self.slider_positions[name]
 
         if not all(j in name_to_idx for j in self.all_joints):
             return
@@ -1025,48 +1115,98 @@ def main(args=None):
     # ===================================================================
     # Read-only telemetry display mimicking the reference control-panel image:
     # one row per joint index (1..7), one column per chain (left arm / head /
-    # right arm), plus a 4th column for the two gripper finger joints (rows
-    # 5-6 only, matching the image). Torso lift + joystick are INTENTIONALLY
-    # NOT encoded here (per instruction). Slider RANGE = the REAL joint limits
-    # from the live Pinocchio model (RobotKinematics.get_joint_limits,
-    # published on /qp_debug/joint_limits) -- the SAME limits the joint-limit
-    # CBF enforces -- falling back to [-3.15, 3.15] until that message arrives.
+    # right arm) -- see cfg.SLIDER_LAYOUT. The two gripper finger joints get
+    # their OWN dedicated row BELOW this grid (cfg.GRIPPER_SLIDER_ROW),
+    # deliberately laid out with a visual gap and NOT column-aligned to the
+    # 3-column arm/head grid above (2026-07-01, per instruction). Torso lift
+    # + joystick remain INTENTIONALLY NOT encoded (per instruction). Slider
+    # RANGE = the REAL joint limits from the live Pinocchio model
+    # (RobotKinematics.get_joint_limits, published on /qp_debug/joint_limits
+    # -- the SAME limits the joint-limit CBF enforces) -- falling back to
+    # [-3.15, 3.15] until that message arrives.
     #
     # These Slider widgets are DISPLAY-ONLY: eventson=False and the handles
     # are moved programmatically from live /joint_states data each frame, not
-    # by the user. Dragging them has no effect on the robot.
+    # by the user. Dragging them has no effect on the robot. Label is placed
+    # ABOVE the slider track (not to the side, which overlapped the previous
+    # layout) with the value readout kept on the right, formatted to 2
+    # decimal places (valfmt='%.2f').
     layout = cfg_plot.SLIDER_LAYOUT
-    n_rows_slider = len(layout)
-    n_cols_slider = len(layout[0]) if n_rows_slider else 0
-    fig6 = plt.figure(figsize=(10.5, 7.2))
+    gripper_row = cfg_plot.GRIPPER_SLIDER_ROW
+    n_rows_arm = len(layout)
+    n_cols_arm = len(layout[0]) if n_rows_arm else 0
+    # Extra row reserved (blank) as a visual gap before the de-aligned gripper
+    # row, plus one row for the gripper sliders themselves.
+    n_rows_total = n_rows_arm + 2
+
+    fig6 = plt.figure(figsize=(10.5, 8.4))
     fig6.canvas.manager.set_window_title('Joint Positions (live, read-only)')
     fig6.suptitle('Joint Positions', color='white')
     fig6.patch.set_facecolor('#12181c')
-    grid = GridSpec(n_rows_slider, n_cols_slider, figure=fig6,
-                    left=0.06, right=0.97, top=0.92, bottom=0.04, hspace=0.55, wspace=0.35)
+    grid = GridSpec(n_rows_total, n_cols_arm, figure=fig6,
+                    left=0.06, right=0.97, top=0.90, bottom=0.05,
+                    hspace=1.0, wspace=0.4,
+                    height_ratios=[1] * n_rows_arm + [0.3] + [1])
 
     slider_widgets = {}   # joint_name -> Slider
     slider_limits = {}    # joint_name -> (lower, upper), snapshot to detect changes
+
+    def _style_slider(ax_s, jname, lo, hi):
+        ax_s.set_facecolor('#1c2830')
+        try:
+            # initcolor/track_color require matplotlib >= 3.5; fall back
+            # gracefully on older installs (purely cosmetic kwargs).
+            slider = Slider(ax_s, jname, lo, hi, valinit=0.0, color='#ff9f66',
+                            initcolor='none', track_color='#2d3b42',
+                            valfmt='%.2f')
+        except TypeError:
+            slider = Slider(ax_s, jname, lo, hi, valinit=0.0, color='#ff9f66',
+                            valfmt='%.2f')
+        # Move the joint-name label from the DEFAULT left-of-slider position
+        # (which overlapped the value readout in the previous layout) to
+        # ABOVE the slider track, centered. Value stays on the right (default
+        # valtext position), just reformatted to 2 decimals via valfmt above.
+        slider.label.set_position((0.5, 1.6))
+        slider.label.set_ha('center')
+        slider.label.set_va('bottom')
+        slider.label.set_fontsize(8)
+        slider.label.set_color('white')
+        slider.valtext.set_fontsize(8)
+        slider.valtext.set_color('white')
+        slider.eventson = False   # display-only: ignore mouse drags
+        return slider
+
+    # --- Arm/head grid (rows 0..n_rows_arm-1) ---
     for r, row in enumerate(layout):
         for c, jname in enumerate(row):
             if jname is None:
                 continue
             ax_s = fig6.add_subplot(grid[r, c])
-            ax_s.set_facecolor('#1c2830')
             lo, hi = -3.15, 3.15   # placeholder until /qp_debug/joint_limits arrives
-            try:
-                # initcolor/track_color require matplotlib >= 3.5; fall back
-                # gracefully on older installs (purely cosmetic kwargs).
-                slider = Slider(ax_s, jname, lo, hi, valinit=0.0, color='#ff9f66',
-                                initcolor='none', track_color='#2d3b42')
-            except TypeError:
-                slider = Slider(ax_s, jname, lo, hi, valinit=0.0, color='#ff9f66')
-            slider.label.set_fontsize(8)
-            slider.label.set_color('white')
-            slider.valtext.set_fontsize(8)
-            slider.valtext.set_color('white')
-            slider.eventson = False   # display-only: ignore mouse drags
-            slider_widgets[jname] = slider
+            slider_widgets[jname] = _style_slider(ax_s, jname, lo, hi)
+            slider_limits[jname] = (lo, hi)
+
+    # --- Dedicated gripper row (last row, DE-ALIGNED from the 3-col grid
+    # above): centered as 2 sliders spanning the full width, with gaps on
+    # either side and between them so they visually stand apart from the
+    # arm/head columns rather than lining up under column 0 / column 1. ---
+    gripper_grid_row = n_rows_total - 1
+    n_grippers = len(gripper_row)
+    if n_grippers > 0:
+        # Sub-partition this single GridSpec row into (gap, slider, gap,
+        # slider, gap, ...) using a nested GridSpec so the two gripper
+        # sliders are centered and evenly spaced, independent of n_cols_arm.
+        sub_cols = n_grippers * 2 + 1
+        try:
+            inner = grid[gripper_grid_row, :].subgridspec(1, sub_cols)
+        except AttributeError:
+            # subgridspec() requires matplotlib >= 3.4; fall back to the
+            # older GridSpecFromSubplotSpec for compatibility.
+            inner = GridSpecFromSubplotSpec(1, sub_cols, subplot_spec=grid[gripper_grid_row, :])
+        for i, jname in enumerate(gripper_row):
+            ax_s = fig6.add_subplot(inner[0, 2 * i + 1])
+            lo, hi = -3.15, 3.15
+            slider_widgets[jname] = _style_slider(ax_s, jname, lo, hi)
             slider_limits[jname] = (lo, hi)
 
     # ===================================================================
@@ -1093,7 +1233,11 @@ def main(args=None):
                 slider.ax.set_xlim(lo, hi)
                 slider.valmin, slider.valmax = lo, hi
                 slider_limits[jname] = (lo, hi)
-            val = node.slider_positions.get(jname, 0.0)
+            # Use the EMA-smoothed display value (identical to the raw value
+            # for arm/head joints; smoothed for the gripper fingers to hide
+            # their lower-rate controller-broadcast steps -- see
+            # listener_callback and _check_topic_sanity).
+            val = node.slider_display.get(jname, 0.0)
             val = min(max(val, slider.valmin), slider.valmax)
             slider.set_val(val)
         fig6.canvas.draw_idle()

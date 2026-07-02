@@ -76,8 +76,10 @@ POSTURE_SCALE_TAU = 0.2        # s — first-order ramp time-constant for the po
 # =============================================================================
 # --- Decoupled dynamic slack weighting ---
 BASE_WEIGHT_SLACK = 25.0        # Standard slack weight (active against an obstacle)
-MAX_WEIGHT_SLACK = 60.0        # Maximum slack weight (in free space); ALSO the fixed slack
+MAX_WEIGHT_SLACK = 100.0       # Maximum slack weight (in free space); ALSO the fixed slack
                                #   weight pinned on an INACTIVE (frozen) arm to decouple it.
+                               #   [60 -> 100, 2026-07-01: operator-tested value, tighter
+                               #   free-space tracking, kept for their tuned configs]
 BETA = 0.4                     # How fast slack weights return to baseline as lambda grows
                                #   [1.0 -> 0.4: gentler curve, less abrupt swing near lambda~1]
 SLACK_FILTER_TAU = 0.15        # LPF time constant on the shadow prices feeding the slack
@@ -148,19 +150,26 @@ REF_FRAME = 'base_footprint'
 # and publishes the real limits from the live Pinocchio model via
 # RobotKinematics.get_joint_limits) and plotter.py (which lays out the grid).
 # Mirrors the reference control-panel image's column/row arrangement:
-#   col 0 = left arm (7), col 1 = head (7), col 2 = right arm (7),
-#   col 3 = gripper fingers only, at rows 5-6 (rows 0-4 blank: the image's
-#   torso_lift_joint slider and joystick widget are INTENTIONALLY not encoded
-#   here per instruction). `None` = empty grid cell.
+#   col 0 = left arm (7), col 1 = head (7), col 2 = right arm (7).
+# (2026-07-01) The 4th "gripper" column was REMOVED -- with only 2 joints it
+# left 5 empty cells and looked unbalanced. The two gripper fingers now live
+# in their OWN dedicated row below this grid (see GRIPPER_SLIDER_ROW),
+# intentionally laid out with a visual gap and NOT column-aligned with the
+# arm/head grid above (see plotter.py Window 6). Rows 0-4 of the old 4th
+# column, and the reference image's torso_lift_joint slider + joystick
+# widget, remain INTENTIONALLY not encoded here per instruction.
 SLIDER_LAYOUT = [
-    ['arm_left_1_joint', 'arm_head_1_joint', 'arm_right_1_joint', None],
-    ['arm_left_2_joint', 'arm_head_2_joint', 'arm_right_2_joint', None],
-    ['arm_left_3_joint', 'arm_head_3_joint', 'arm_right_3_joint', None],
-    ['arm_left_4_joint', 'arm_head_4_joint', 'arm_right_4_joint', None],
-    ['arm_left_5_joint', 'arm_head_5_joint', 'arm_right_5_joint', None],
-    ['arm_left_6_joint', 'arm_head_6_joint', 'arm_right_6_joint', 'gripper_left_finger_joint'],
-    ['arm_left_7_joint', 'arm_head_7_joint', 'arm_right_7_joint', 'gripper_right_finger_joint'],
+    ['arm_left_1_joint', 'arm_head_1_joint', 'arm_right_1_joint'],
+    ['arm_left_2_joint', 'arm_head_2_joint', 'arm_right_2_joint'],
+    ['arm_left_3_joint', 'arm_head_3_joint', 'arm_right_3_joint'],
+    ['arm_left_4_joint', 'arm_head_4_joint', 'arm_right_4_joint'],
+    ['arm_left_5_joint', 'arm_head_5_joint', 'arm_right_5_joint'],
+    ['arm_left_6_joint', 'arm_head_6_joint', 'arm_right_6_joint'],
+    ['arm_left_7_joint', 'arm_head_7_joint', 'arm_right_7_joint'],
 ]
+# Dedicated gripper row (2026-07-01): rendered below SLIDER_LAYOUT in its own
+# visually-separated section, deliberately NOT aligned to the 3 columns above.
+GRIPPER_SLIDER_ROW = ['gripper_left_finger_joint', 'gripper_right_finger_joint']
 
 # =============================================================================
 # 6. GEOMETRY + WORKSPACE

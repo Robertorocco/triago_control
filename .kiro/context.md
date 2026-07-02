@@ -1,14 +1,18 @@
 # AI Agent Context — triago_control
 
 > **This file is maintained by the AI agent. Do not edit manually.**
-> Last updated: 2026-07-01 (per-arm coupling fix CONFIRMED working by the operator — fast
-> active-arm motion no longer perturbs the idle arm. Follow-up UX/telemetry pass: fixed the
-> RViz visualizer to draw BOTH grippers blue when both arms are actively driven — was a
-> visualization-only bug, not a QP bug — see §9.4; split the "Slack Weight" plot into per-arm
-> R/L traces (confirmed the QP already weights delta_r/delta_l independently, §9.4); replaced
-> the "Joint Data" position line-plots with a dedicated slider-panel GUI using REAL joint
-> limits from the live Pinocchio model, §9.5. Also (earlier this day): per-arm dynamic CBF
-> safety-margin split (§9.3), fixed a `NameError` on a stale `b_col` reference (PR #8), and
+> Last updated: 2026-07-01 (slider-GUI polish pass, §9.6: MAX_WEIGHT_SLACK 60→100
+> (operator-tested value), fixed slider label/value overlap (label moved above the
+> track), removed the unbalanced gripper column and gave the 2 gripper sliders their
+> own de-aligned dedicated row, value readout truncated to 2 decimals, and root-caused
+> + mitigated the "laggy gripper slider" report as a topic-rate mismatch — see §9.6 for
+> the full diagnosis and the new `_check_topic_sanity` self-check. Earlier this day:
+> per-arm coupling fix CONFIRMED working by the operator (fast active-arm motion no
+> longer perturbs the idle arm); RViz visualizer fixed to draw BOTH grippers blue when
+> both arms are actively driven (§9.4); "Slack Weight" plot split into per-arm R/L
+> traces (§9.4); "Joint Data" position line-plots replaced by the slider-panel GUI using
+> REAL joint limits from the live Pinocchio model (§9.5); per-arm dynamic CBF
+> safety-margin split (§9.3); fixed a `NameError` on a stale `b_col` reference (PR #8);
 > replaced plotter.py's broken-in-sim raw-encoder plot with the QP-solved joint velocity.
 > STABLE v1 checkpoint tagged 2026-06-30 at commit "STABLE v1: teleoperation + grasping backup
 > checkpoint" — roll back there if this or a later change regresses the system)
@@ -697,13 +701,11 @@ Figure 1 is now a 3×2 grid (velocity / QP solution / servo error only — see
 **New Window 6, "Joint Positions"**: a read-only slider-panel GUI matching the
 layout of a reference control-panel image — one `matplotlib.widgets.Slider` per
 joint, arranged in a grid: col 0 = left arm (`arm_left_1..7_joint`), col 1 = head
-(`arm_head_1..7_joint`), col 2 = right arm (`arm_right_1..7_joint`), col 3 = the
-two gripper finger joints (`gripper_{left,right}_finger_joint`, rows 5-6 only,
-matching the reference image). The grid itself (`cfg.SLIDER_LAYOUT`, a list-of-
-lists with `None` for empty cells) lives in `config.py` as the single source of
+(`arm_head_1..7_joint`), col 2 = right arm (`arm_right_1..7_joint`). The grid
+(`cfg.SLIDER_LAYOUT`, list-of-lists) lives in `config.py` as the single source of
 truth for both the plotter's layout and any future consumer. **Per instruction,
 the reference image's `torso_lift_joint` slider and joystick widget are NOT
-encoded** (rows 0-4 of column 3 are intentionally blank).
+encoded.**
 
 Sliders are **display-only** (`eventson=False`; the handle position is set
 programmatically from live `/joint_states` each animation frame — dragging them
@@ -715,6 +717,71 @@ semicolon/colon-encoded `String` (`"name:lower:upper;..."` — chosen over a new
 custom message type since this is a low-rate, non-critical debug topic). Falls
 back to a placeholder `[-3.15, 3.15]` range until that message arrives, then
 snaps to the real limits.
+
+### 9.6 Slider GUI polish + gripper-lag topic-sanity diagnosis (2026-07-01)
+
+Follow-up pass after the operator tried the new slider GUI:
+
+1. **`MAX_WEIGHT_SLACK` 60 → 100**: operator-tested value from experimentation,
+   persisted so their tuned free-space tracking behaviour survives a fresh pull.
+   (Still the ceiling of the dynamic slack schedule AND the fixed value pinned on
+   a frozen/inactive arm — see §3 of `config.py`.)
+
+2. **Label overlap fixed**: the original 4-column layout (arm/head/arm/gripper)
+   put the two gripper sliders in only rows 5–6 of column 3, leaving 5 empty
+   cells and making that column look unbalanced — and `matplotlib.widgets.Slider`
+   labels default to sitting immediately LEFT of the track, which overlapped the
+   value readout at this GUI's compact per-cell size. Fix: `slider.label` is
+   repositioned to `(0.5, 1.6)` in axes-fraction coordinates with
+   `ha='center', va='bottom'` — i.e. **centered, above the slider track** — while
+   `slider.valtext` (the numeric readout) stays in its default position, on the
+   RIGHT of the track, unchanged.
+
+3. **Gripper column removed; dedicated de-aligned gripper row added**: the 4th
+   ("gripper") column is gone from `cfg.SLIDER_LAYOUT` (now a clean 7×3 arm/head
+   grid). The two gripper finger sliders (`cfg.GRIPPER_SLIDER_ROW`) render in
+   their OWN row below the grid, via a nested `GridSpecFromSubplotSpec`
+   (`subgridspec`) that centers them with blank gap columns on both sides and
+   between them — by construction this makes them NOT column-aligned with the
+   3-column arm/head grid above (per instruction), and a genuinely blank
+   height-0.3 spacer row separates the two sections visually.
+
+4. **Value display truncated to 2 decimals**: `Slider(..., valfmt='%.2f')` on
+   every slider (was matplotlib's default `%.3g`-ish formatting, e.g. `2.258`).
+
+5. **Gripper slider lag — root-caused and mitigated**: the reported "laggy"
+   behaviour (smooth with one gripper shown, visibly steppy with two) is a
+   **topic-rate mismatch, not a plotting bug**. `gripper_{left,right}_finger_joint`
+   are confirmed ABSENT from the robot's own URDF finger kinematic tree (which
+   only has the real underactuated `gripper_{side}_finger_{1,2,3}_*flexor*` /
+   `*rotatory*` / `*tip*` joints, plus `_coupler_joint`/`_palm_joint`/`_tc_joint`
+   — see the URDF grep in this session). These two names are **virtual joints
+   fed into `/joint_states` by the gripper's own controller** (commanded via
+   `SharedAutonomyHandler`'s `FollowJointTrajectory` action clients to
+   `/gripper_{side}_controller/follow_joint_trajectory`, joint name
+   `gripper_{side}_finger_joint` — see `close_gripper`), whose JointTrajectory
+   controller state broadcaster can run at a materially different (often much
+   lower / event-driven) rate than the main arm `/joint_states` stream — hence
+   the visible step/lag once BOTH grippers were being read (a single gripper's
+   own lower rate is less noticeable in isolation; watching two side-by-side
+   made the discrete steps obvious).
+   - **Diagnostic added**: `TriagoDashboard._check_topic_sanity` (a one-shot
+     6 s-after-startup timer) computes the median `/joint_states` inter-arrival
+     interval for a representative arm joint vs. each gripper finger joint and
+     logs a `[TOPIC SANITY]` WARN if the ratio exceeds 3× (or if a gripper name
+     never appeared at all), naming the exact joint and the measured rates.
+   - **Mitigation added** (cosmetic, does not change ground truth): a short EMA
+     (`alpha=0.35`) is applied ONLY to the two gripper finger joints' slider
+     display value (`self.slider_display`, separate from the raw
+     `self.slider_positions` used by any future numeric consumer) to visually
+     smooth the steps between the controller's own lower-rate updates. Arm/head
+     joints are passed straight through, unfiltered (no lag ever reported
+     there — they DO share the main joint-state stream).
+   - **If a truly smoother physical readout is wanted** (not just a smoothed
+     display), the real fix is on the gripper controller side: raise
+     `/gripper_{left,right}_controller`'s own joint-state-broadcast rate — this
+     is outside `triago_control`'s control (PAL vendor controller
+     configuration), so it is not something this package can fix directly.
 
 ### 9.1 Sensing constraints (real-hardware honesty, 2026-06-29)
 
