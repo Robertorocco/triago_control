@@ -117,6 +117,8 @@ class SharedControlNode(Node):
         self.last_alpha = 0.0   # most recent alpha actually applied (for telemetry)
         # Persistent LPF state for the user-effort gating signal (see compute_alpha).
         self.alpha_effort_lpf = 0.0
+        # Persistent LPF state for the position-divergence gating signal (see compute_alpha).
+        self.alpha_divergence_lpf = 0.0
 
         self.POLICY_BELIEF_TEST = False   # <-- flip this to switch modes
         # When True:  the node injects pi_stars[test_goal_key] as the fake human
@@ -1126,17 +1128,39 @@ class SharedControlNode(Node):
             self._release_object()
 
         if cfg.BLENDING and tick_output.new_state == "SHARED_AUTONOMY":
+            # pos_divergence: sustained gap between the user's PERSISTENT
+            # reference pose and the real EE -- unlike current_v_h, this does
+            # NOT decay when the user stops moving, so it captures "holding the
+            # hand displaced" (the local-minimum-escape case), not just "moving
+            # fast right now".
+            pos_divergence = float(np.linalg.norm(
+                self.current_T_user[:3, 3] - self.current_T_EE[:3, 3]))
+
             # pos_error (EE -> active goal, computed above from current_T_EE)
             # drives the smooth proximity boost so the assistive twist can
             # actually finish the approach near the goal. current_v_h (the raw
             # human twist) drives the user-effort gate so active hand motion
-            # takes precedence over the policy (see compute_alpha).
-            alpha = self.compute_alpha(b_max, pos_error=pos_error, v_user=self.current_v_h)
+            # takes precedence over the policy. pos_divergence drives the
+            # SUSTAINED override so holding the hand displaced also hands back
+            # authority, even once the hand stops moving (see compute_alpha).
+            alpha = self.compute_alpha(b_max, pos_error=pos_error, v_user=self.current_v_h,
+                                       pos_divergence=pos_divergence)
             self.last_alpha = alpha
             # v_blend = (1-alpha)*v_user + alpha*pi_policy -- blended at the
             # TWIST level (not a one-shot pose offset), so it accumulates into
             # genuine, persistent motion when integrated below (section 6).
             target_twist = (1 - alpha) * self.current_v_h + alpha * tick_output.target_twist
+
+            # Bounded reference catch-up: ADD a gentle, capped pull toward the
+            # user's held reference pose on top of the blend above. This is
+            # what actually lets the robot follow through to where the hand is
+            # RESTING (not just moving), which is what the user needs to break
+            # the arm out of a local minimum via reference position -- while
+            # staying fully inside the downstream QP CLF-CBF's safety envelope
+            # (it only ever adds a bounded velocity into the SAME reference the
+            # QP tracks; it cannot force the arm through an obstacle).
+            target_twist = target_twist + self.compute_reference_catchup(
+                self.current_T_user, self.current_T_EE)
         else:
             alpha = 0.0
             self.last_alpha = 0.0
@@ -1917,7 +1941,7 @@ class SharedControlNode(Node):
         t = float(np.clip((x - lo) / (hi - lo), 0.0, 1.0))
         return t * t * (3.0 - 2.0 * t)
 
-    def compute_alpha(self, b_max, pos_error=None, v_user=None):
+    def compute_alpha(self, b_max, pos_error=None, v_user=None, pos_divergence=None):
         """Maps the maximum belief probability to the autonomy arbitration weight.
 
         alpha = cfg.ALPHA_MAX * x**cfg.ALPHA_GAMMA, where x is b_max normalised
@@ -1961,9 +1985,24 @@ class SharedControlNode(Node):
         dual variables is introduced. The effort signal itself is LPF'd
         (cfg.ALPHA_EFFORT_LPF_COEFF, self.alpha_effort_lpf) before gating.
 
+        --- Position-divergence authority override (2026-07-03) ---
+        The velocity-effort gate above relaxes the instant the user decelerates
+        -- but a user HOLDING their hand displaced from the EE (not moving,
+        just stationary-but-elsewhere) is exactly the "stuck in a local minimum,
+        trying to break out via reference position" case the operator described.
+        If `pos_divergence` (||current_T_user.pos - current_T_EE.pos||, meters)
+        is provided, a SUSTAINED (non-decaying-with-velocity) smoothstep gate
+        further scales alpha down:
+            div_effort = smoothstep(pos_divergence, ALPHA_DIVERGENCE_NEAR, ALPHA_DIVERGENCE_FAR)
+            alpha *= (1 - div_effort * cfg.ALPHA_DIVERGENCE_OVERRIDE)
+        LPF'd independently (cfg.ALPHA_DIVERGENCE_LPF_COEFF, self.alpha_divergence_lpf).
+        This is the DOMINANT override (cfg.ALPHA_DIVERGENCE_OVERRIDE=0.6, higher
+        than the velocity gate's 0.5) since it is meant to persist as long as the
+        user is holding their hand away, not just while it's in motion.
+
         The final result is LOW-PASS FILTERED (cfg.ALPHA_LPF_COEFF) via
         self.alpha_lpf so alpha never jumps discontinuously between ticks, even
-        if belief, proximity, or effort shift abruptly.
+        if belief, proximity, effort, or divergence shift abruptly.
         """
         active_goals = [k for k in self.target_keys
                         if k not in self.belief_estimator.get_excluded_goals()]
@@ -1995,9 +2034,62 @@ class SharedControlNode(Node):
                                      + (1.0 - cfg.ALPHA_EFFORT_LPF_COEFF) * self.alpha_effort_lpf)
             alpha_raw *= (1.0 - self.alpha_effort_lpf * cfg.ALPHA_EFFORT_OVERRIDE)
 
+        if pos_divergence is not None:
+            div_raw = self._smoothstep(float(pos_divergence),
+                                       cfg.ALPHA_DIVERGENCE_NEAR, cfg.ALPHA_DIVERGENCE_FAR)
+            self.alpha_divergence_lpf = ((cfg.ALPHA_DIVERGENCE_LPF_COEFF * div_raw)
+                                         + (1.0 - cfg.ALPHA_DIVERGENCE_LPF_COEFF) * self.alpha_divergence_lpf)
+            alpha_raw *= (1.0 - self.alpha_divergence_lpf * cfg.ALPHA_DIVERGENCE_OVERRIDE)
+
         self.alpha_lpf = ((cfg.ALPHA_LPF_COEFF * alpha_raw)
                          + (1.0 - cfg.ALPHA_LPF_COEFF) * self.alpha_lpf)
         return self.alpha_lpf
+
+    def compute_reference_catchup(self, T_user, T_EE):
+        """Bounded P-control pull toward the user's PERSISTENT reference pose.
+
+        Fixes the core architectural gap: v_blend = (1-alpha)*v_user + alpha*
+        pi_policy has NO memory of the user's persistent reference position
+        (current_T_user) -- only its instantaneous derivative (current_v_h).
+        The instant the user stops moving (holding their hand displaced from
+        the EE, e.g. trying to break the arm out of a local minimum), v_user
+        collapses to zero, the twist blend collapses to alpha*pi_policy alone,
+        and the robot never follows through to where the hand actually is --
+        while the operator fights F_sync's restoring force the whole time.
+
+        This adds a SEPARATE, capped velocity term -- gated by a deadband so
+        ordinary small tracking gaps are untouched -- directly toward the
+        user's held position/orientation. It is ADDED onto whatever
+        target_twist the blend already produced; it never bypasses the
+        downstream QP CLF-CBF (it only ever contributes a bounded velocity
+        INTO the same reference the QP tracks), so a genuinely obstacle-
+        blocked path still cannot be forced through.
+
+        Returns a 6-vector (linear + angular) to be added to target_twist.
+        """
+        pos_gap = T_user[:3, 3] - T_EE[:3, 3]
+        pos_gap_norm = float(np.linalg.norm(pos_gap))
+        pos_gate = self._smoothstep(pos_gap_norm, cfg.CATCHUP_DEADBAND_POS, cfg.CATCHUP_FULL_POS)
+        v_lin = cfg.K_CATCHUP_LIN * pos_gap * pos_gate
+        lin_norm = float(np.linalg.norm(v_lin))
+        if lin_norm > cfg.V_CATCHUP_MAX_LIN:
+            v_lin *= (cfg.V_CATCHUP_MAX_LIN / lin_norm)
+
+        R_err = T_user[:3, :3] @ T_EE[:3, :3].T
+        trace = np.trace(R_err)
+        if trace <= -1.0 + 1e-4:
+            ang_gap_vec = np.zeros(3)
+            ang_gap_norm = np.pi
+        else:
+            ang_gap_vec = pin.log3(R_err)
+            ang_gap_norm = float(np.linalg.norm(ang_gap_vec))
+        ang_gate = self._smoothstep(ang_gap_norm, cfg.CATCHUP_DEADBAND_ANG, cfg.CATCHUP_FULL_ANG)
+        w_ang = cfg.K_CATCHUP_ANG * ang_gap_vec * ang_gate
+        ang_norm = float(np.linalg.norm(w_ang))
+        if ang_norm > cfg.V_CATCHUP_MAX_ANG:
+            w_ang *= (cfg.V_CATCHUP_MAX_ANG / ang_norm)
+
+        return np.concatenate((v_lin, w_ang))
 
     def _console_input_thread(self):
         """Blocking console loop that lets the developer switch the test goal at runtime.

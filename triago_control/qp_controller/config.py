@@ -117,6 +117,55 @@ ALPHA_EFFORT_LPF_COEFF = 0.15    # low-pass filter on the effort signal (smooths
                                  #   ||v_user|| norm before it gates alpha; independent
                                  #   of ALPHA_LPF_COEFF, which smooths the final alpha)
 
+# --- Position-divergence authority override + reference catch-up (2026-07-03) ---
+# Operator report: the velocity-effort gate above only reacts while the hand is
+# ACTIVELY MOVING. The instant the user decelerates and holds their hand at a
+# displaced position, ||v_user|| -> 0, the effort gate relaxes, and pi_policy
+# (still large, belief-driven) dominates v_blend again -- so the robot barely
+# moves toward where the user is HOLDING their hand, and the user ends up
+# fighting F_sync (whose restoring force is proportional to exactly that
+# unclosed gap) without the robot ever following through. This is architectural:
+# the twist blend has no memory of the user's PERSISTENT REFERENCE POSE
+# (current_T_user), only their instantaneous derivative (current_v_h).
+#
+# Two complementary, purely-geometric mechanisms (built only from
+# current_T_user vs current_T_EE -- NOT from any QP Lagrangian/shadow-price,
+# per explicit operator constraint that those are discontinuous or need
+# lag-inducing filtering):
+#
+# 1. DIVERGENCE ALPHA OVERRIDE (same shape as the velocity-effort gate, but
+#    driven by SUSTAINED position gap instead of instantaneous twist -- does
+#    NOT decay when the user stops moving):
+#      div_effort = smoothstep(||pos_user - pos_EE||, NEAR, FAR)
+#      alpha *= (1 - div_effort * ALPHA_DIVERGENCE_OVERRIDE)
+#
+# 2. BOUNDED REFERENCE CATCH-UP (the actual fix for "robot doesn't follow
+#    through to where the hand is held"): a gentle, CAPPED P-control pull
+#    ADDED directly onto the blended twist, toward the user's persistent
+#    pose. Gated by a deadband so normal small tracking gaps are untouched.
+#    It never bypasses the downstream QP CLF-CBF -- it only ever contributes
+#    a bounded velocity INTO the same reference the QP tracks, so collision/
+#    joint-limit safety is fully preserved; a genuinely blocked path still
+#    can't be forced through.
+ALPHA_DIVERGENCE_NEAR = 0.05      # m -- no override below this position gap
+ALPHA_DIVERGENCE_FAR = 0.20       # m -- full override at/beyond this position gap
+ALPHA_DIVERGENCE_OVERRIDE = 0.6   # fraction of alpha displaced at full divergence
+                                  #   (stronger than ALPHA_EFFORT_OVERRIDE=0.5: this is
+                                  #   meant to be the DOMINANT, sustained signal)
+ALPHA_DIVERGENCE_LPF_COEFF = 0.15  # LPF on the divergence-override signal (independent
+                                  #   of ALPHA_LPF_COEFF / ALPHA_EFFORT_LPF_COEFF)
+
+CATCHUP_DEADBAND_POS = 0.03       # m -- below this position gap, catch-up contributes nothing
+CATCHUP_FULL_POS = 0.15           # m -- full catch-up gain reached at/beyond this gap
+K_CATCHUP_LIN = 1.5               # P-gain (1/s) on the linear position gap (pre-clip)
+V_CATCHUP_MAX_LIN = 0.06          # m/s -- hard cap on the catch-up linear velocity
+                                  #   (deliberately gentle -- a slow, steady pull, not a snap)
+
+CATCHUP_DEADBAND_ANG = 0.15       # rad (~8.6 deg) -- below this, no orientation catch-up
+CATCHUP_FULL_ANG = 0.6            # rad (~34 deg) -- full orientation catch-up gain
+K_CATCHUP_ANG = 1.0               # P-gain (1/s) on the orientation gap (pre-clip)
+V_CATCHUP_MAX_ANG = 0.15          # rad/s -- hard cap on the catch-up angular velocity
+
 # =============================================================================
 # 2. SAFETY + CONTROL HYPERPARAMETERS
 # =============================================================================

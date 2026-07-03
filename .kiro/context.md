@@ -1,7 +1,25 @@
 # AI Agent Context — triago_control
 
 > **This file is maintained by the AI agent. Do not edit manually.**
-> Last updated: 2026-07-03 (§11.7 NEW: user-effort authority gating. Operator
+> Last updated: 2026-07-03 (§11.8 NEW: position-divergence authority override +
+> bounded reference catch-up. Operator report on §11.7: the velocity-effort
+> gate only reacts while the hand is ACTIVELY MOVING -- the instant the user
+> decelerates and HOLDS their hand displaced from the EE, ||v_user|| -> 0, the
+> gate relaxes, and the belief-driven policy dominates again, so the robot
+> barely follows through to where the hand is resting (exactly the mechanism
+> the operator wanted to use to escape local minima via reference POSITION,
+> not just twist) -- while fighting F_sync's restoring force the whole time.
+> Root cause: v_blend has no memory of current_T_user, only its derivative.
+> Fix (two purely-geometric mechanisms, built only from current_T_user vs
+> current_T_EE -- no QP Lagrangian/shadow-price anywhere, per explicit
+> operator constraint): (1) a SUSTAINED position-divergence override on
+> compute_alpha (`ALPHA_DIVERGENCE_OVERRIDE=0.6`, does not decay with
+> velocity); (2) a new `compute_reference_catchup` -- a gentle, CAPPED P-pull
+> (`V_CATCHUP_MAX_LIN=0.06 m/s`) ADDED onto the blended twist toward the
+> user's held pose, gated by a deadband, that still passes entirely through
+> the downstream QP CLF-CBF (cannot force the arm through an obstacle). See
+> §11.8.)
+> Earlier: 2026-07-03 (§11.7 NEW: user-effort authority gating. Operator
 > reported the arm was almost "blind" to their own hand twist in TWIST
 > BLENDING mode -- `pi_policy` is a large, saturated velocity while comfortable
 > hand motion is much smaller, so even a moderate `alpha(belief)` let the
@@ -1898,6 +1916,101 @@ architecture (§4.3 in `haption_teleoperation`'s context.md) was touched at
 all — this fix is 100% contained to `compute_alpha` in `main_shared_
 autonomy.py` plus the four new `cfg.ALPHA_EFFORT_*` constants.
 
+### 11.8 Position-divergence override + bounded reference catch-up (2026-07-03)
+
+Follow-up on §11.7. Operator feedback after testing the velocity-effort gate:
+fast hand motion nudges the gripper, but the moment the hand decelerates and
+is HELD at a displaced position, the robot barely continues moving there —
+the operator ends up fighting `F_sync`'s restoring force (proportional to the
+still-open EE↔user position gap) without the robot ever closing it. The
+operator's own diagnosis, confirmed correct: this is architectural, and human
+REFERENCE POSITION (not just twist) is specifically valuable as an
+escape-from-local-minima mechanism — the whole point of shared autonomy
+getting stuck is that the belief-driven policy alone cannot always find its
+way out, and the user's hand position is exactly the extra information that
+can redirect it, even (especially) once they've stopped actively steering.
+
+**Root cause, precisely**: the published reference is built as
+```
+target_twist = (1-alpha)*current_v_h + alpha*pi_policy      # blend at TWIST level
+T_virtual_ref = integrate_twist(current_T_EE, target_twist, dt_virtual=0.02)  # ALWAYS from current EE
+```
+`current_T_user` (the user's own persistently-integrated hand pose, maintained
+independently by `teleop_triago_clutch.py`) never appears as a POSITION target
+anywhere in this pipeline — only its derivative `current_v_h` does. The
+instant `current_v_h → 0` (hand held still), `target_twist → alpha*pi_policy`
+alone, and `T_virtual_ref` collapses right back onto wherever the EE currently
+is — regardless of how far away the user is holding their hand. §11.7's
+effort gate reacts to the SAME derivative, so it also relaxes at exactly this
+moment; it could never fix this on its own.
+
+**Fix — two complementary, purely-geometric mechanisms** (both built only
+from `current_T_user` and `current_T_EE`, i.e. plain forward-kinematics-level
+poses already available every tick; explicitly NOT sourced from any QP
+Lagrangian multiplier or shadow price, per the operator's standing constraint
+that those are discontinuous tick-to-tick or need lag-inducing filtering):
+
+**1. Position-divergence alpha override** (`compute_alpha`, new
+`pos_divergence` parameter — sustained, does NOT decay with velocity, unlike
+§11.7's effort gate):
+```python
+div_effort = smoothstep(pos_divergence, ALPHA_DIVERGENCE_NEAR=0.05, ALPHA_DIVERGENCE_FAR=0.20)  # meters
+alpha *= (1 - div_effort * ALPHA_DIVERGENCE_OVERRIDE)   # ALPHA_DIVERGENCE_OVERRIDE = 0.6
+```
+LPF'd independently (`ALPHA_DIVERGENCE_LPF_COEFF=0.15`, `self.
+alpha_divergence_lpf`) before folding into the same filtered `alpha_lpf`
+pipeline as every other gate — no new discontinuity source. Deliberately the
+STRONGEST override in the pipeline (`0.6` vs. the velocity gate's `0.5`)
+since it is meant to be the dominant, PERSISTENT signal — it stays active
+exactly as long as the user keeps holding their hand away, not just while
+it's in motion.
+
+**2. Bounded reference catch-up** (`compute_reference_catchup`, new method —
+the mechanism that actually answers "the robot must follow through to where
+the hand is resting"): a gentle, CAPPED P-control pull ADDED directly onto
+`target_twist` after the blend, toward `current_T_user`:
+```python
+pos_gap = T_user.pos - T_EE.pos
+v_lin   = clip(K_CATCHUP_LIN * pos_gap * smoothstep(||pos_gap||, DEADBAND_POS=0.03, FULL_POS=0.15),
+               max_norm=V_CATCHUP_MAX_LIN=0.06 m/s)
+# + analogous orientation term via pin.log3, capped at V_CATCHUP_MAX_ANG=0.15 rad/s
+target_twist += concat(v_lin, w_ang)
+```
+- The deadband (`CATCHUP_DEADBAND_POS/ANG`) means ordinary small tracking
+  gaps contribute nothing — this only activates once the user has genuinely
+  moved their hand away and is holding it there.
+- The velocity is HARD-CAPPED (deliberately gentle — a slow, steady pull, not
+  a snap toward the hand).
+- Crucially, this term is **added to `target_twist`, which still flows
+  through the exact same downstream integration and QP CLF-CBF as before** —
+  it never bypasses safety. If an obstacle genuinely blocks the path, the CBF
+  still constrains the actually-executed motion; the catch-up term can only
+  ever nudge the REFERENCE the QP is asked to track, never force a collision.
+
+**Call site** (`timer_callback`, inside the `cfg.BLENDING and new_state ==
+"SHARED_AUTONOMY"` branch):
+```python
+pos_divergence = ||current_T_user.pos - current_T_EE.pos||
+alpha = compute_alpha(b_max, pos_error=pos_error, v_user=current_v_h,
+                       pos_divergence=pos_divergence)
+target_twist = (1-alpha)*current_v_h + alpha*tick_output.target_twist
+target_twist = target_twist + compute_reference_catchup(current_T_user, current_T_EE)
+```
+
+**New config constants** (`config.py`): `ALPHA_DIVERGENCE_NEAR/FAR/OVERRIDE/
+LPF_COEFF`, `CATCHUP_DEADBAND_POS/FULL_POS`, `K_CATCHUP_LIN`,
+`V_CATCHUP_MAX_LIN`, `CATCHUP_DEADBAND_ANG/FULL_ANG`, `K_CATCHUP_ANG`,
+`V_CATCHUP_MAX_ANG`.
+
+**Expected effect on the reported "fighting F_sync" feeling**: as the catch-up
+term steadily closes the EE↔user gap, `F_sync`'s own restoring force (which is
+proportional to that same gap) should relax in step — the two are coupled by
+construction, not independently tuned. `F_sync`'s own gains were NOT touched
+(per explicit instruction).
+
+**First trial — untested, pending operator feedback**: all listed constants
+are first-pass values, not yet validated hands-on. Expect follow-up tuning.
+
 ---
 
 ## 12. Current State & Known Issues
@@ -1912,7 +2025,7 @@ autonomy.py` plus the four new `cfg.ALPHA_EFFORT_*` constants.
 | Post-grasp (LIFT + HOLDING + place) | ✅ Working | 9 cm slow lift → HOLDING resumes shared autonomy → Platform placement manifold → release → RELEASE_LIFT → SHARED_AUTONOMY |
 | RViz visualization | ✅ Working | Light-green=EE robot policy (own topic `/robot_policy_marker`), Light-blue=reference guidance (own topic `/guidance_policy_marker`). Commanded gripper is now PER-ARM (2026-07-01, §9.4): each arm independently Blue=actively tracking / Grey=frozen (`right_frozen`/`left_frozen` ground truth via `/qp_debug/arm_frozen`) — both render blue simultaneously under `trajectory_generator.py` or dual teleop, exactly one blue+one grey in single-arm teleop. Belief-opacity goal grippers + grasp-ready cue on `/shared_policy_markers`. Grasp-guidance move/rotate arrows REMOVED (cluttered the view). Periodic DELETEALL sweep every 3s on all 3 marker topics (self-heals stuck/ghost markers). Dual belief subplot (active colored, inactive greyscale). Task-authority soft-cost plot (`/qp_debug/task_authority`). Plotter dashboard also has a NEW "Joint Positions" slider-panel GUI window (§9.5, real Pinocchio joint limits) and per-arm "Slack Weight" (R/L) traces. |
 | Haption teleoperation (Virtual Fixture mode) | ✅ Working | `teleop_triago_clutch.py` + `haptic_force_manager_tutorial.py`. Force layers: F_guide (velocity-field, v_max_user 0.04/0.10) + F_fixture (position spring near goal). Handle drag during autonomous phases (KP+KD velocity-following). Active when `cfg.BLENDING=False` (default). |
-| Shared-autonomy TWIST BLENDING mode | 🔧 New (2026-07-03), untested on real hardware | `cfg.BLENDING=True` (§11.5): `main_shared_autonomy.py` becomes the sole persistent publisher of `/arm_*/cartesian_reference`, integrating `v_blend=(1-alpha)*v_user+alpha*pi_policy` every tick; `teleop_triago_clutch.py` redirects to `/arm_*/user_cartesian_reference`; `haptic_force_manager_blending_tutorial.py` renders ONLY F_sync (tethered to the pure user pose) + a new "Authority Share" plot sourced from `/shared_autonomy/blend_debug`. Usability pass (§11.6): `ALPHA_MAX` 0.80→0.60 (user floor 20%→40%), smooth distance-based proximity boost so the task can be concluded near the goal (capped `ALPHA_PROXIMITY_CAP=0.90`), new `/blended_reference_marker` RViz gripper (light-blue, literal QP-bound pose) shown alongside the existing pure-user-intent `/guidance_policy_marker` for A/B comparison. User-effort gating (§11.7, first trial values): `compute_alpha` scales alpha down by how briskly the user is moving the handle (`ALPHA_EFFORT_THRESHOLD=0.4 m/s`, `ALPHA_EFFORT_OVERRIDE=0.5`), fixing the "arm blind to user twist" report — no QP Lagrangian/shadow-price feedback involved. |
+| Shared-autonomy TWIST BLENDING mode | 🔧 New (2026-07-03), untested on real hardware | `cfg.BLENDING=True` (§11.5): `main_shared_autonomy.py` becomes the sole persistent publisher of `/arm_*/cartesian_reference`, integrating `v_blend=(1-alpha)*v_user+alpha*pi_policy` every tick; `teleop_triago_clutch.py` redirects to `/arm_*/user_cartesian_reference`; `haptic_force_manager_blending_tutorial.py` renders ONLY F_sync (tethered to the pure user pose) + a new "Authority Share" plot sourced from `/shared_autonomy/blend_debug`. Usability pass (§11.6): `ALPHA_MAX` 0.80→0.60 (user floor 20%→40%), smooth distance-based proximity boost so the task can be concluded near the goal (capped `ALPHA_PROXIMITY_CAP=0.90`), new `/blended_reference_marker` RViz gripper (light-blue, literal QP-bound pose) shown alongside the existing pure-user-intent `/guidance_policy_marker` for A/B comparison. User-effort gating (§11.7, first trial values): `compute_alpha` scales alpha down by how briskly the user is moving the handle (`ALPHA_EFFORT_THRESHOLD=0.4 m/s`, `ALPHA_EFFORT_OVERRIDE=0.5`), fixing the "arm blind to user twist" report — no QP Lagrangian/shadow-price feedback involved. Position-divergence override + bounded reference catch-up (§11.8, untested first trial): a SUSTAINED alpha override (`ALPHA_DIVERGENCE_OVERRIDE=0.6`) plus a new capped P-pull (`compute_reference_catchup`, `V_CATCHUP_MAX_LIN=0.06 m/s`) toward the user's held reference pose, fixing "robot doesn't follow through once the hand stops moving / user fights F_sync". |
 | Head control (visual servoing) | 🔧 Active dev | `qp_head_visual_servo.py`: QP-based hand-tracking, independent loop. Starting point — no image processing yet. |
 | Head cylinder perception (`main_head.py`) | ✅ Improved (2026-07-02, §5.10) | Rim-extraction + Hyper circle fit (removed a ~-4 to -5mm disk-interior bias in the radius fit), top-slice-median height (removed a `z_max` high-bias), 3mm voxel leaf (was 10mm — too coarse vs. a 2cm cylinder radius), closer/verified-reachable `HEAD_POSTURE_TARGET`, distortion-correctness gap closed in `camera_interface.py`, tracker fusion switched grow-only→EMA. Verified numerically (not on real hardware) to land single-view/scanned radius+height error at roughly -1 to -4mm, comfortably under the 1cm target. `feature/head-sweep-compute-track` reviewed, not merged (incompatible kwargs, re-enables the already-disabled point-level VoxelMap) — see §5.10 for salvageable ideas. |
 | Arm-vs-head collision avoidance | ✅ Working | Head chain modeled as a quasi-static CBF obstacle in the ARM QP (§9.7): live FK-driven capsules (yellow in Meshcat), zero head joints added to the decision vector. `arm_right_1`/`arm_left_1` excluded from head pairs per instruction. Head's OWN separate controller/collision model (`qp_head_visual_servo.py`) is unchanged. |
