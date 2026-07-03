@@ -1132,19 +1132,31 @@ class SharedControlNode(Node):
             # reference pose and the real EE -- unlike current_v_h, this does
             # NOT decay when the user stops moving, so it captures "holding the
             # hand displaced" (the local-minimum-escape case), not just "moving
-            # fast right now".
+            # fast right now". ang_divergence (2026-07-03, orientation symmetry
+            # fix) is the SAME idea for orientation: the geodesic rotation gap
+            # between the user's held reference orientation and the real EE's --
+            # without this, a user holding their reference ROTATED away got no
+            # override at all (see compute_alpha's docstring).
             pos_divergence = float(np.linalg.norm(
                 self.current_T_user[:3, 3] - self.current_T_EE[:3, 3]))
+            R_gap = self.current_T_user[:3, :3] @ self.current_T_EE[:3, :3].T
+            trace_gap = np.trace(R_gap)
+            if trace_gap <= -1.0 + 1e-4:
+                ang_divergence = np.pi
+            else:
+                ang_divergence = float(np.linalg.norm(pin.log3(R_gap)))
 
             # pos_error (EE -> active goal, computed above from current_T_EE)
             # drives the smooth proximity boost so the assistive twist can
             # actually finish the approach near the goal. current_v_h (the raw
             # human twist) drives the user-effort gate so active hand motion
-            # takes precedence over the policy. pos_divergence drives the
-            # SUSTAINED override so holding the hand displaced also hands back
-            # authority, even once the hand stops moving (see compute_alpha).
+            # (linear OR angular) takes precedence over the policy.
+            # pos_divergence/ang_divergence drive the SUSTAINED override so
+            # holding the hand/wrist displaced also hands back authority, even
+            # once it stops moving (see compute_alpha).
             alpha = self.compute_alpha(b_max, pos_error=pos_error, v_user=self.current_v_h,
-                                       pos_divergence=pos_divergence)
+                                       pos_divergence=pos_divergence,
+                                       ang_divergence=ang_divergence)
             self.last_alpha = alpha
             # v_blend = (1-alpha)*v_user + alpha*pi_policy -- blended at the
             # TWIST level (not a one-shot pose offset), so it accumulates into
@@ -1941,7 +1953,8 @@ class SharedControlNode(Node):
         t = float(np.clip((x - lo) / (hi - lo), 0.0, 1.0))
         return t * t * (3.0 - 2.0 * t)
 
-    def compute_alpha(self, b_max, pos_error=None, v_user=None, pos_divergence=None):
+    def compute_alpha(self, b_max, pos_error=None, v_user=None, pos_divergence=None,
+                      ang_divergence=None):
         """Maps the maximum belief probability to the autonomy arbitration weight.
 
         alpha = cfg.ALPHA_MAX * x**cfg.ALPHA_GAMMA, where x is b_max normalised
@@ -1966,43 +1979,57 @@ class SharedControlNode(Node):
         than ALPHA_MAX, but still < 1.0 -- the user always retains some
         authority, even at task completion).
 
-        --- User-effort authority gating (2026-07-03) ---
+        --- User-effort authority gating (2026-07-03, orientation-symmetric) ---
         Fixes "the arm is blind to the user's own twist": pi_policy is a large,
         saturated velocity while comfortable hand motion is much smaller, so a
         fixed alpha(belief) lets the policy dominate v_blend even when the user
         is actively trying to steer. If `v_user` (the raw human twist,
-        current_v_h) is provided, its LINEAR norm gates alpha down by how hard
-        the user is actually pushing:
-            effort = clip(||v_user[:3]|| / cfg.ALPHA_EFFORT_THRESHOLD, 0, 1)
+        current_v_h) is provided, BOTH its linear AND angular norm gate alpha
+        down by how hard the user is actually pushing/twisting:
+            lin_effort = clip(||v_user[0:3]|| / cfg.ALPHA_EFFORT_THRESHOLD, 0, 1)
+            ang_effort = clip(||v_user[3:6]|| / cfg.ALPHA_EFFORT_ANG_THRESHOLD, 0, 1)
+            effort = max(lin_effort, ang_effort)
             alpha *= (1 - effort * cfg.ALPHA_EFFORT_OVERRIDE)
         Still (effort=0) -> alpha unaffected (full belief-driven assistance --
         helpful near obstacles / when intent changes, exactly where the user
-        typically ISN'T pushing hard). Fast hand motion (effort=1) -> alpha
-        scaled down by cfg.ALPHA_EFFORT_OVERRIDE, handing more of v_blend to the
-        user's own twist. This is a smooth function of the user's OWN commanded
-        twist norm ONLY -- no Lagrangian/shadow-price feedback, no force-side
-        dynamics, so no discontinuity or filtering-induced delay from the QP
-        dual variables is introduced. The effort signal itself is LPF'd
-        (cfg.ALPHA_EFFORT_LPF_COEFF, self.alpha_effort_lpf) before gating.
+        typically ISN'T pushing hard). Fast hand motion OR fast wrist rotation
+        (effort=1) -> alpha scaled down by cfg.ALPHA_EFFORT_OVERRIDE, handing
+        more of v_blend to the user's own twist. max() means EITHER channel
+        alone is sufficient -- a pure rotation with a still hand still gets full
+        authority for that rotation, matching how a pure translation already
+        does. Smooth function of the user's OWN commanded twist norm ONLY -- no
+        Lagrangian/shadow-price feedback, no force-side dynamics, so no
+        discontinuity or filtering-induced delay from the QP dual variables is
+        introduced. The effort signal itself is LPF'd (cfg.ALPHA_EFFORT_LPF_COEFF,
+        self.alpha_effort_lpf) before gating.
 
-        --- Position-divergence authority override (2026-07-03) ---
+        --- Position/orientation-divergence authority override (2026-07-03) ---
         The velocity-effort gate above relaxes the instant the user decelerates
         -- but a user HOLDING their hand displaced from the EE (not moving,
         just stationary-but-elsewhere) is exactly the "stuck in a local minimum,
         trying to break out via reference position" case the operator described.
-        If `pos_divergence` (||current_T_user.pos - current_T_EE.pos||, meters)
-        is provided, a SUSTAINED (non-decaying-with-velocity) smoothstep gate
-        further scales alpha down:
-            div_effort = smoothstep(pos_divergence, ALPHA_DIVERGENCE_NEAR, ALPHA_DIVERGENCE_FAR)
+        SAME logic applies to orientation: a user holding their reference
+        ROTATED away from the gripper (at the same position) needs the same
+        sustained override, or the policy's angular twist dominates unopposed.
+        If `pos_divergence` and/or `ang_divergence` (meters / radians) are
+        provided, SUSTAINED (non-decaying-with-velocity) smoothstep gates
+        further scale alpha down:
+            pos_div_t = smoothstep(pos_divergence, ALPHA_DIVERGENCE_NEAR, ALPHA_DIVERGENCE_FAR)
+            ang_div_t = smoothstep(ang_divergence, ALPHA_DIVERGENCE_ANG_NEAR, ALPHA_DIVERGENCE_ANG_FAR)
+            div_effort = max(pos_div_t, ang_div_t)
             alpha *= (1 - div_effort * cfg.ALPHA_DIVERGENCE_OVERRIDE)
         LPF'd independently (cfg.ALPHA_DIVERGENCE_LPF_COEFF, self.alpha_divergence_lpf).
         This is the DOMINANT override (cfg.ALPHA_DIVERGENCE_OVERRIDE=0.6, higher
         than the velocity gate's 0.5) since it is meant to persist as long as the
-        user is holding their hand away, not just while it's in motion.
+        user is holding their hand/wrist away, not just while it's in motion.
 
         The final result is LOW-PASS FILTERED (cfg.ALPHA_LPF_COEFF) via
         self.alpha_lpf so alpha never jumps discontinuously between ticks, even
         if belief, proximity, effort, or divergence shift abruptly.
+
+        Per operator instruction, cfg.TASK_WEIGHTS_6D (the CLF's own
+        position:orientation cost ratio) is intentionally NOT touched by any of
+        this -- all of the above operates purely at the alpha/blend level.
         """
         active_goals = [k for k in self.target_keys
                         if k not in self.belief_estimator.get_excluded_goals()]
@@ -2028,15 +2055,24 @@ class SharedControlNode(Node):
             alpha_raw = min(alpha_raw * gain, cfg.ALPHA_PROXIMITY_CAP)
 
         if v_user is not None:
-            v_user_lin_norm = float(np.linalg.norm(np.asarray(v_user)[0:3]))
-            effort_raw = float(np.clip(v_user_lin_norm / cfg.ALPHA_EFFORT_THRESHOLD, 0.0, 1.0))
+            v_arr = np.asarray(v_user)
+            v_user_lin_norm = float(np.linalg.norm(v_arr[0:3]))
+            v_user_ang_norm = float(np.linalg.norm(v_arr[3:6]))
+            lin_effort = float(np.clip(v_user_lin_norm / cfg.ALPHA_EFFORT_THRESHOLD, 0.0, 1.0))
+            ang_effort = float(np.clip(v_user_ang_norm / cfg.ALPHA_EFFORT_ANG_THRESHOLD, 0.0, 1.0))
+            effort_raw = max(lin_effort, ang_effort)
             self.alpha_effort_lpf = ((cfg.ALPHA_EFFORT_LPF_COEFF * effort_raw)
                                      + (1.0 - cfg.ALPHA_EFFORT_LPF_COEFF) * self.alpha_effort_lpf)
             alpha_raw *= (1.0 - self.alpha_effort_lpf * cfg.ALPHA_EFFORT_OVERRIDE)
 
-        if pos_divergence is not None:
-            div_raw = self._smoothstep(float(pos_divergence),
-                                       cfg.ALPHA_DIVERGENCE_NEAR, cfg.ALPHA_DIVERGENCE_FAR)
+        if pos_divergence is not None or ang_divergence is not None:
+            pos_div_t = (self._smoothstep(float(pos_divergence),
+                                          cfg.ALPHA_DIVERGENCE_NEAR, cfg.ALPHA_DIVERGENCE_FAR)
+                        if pos_divergence is not None else 0.0)
+            ang_div_t = (self._smoothstep(float(ang_divergence),
+                                          cfg.ALPHA_DIVERGENCE_ANG_NEAR, cfg.ALPHA_DIVERGENCE_ANG_FAR)
+                        if ang_divergence is not None else 0.0)
+            div_raw = max(pos_div_t, ang_div_t)
             self.alpha_divergence_lpf = ((cfg.ALPHA_DIVERGENCE_LPF_COEFF * div_raw)
                                          + (1.0 - cfg.ALPHA_DIVERGENCE_LPF_COEFF) * self.alpha_divergence_lpf)
             alpha_raw *= (1.0 - self.alpha_divergence_lpf * cfg.ALPHA_DIVERGENCE_OVERRIDE)

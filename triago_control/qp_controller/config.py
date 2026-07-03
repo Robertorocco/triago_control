@@ -99,8 +99,21 @@ ALPHA_PROXIMITY_CAP = 0.90       # hard ceiling on the BOOSTED alpha (user retai
 # where the user naturally isn't pushing). When the user is moving briskly,
 # alpha drops -- their own effort takes precedence.
 #
-#   effort = clip(||v_user|| / ALPHA_EFFORT_THRESHOLD, 0, 1)
+#   lin_effort = clip(||v_user_lin|| / ALPHA_EFFORT_THRESHOLD, 0, 1)
+#   ang_effort = clip(||v_user_ang|| / ALPHA_EFFORT_ANG_THRESHOLD, 0, 1)
+#   effort = max(lin_effort, ang_effort)
 #   alpha_effective = alpha_belief * (1 - effort * ALPHA_EFFORT_OVERRIDE)
+#
+# ORIENTATION SYMMETRY FIX (2026-07-03): the first version of this gate only
+# read ||v_user[0:3]|| (linear), so spinning the handle produced ZERO effort
+# and alpha never backed off for pure rotation -- the operator reported the
+# gripper orientation stayed almost frozen while position was clearly
+# steerable. ang_effort (from v_user[3:6]) now participates via max() with
+# lin_effort, so EITHER a fast hand OR a fast wrist rotation hands the user
+# authority, exactly mirroring how position is already treated. Per operator
+# instruction, TASK_WEIGHTS_6D (the CLF's own position:orientation cost ratio)
+# is intentionally NOT touched -- this fix operates purely at the alpha/blend
+# level, upstream of the CLF.
 #
 # Deliberately NOT implemented on the force/haptic side (no Lagrangian
 # multipliers, no discontinuous/filtered shadow-price feedback) -- this is a
@@ -108,6 +121,14 @@ ALPHA_PROXIMITY_CAP = 0.90       # hard ceiling on the BOOSTED alpha (user retai
 # and independent of any QP dual variable.
 ALPHA_EFFORT_THRESHOLD = 0.4    # m/s -- user linear twist norm considered "fast hand
                                  #   movement"; effort saturates to 1.0 at/above this
+ALPHA_EFFORT_ANG_THRESHOLD = 1.0  # rad/s -- user ANGULAR twist norm considered "fast wrist
+                                 #   rotation" (2026-07-03, orientation symmetry fix). Scaled
+                                 #   the same way as the linear threshold: 10x the comfortable
+                                 #   teleop rate (w_max_ang_user=0.10 rad/s in main_shared_
+                                 #   autonomy.py), mirroring how ALPHA_EFFORT_THRESHOLD=0.4 is
+                                 #   10x the comfortable LINEAR rate (v_max_lin_user=0.04 m/s).
+                                 #   effort = max(lin_effort, ang_effort) -- either a fast hand
+                                 #   OR a fast wrist twist hands the user authority.
 ALPHA_EFFORT_OVERRIDE = 0.5     # fraction of alpha_belief displaced by full user effort.
                                  #   0.5: at max effort, alpha is halved -- the rest of
                                  #   the reduction in autonomy "following" already comes
@@ -134,10 +155,19 @@ ALPHA_EFFORT_LPF_COEFF = 0.15    # low-pass filter on the effort signal (smooths
 # lag-inducing filtering):
 #
 # 1. DIVERGENCE ALPHA OVERRIDE (same shape as the velocity-effort gate, but
-#    driven by SUSTAINED position gap instead of instantaneous twist -- does
-#    NOT decay when the user stops moving):
-#      div_effort = smoothstep(||pos_user - pos_EE||, NEAR, FAR)
+#    driven by SUSTAINED position/orientation gap instead of instantaneous
+#    twist -- does NOT decay when the user stops moving):
+#      pos_div_t = smoothstep(||pos_user - pos_EE||, ALPHA_DIVERGENCE_NEAR, FAR)
+#      ang_div_t = smoothstep(||log3(R_user @ R_EE^T)||, ALPHA_DIVERGENCE_ANG_NEAR, ANG_FAR)
+#      div_effort = max(pos_div_t, ang_div_t)
 #      alpha *= (1 - div_effort * ALPHA_DIVERGENCE_OVERRIDE)
+#    ORIENTATION SYMMETRY FIX (2026-07-03): the first version only read the
+#    position gap, so a user holding their reference ROTATED away from the
+#    gripper (but at the same position) got zero override -- alpha stayed
+#    belief-driven and the policy's angular twist dominated v_blend
+#    unopposed, which is why orientation looked "almost frozen" while
+#    position was clearly steerable. ang_div_t (via max()) now closes this
+#    gap exactly the way pos_div_t already does for position.
 #
 # 2. BOUNDED REFERENCE CATCH-UP (the actual fix for "robot doesn't follow
 #    through to where the hand is held"): a gentle, CAPPED P-control pull
@@ -149,9 +179,18 @@ ALPHA_EFFORT_LPF_COEFF = 0.15    # low-pass filter on the effort signal (smooths
 #    can't be forced through.
 ALPHA_DIVERGENCE_NEAR = 0.05      # m -- no override below this position gap
 ALPHA_DIVERGENCE_FAR = 0.20       # m -- full override at/beyond this position gap
-ALPHA_DIVERGENCE_OVERRIDE = 0.6   # fraction of alpha displaced at full divergence
-                                  #   (stronger than ALPHA_EFFORT_OVERRIDE=0.5: this is
-                                  #   meant to be the DOMINANT, sustained signal)
+ALPHA_DIVERGENCE_ANG_NEAR = 0.15  # rad (~8.6 deg) -- no override below this orientation gap
+                                  #   (2026-07-03, orientation symmetry fix: mirrors the SAME
+                                  #   ratio as the linear NEAR/FAR pair -- see below)
+ALPHA_DIVERGENCE_ANG_FAR = 0.60   # rad (~34 deg) -- full override at/beyond this orientation
+                                  #   gap. Chosen to match CATCHUP_DEADBAND_ANG/CATCHUP_FULL_ANG
+                                  #   exactly (same physical gap triggers both the alpha override
+                                  #   AND the catch-up pull, so the two mechanisms agree on what
+                                  #   counts as "the user has rotated the reference away").
+ALPHA_DIVERGENCE_OVERRIDE = 0.6   # fraction of alpha displaced at full divergence (position
+                                  #   OR orientation -- whichever is more diverged, see
+                                  #   compute_alpha). Stronger than ALPHA_EFFORT_OVERRIDE=0.5:
+                                  #   this is meant to be the DOMINANT, sustained signal.
 ALPHA_DIVERGENCE_LPF_COEFF = 0.15  # LPF on the divergence-override signal (independent
                                   #   of ALPHA_LPF_COEFF / ALPHA_EFFORT_LPF_COEFF)
 

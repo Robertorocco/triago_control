@@ -1,7 +1,28 @@
 # AI Agent Context — triago_control
 
 > **This file is maintained by the AI agent. Do not edit manually.**
-> Last updated: 2026-07-03 (RRT-Connect abandoned: an RRT-Connect joint-space
+> Last updated: 2026-07-03 (§11.9 NEW: orientation symmetry fix for the
+> authority gates. Operator report: orientation stayed "almost frozen" in
+> BLENDING mode even while position clearly responded to user steering, and
+> the plotted `ALPHA_MAX` line looked "deprecated" since alpha visibly
+> exceeded it near a goal. Root cause of the orientation issue: BOTH the
+> user-effort gate (§11.7) and the position-divergence override (§11.8) read
+> ONLY linear/position quantities (`v_user[0:3]`, `||pos_user - pos_EE||`) --
+> spinning the handle or holding the reference rotated away produced ZERO
+> effort/divergence signal, so alpha stayed belief-driven and the policy's
+> angular twist dominated `v_blend` completely unopposed. Fix: `compute_alpha`
+> now also reads `v_user[3:6]` (angular effort, gated by new
+> `cfg.ALPHA_EFFORT_ANG_THRESHOLD=1.0 rad/s`) and a new `ang_divergence`
+> parameter (geodesic rotation gap via `pin.log3`, gated by new
+> `cfg.ALPHA_DIVERGENCE_ANG_NEAR/FAR=0.15/0.60 rad`, matching the existing
+> catch-up deadband exactly) -- each combined with its linear counterpart via
+> `max()`, so EITHER channel alone hands the user authority, mirroring how
+> position already worked. Per explicit operator instruction,
+> `cfg.TASK_WEIGHTS_6D` (the CLF's own position:orientation cost ratio) was
+> NOT touched -- this fix operates purely at the alpha/blend level. Also
+> fixed the plotted alpha ceiling line, which showed the stale `ALPHA_MAX`
+> instead of the true near-goal ceiling `ALPHA_PROXIMITY_CAP`. See §11.9.)
+> Earlier: 2026-07-03 (RRT-Connect abandoned: an RRT-Connect joint-space
 > planner was attempted (2026-07-01 -- 2026-07-03) as a fallback local-minima-
 > escape strategy alongside the existing posture-weight correction. The
 > approach was ultimately unsuccessful and has been fully removed from the
@@ -1785,6 +1806,91 @@ construction, not independently tuned. `F_sync`'s own gains were NOT touched
 
 **First trial — untested, pending operator feedback**: all listed constants
 are first-pass values, not yet validated hands-on. Expect follow-up tuning.
+
+### 11.9 Orientation symmetry fix for the authority gates (2026-07-03)
+
+Follow-up on §11.7/§11.8. Operator feedback after testing position-divergence
++ catch-up: overall the strategy felt close to satisfying, EXCEPT orientation
+was almost completely ignored -- twisting the handle barely rotated the
+gripper, and even the light-blue guidance gripper in RViz stayed nearly fixed
+in orientation while its position was clearly pulled toward the user. Also
+flagged: the plotted `ALPHA_MAX` line looked stale/wrong since `alpha`
+visibly climbed above it near a goal.
+
+**Root cause -- both authority gates were position/linear-only by
+construction, not by any deliberate choice to exclude orientation:**
+```python
+# §11.7 effort gate (BEFORE):
+v_user_lin_norm = ||v_user[0:3]||              # only ever reads LINEAR velocity
+# §11.8 divergence override (BEFORE):
+pos_divergence = ||pos_user - pos_EE||         # only ever reads POSITION gap
+```
+Neither gate ever inspected `v_user[3:6]` (the user's angular twist) or the
+rotation gap between `current_T_user` and `current_T_EE`. So no matter how
+hard the user turned the handle, or how far their reference orientation
+drifted from the gripper's, `alpha` stayed exactly wherever belief put it --
+`pi_policy`'s angular twist dominated the blend completely unopposed. This is
+the exact same architectural gap already fixed for position in §11.7/§11.8,
+simply never extended to the angular half of the twist.
+
+**Fix -- extend both gates to also read orientation, combined via `max()`
+with their existing linear/position counterpart (so EITHER channel alone
+is sufficient to hand the user authority):**
+
+```python
+# Effort gate (compute_alpha, v_user param):
+lin_effort = clip(||v_user[0:3]|| / ALPHA_EFFORT_THRESHOLD, 0, 1)          # unchanged
+ang_effort = clip(||v_user[3:6]|| / ALPHA_EFFORT_ANG_THRESHOLD, 0, 1)      # NEW
+effort = max(lin_effort, ang_effort)
+alpha *= (1 - effort * ALPHA_EFFORT_OVERRIDE)
+
+# Divergence override (compute_alpha, new ang_divergence param):
+pos_div_t = smoothstep(pos_divergence, ALPHA_DIVERGENCE_NEAR, ALPHA_DIVERGENCE_FAR)       # unchanged
+ang_div_t = smoothstep(ang_divergence, ALPHA_DIVERGENCE_ANG_NEAR, ALPHA_DIVERGENCE_ANG_FAR)  # NEW
+div_effort = max(pos_div_t, ang_div_t)
+alpha *= (1 - div_effort * ALPHA_DIVERGENCE_OVERRIDE)
+```
+
+`ang_divergence` is computed at the call site (`timer_callback`) as the
+geodesic rotation gap between the user's held reference orientation and the
+real EE's, via the same `pin.log3` / near-π-singularity guard pattern already
+used elsewhere in this file (e.g. `_arm_task_error`):
+```python
+R_gap = current_T_user[:3,:3] @ current_T_EE[:3,:3].T
+ang_divergence = pi if trace(R_gap) <= -1+eps else ||pin.log3(R_gap)||
+```
+
+**New config constants** (`config.py`):
+- `ALPHA_EFFORT_ANG_THRESHOLD = 1.0 rad/s` -- scaled the same way as the
+  existing linear threshold (`ALPHA_EFFORT_THRESHOLD=0.4 m/s` is ~10x the
+  comfortable teleop rate `v_max_lin_user=0.04 m/s`; `1.0 rad/s` is ~10x
+  `w_max_ang_user=0.10 rad/s`).
+- `ALPHA_DIVERGENCE_ANG_NEAR = 0.15 rad` / `ALPHA_DIVERGENCE_ANG_FAR = 0.60 rad`
+  -- deliberately set equal to `CATCHUP_DEADBAND_ANG` / `CATCHUP_FULL_ANG`
+  (§11.8), so the SAME physical rotation gap triggers both the alpha override
+  and the reference catch-up's angular pull -- the two mechanisms now agree on
+  what counts as "the user has rotated the reference away."
+
+**Explicitly NOT touched, per operator instruction**: `cfg.TASK_WEIGHTS_6D`
+(the CLF's own position:orientation cost ratio, `[1,1,1,0.04,0.04,0.04]*10`)
+was left exactly as-is. This fix operates entirely upstream of the CLF, at
+the alpha/blend-weight level -- it changes how much authority the USER's
+orientation gets in the blended twist, not how the QP itself weighs
+orientation error once that twist is handed to it.
+
+**Plot fix** (`haptic_force_manager_blending_tutorial.py`, Window 3): the
+"Blending Factor alpha" subplot's dashed ceiling line was `cfg.ALPHA_MAX`
+(the away-from-goal ceiling only), but `alpha` can legitimately exceed it
+near a goal via the §11.6 proximity boost, whose true ceiling is
+`cfg.ALPHA_PROXIMITY_CAP=0.90`. This looked like a bug ("the line is
+deprecated") but was actually the boost working as designed. Both lines are
+now drawn (orange dashed = `ALPHA_MAX`, red dotted = `ALPHA_PROXIMITY_CAP`)
+so the operator can see which regime `alpha` is currently in.
+
+**First trial -- untested, pending operator feedback**: `ALPHA_EFFORT_ANG_
+THRESHOLD` and `ALPHA_DIVERGENCE_ANG_NEAR/FAR` are first-pass values (chosen
+by direct analogy to the existing linear constants and the catch-up
+deadband), not yet validated hands-on.
 
 ---
 
