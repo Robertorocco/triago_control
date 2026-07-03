@@ -1,7 +1,24 @@
 # AI Agent Context — triago_control
 
 > **This file is maintained by the AI agent. Do not edit manually.**
-> Last updated: 2026-07-02 (§9.10: RRT-Connect planner fixed — the always-fail
+> Last updated: 2026-07-02 (§5.10: head cylinder-perception accuracy pass —
+> found and fixed the dominant error source in `main_head.py`'s geometric
+> pipeline: the circle fit ran on the disk INTERIOR, not just the boundary,
+> systematically biasing the radius small by ~-4 to -5mm; no amount of
+> scanning could fix that. Added rim extraction + a Hyper circle fit, a
+> top-slice-median height estimate (was a biased-high `z_max`), shrank
+> `VOXEL_SIZE` 10mm->3mm (was destroying the rim-fit gain), moved
+> `HEAD_POSTURE_TARGET` closer to the table (FK-verified reachable, ~40%
+> depth-noise-variance reduction), closed a distortion-correctness gap in
+> `camera_interface.py`, and switched `ObjectTracker`'s dimension fusion from
+> grow-only-max to EMA (grow-only was quietly compensating for the
+> since-fixed bias; on an unbiased signal it just drifts upward). All
+> verified numerically against the real project code with synthetic,
+> realistic-noise point clouds — no access to the real robot/Gazebo in this
+> session. Reviewed `feature/head-sweep-compute-track`, did not merge it —
+> incompatible with the current pipeline interface and re-enables a
+> point-level accumulation approach `main` already tried and disabled.)
+> Earlier: 2026-07-02 (§9.10: RRT-Connect planner fixed — the always-fail
 > `samples=0` goal finder (uniform random rejection sampling, which cannot hit a
 > 3cm Cartesian ball in 7D) was replaced with damped least-squares position IK
 > (`_find_goal_config_ik`, random restarts on collision/stall); the per-tick
@@ -428,6 +445,111 @@ ros2 run triago_control qp_head_visual_servo.py
 ### 5.9 Current Limitations & Future Work
 
 - **No actual image processing yet**: hand positions are computed via Pinocchio FK, not from camera images. This is the "starting point" — future work will add detection/tracking from the RGB stream.
+
+### 5.10 Cylinder-perception accuracy pass (2026-07-02) — `main_head.py` / `head_control/*`
+
+Context: the user reported the cylinder pose/radius estimate from
+`main_head.py`'s geometric pipeline (RANSAC plane -> cluster -> upright-
+cylinder fit) had a few-cm error and asked to diagnose and push it under
+1cm, since the eventual goal is feeding this into the arm QP-CLF-CBF as a
+live obstacle. All fixes below were verified NUMERICALLY (synthetic point
+clouds with realistic ~3mm RealSense-like depth noise, run against the
+ACTUAL project code, not just a standalone re-implementation) before being
+applied — see the session's tool history for the raw sweep numbers. No
+access to the real robot/Gazebo was available in this environment.
+
+**Root cause identified (the dominant one, ~-4 to -5mm of the reported
+error): the circle fit ran on the wrong point set.** A cylinder viewed
+top-down is not just a ring — the camera also sees the entire SOLID TOP
+FACE (a filled disk). Fitting any algebraic circle (Kasa or otherwise)
+directly to a disk-interior + partial-arc cluster is systematically biased
+toward a SMALLER radius (disk interior points outnumber and sit closer to
+centre than the true boundary). Critically, **more scan viewpoints do NOT
+fix this** — they just re-confirm the same biased fit with more points,
+which is why the existing `ENABLE_SCAN` sweep wasn't closing the gap.
+
+**Fixes applied, all in `triago_control/head_control/`:**
+
+1. **Rim extraction before fitting** (`object_detector.py`,
+   `_extract_rim`): bins the cluster by angle about a rough centroid and
+   keeps, per bin, points near the LOCAL 93rd-percentile radius (a
+   percentile, not the raw max — verified more robust to RGB-D "flying
+   pixel" outliers). Collapses the disk interior away, leaving an
+   approximately uniform ring for the circle fit.
+2. **Kasa -> Hyper circle fit** (`_fit_circle_hyper`, Al-Sharadqah &
+   Chernov's algebraic fit; Kasa kept as a fallback for degenerate rims):
+   removes Kasa's own small residual bias on top of the rim fix.
+3. **Height: top-slice MEDIAN, not `z_max`** — `z_max` is a maximum-
+   statistic, systematically biased HIGH under noise (verified: +7 to
+   +9mm at realistic point counts/noise). Median of the top slice
+   (`CYL_TOP_SLICE`) removes almost all of this.
+4. **`VOXEL_SIZE` 10mm -> 3mm** (`config.py`): the old 10mm downsample leaf
+   was roughly HALF the cylinder's diameter (r=2cm) and was destroying
+   most of the rim-extraction gain by pre-collapsing near-boundary points
+   before the rim fit ever saw them (verified: 10mm leaf -> end-to-end
+   bias ~-3.4mm; 3mm leaf -> ~-1.4mm, matching the un-downsampled case).
+5. **Distortion correctness gap closed** (`camera_interface.py`):
+   `CameraInfo.d` was received and silently discarded — deprojection never
+   checked or corrected for it. RealSense depth streams are typically
+   firmware-rectified (`D=[0]*5`, confirmed from vendor docs), so this was
+   likely NOT the dominant error source for the actual hardware, but it
+   was a real correctness gap (would silently mishandle any camera/config
+   with non-zero `D`, e.g. the COLOR stream). Now applies iterative
+   Brown-Conrady undistortion (5 fixed-point iterations, verified to
+   converge to machine precision) whenever `D` is non-negligible, with a
+   one-time warning log.
+6. **`HEAD_POSTURE_TARGET` moved closer** (`config.py`): searched via
+   Pinocchio FK against the real URDF for a reachable pose with similar
+   "character" (elevation angle, joint-limit margins) to the previous
+   target but closer to the table — 0.81m -> 0.63m camera-to-table-centre
+   distance (kept a safety margin above the RealSense D455's rated 0.4m
+   minimum depth range). Stereo depth noise scales roughly with
+   distance^2, so this is a free ~40% reduction in depth-noise variance.
+   Also raised `DEPTH_MIN` 0.20 -> 0.35m to reject near-range returns
+   below the sensor's rated floor.
+7. **`ObjectTracker` fusion policy: grow-only-max -> EMA**
+   (`object_tracker.py`): the old grow-only rule ("radius/height can only
+   ever increase") was a reasonable patch for a per-frame estimator KNOWN
+   to be biased small — it isn't anymore. Grow-only on an unbiased signal
+   drifts upward over many frames (verified: +0.5 to +0.9mm after just
+   5-50 frames, then keeps climbing). Switched to the same EMA already
+   used for position (`TRACK_POS_ALPHA`); `TRACK_DIM_DECAY` removed as
+   dead config.
+8. **`ENABLE_SCAN` kept True but re-justified**: no longer needed to fix
+   bias (a single rim-corrected view is already sub-cm in simulation), but
+   still legitimately useful for closing angular COVERAGE gaps (self-
+   occlusion on the far side of the cylinder from any single viewpoint).
+   Safe to disable if startup latency matters more than full-circumference
+   arc coverage.
+
+**Verified end-to-end result** (real project code, synthetic ~3mm-noise
+point clouds, r=2cm/h=15cm cylinder, matching the Gazebo world's ground
+truth): single-view radius bias improved from roughly -4 to -5mm (baseline)
+to about -1.3 to -2.5mm depending on the visible arc width; after a 5-
+waypoint scan through the real `ObjectTracker` EMA fusion, radius bias
+settled around -2 to -4mm and height bias to roughly ±1mm — comfortably
+under the 1cm target requested, though not yet at the sub-millimetre level
+the isolated rim-fit unit test showed (the gap is the realistic combination
+of voxel downsampling + Euclidean clustering + the arc width actually
+visible per waypoint; further gains would require either a wider per-view
+arc, more waypoints, or an even finer voxel leaf, each with a cost/latency
+trade this pass did not take).
+
+**`feature/head-sweep-compute-track` branch reviewed but not merged**: adds
+a SWEEP -> COMPUTE -> TRACK state machine (dense one-shot detection at fixed
+waypoints, then live-tracking a single target colour while freezing the
+rest as CBF obstacles) plus a multi-threaded executor so perception can't
+stall the control loop. Not directly usable as-is — it was written against
+`dynamic_plane`/`target_only`/`radius_bounds` kwargs on
+`perception_pipeline.py`/`object_detector.py` that don't exist on `main`,
+and it re-enables raw point-level `VoxelMap` accumulation, which `main`
+already tried and explicitly disabled (smears/breaks plane RANSAC — see
+§5b in `config.py`). Two ideas from it are worth revisiting later once
+there's a concrete need: (a) separate control/perception ROS callback
+groups/threads (a real robustness improvement, independent of accuracy),
+and (b) freezing a one-shot dense obstacle model while live-tracking only
+the actively-manipulated target, now that the underlying single-frame
+estimator is actually trustworthy.
 - **Collision CBF not wired**: the hppfcl collision model is built but distance constraints are not yet formulated as QP inequalities.
 - **No shared config file**: gains are hard-coded in-script (unlike the arm QP which uses `config.py`). Will be refactored as the module matures.
 - **Loop rate**: currently event-driven (`spin_once` + `solve_and_publish` per iteration). Future: dedicated timer at a fixed frequency.
@@ -1256,6 +1378,7 @@ visible, so at most one frame is dropped.
 | RViz visualization | ✅ Working | Light-green=EE robot policy (own topic `/robot_policy_marker`), Light-blue=reference guidance (own topic `/guidance_policy_marker`). Commanded gripper is now PER-ARM (2026-07-01, §9.4): each arm independently Blue=actively tracking / Grey=frozen (`right_frozen`/`left_frozen` ground truth via `/qp_debug/arm_frozen`) — both render blue simultaneously under `trajectory_generator.py` or dual teleop, exactly one blue+one grey in single-arm teleop. Belief-opacity goal grippers + grasp-ready cue on `/shared_policy_markers`. Grasp-guidance move/rotate arrows REMOVED (cluttered the view). Periodic DELETEALL sweep every 3s on all 3 marker topics (self-heals stuck/ghost markers). Dual belief subplot (active colored, inactive greyscale). Task-authority soft-cost plot (`/qp_debug/task_authority`). Plotter dashboard also has a NEW "Joint Positions" slider-panel GUI window (§9.5, real Pinocchio joint limits) and per-arm "Slack Weight" (R/L) traces. |
 | Haption teleoperation | ✅ Working | `teleop_triago_clutch.py` + `haptic_force_manager_tutorial.py`. Force layers: F_guide (velocity-field, v_max_user 0.04/0.10) + F_fixture (position spring near goal). Handle drag during autonomous phases (KP+KD velocity-following). |
 | Head control (visual servoing) | 🔧 Active dev | `qp_head_visual_servo.py`: QP-based hand-tracking, independent loop. Starting point — no image processing yet. |
+| Head cylinder perception (`main_head.py`) | ✅ Improved (2026-07-02, §5.10) | Rim-extraction + Hyper circle fit (removed a ~-4 to -5mm disk-interior bias in the radius fit), top-slice-median height (removed a `z_max` high-bias), 3mm voxel leaf (was 10mm — too coarse vs. a 2cm cylinder radius), closer/verified-reachable `HEAD_POSTURE_TARGET`, distortion-correctness gap closed in `camera_interface.py`, tracker fusion switched grow-only→EMA. Verified numerically (not on real hardware) to land single-view/scanned radius+height error at roughly -1 to -4mm, comfortably under the 1cm target. `feature/head-sweep-compute-track` reviewed, not merged (incompatible kwargs, re-enables the already-disabled point-level VoxelMap) — see §5.10 for salvageable ideas. |
 | Arm-vs-head collision avoidance | ✅ Working | Head chain modeled as a quasi-static CBF obstacle in the ARM QP (§9.7): live FK-driven capsules (yellow in Meshcat), zero head joints added to the decision vector. `arm_right_1`/`arm_left_1` excluded from head pairs per instruction. Head's OWN separate controller/collision model (`qp_head_visual_servo.py`) is unchanged. |
 | Mobile base integration | 🔧 Partial | `base_controller.py` exists but not QP-certified |
 | Meshcat visualization | ✅ Working | Thread-safe, auto-reloads on grasp coloring |

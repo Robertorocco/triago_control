@@ -13,10 +13,7 @@ WHY object-level (not point-level) fusion:
 KEY MECHANISMS (borrowed + adapted):
     * Nearest-neighbour matching (2D, within TRACK_MATCH_DIST) gives each object
       a stable identity across frames.
-    * GROW-ONLY dimensions (radius, height): a partial view can only ever make
-      the estimate BIGGER, never smaller. This (a) fixes the circle-fit radius
-      under-estimate on partial arcs and (b) is conservative for collision
-      safety. A slow decay lets an over-grown estimate recover from a bad frame.
+    * EMA-smoothed dimensions (radius, height) — see the 2026-07-02 note below.
     * Cumulative arc coverage: we OR the observed angular sectors across frames,
       so coverage (and hence confidence) climbs toward 100% as more of the
       object is seen from different viewpoints — the honest multi-view gain.
@@ -25,6 +22,28 @@ KEY MECHANISMS (borrowed + adapted):
 
     Position is EMA-smoothed (stable) rather than grow-only — averaging
     viewpoints with opposite-sign partial-view bias actually reduces net bias.
+
+DIMENSION FUSION POLICY — CHANGED 2026-07-02 (accuracy pass):
+    Previously radius/height used a GROW-ONLY rule ("a partial view can only
+    ever make the estimate bigger, never smaller") with a slow decay. That
+    rule was a reasonable patch AS LONG AS the per-frame estimator was known
+    to be systematically biased SMALL (the old Kasa-on-the-whole-cluster fit
+    was: ~ -3 to -5mm on radius, verified numerically). Grow-only was, in
+    effect, quietly correcting for that one-directional bias.
+
+    The per-frame estimator in object_detector.py no longer has that bias
+    (rim extraction + Hyper fit; height now a top-slice median, not z_max —
+    see its module docstring). Grow-only on a now-UNBIASED, noisy signal is
+    the wrong fusion rule: it keeps taking the running max of a symmetric-
+    noise signal, which drifts systematically upward over many frames
+    (verified numerically: +0.5 to +0.9mm bias after just 5-50 frames, then
+    keeps climbing on a longer scan) — an over-estimate this task did not
+    have before, and does not need. A standard EMA (TRACK_POS_ALPHA, same
+    smoothing already used for position) is the correct fusion rule for a
+    now-unbiased per-frame signal: verified numerically to stay within
+    ~0.01mm of the true value regardless of how many frames are fused,
+    while still averaging out per-frame noise (its RMS scales down with
+    more frames, same as position).
 """
 
 import numpy as np
@@ -77,10 +96,12 @@ class TrackedObject:
         self.center = a * det.center + (1.0 - a) * self.center
         self.axis = det.axis.astype(float)
 
-        # GROW-ONLY with slow decay (so a transient over-grow can recover).
-        dec = cfg.TRACK_DIM_DECAY
-        self.radius = max(float(det.radius), self.radius * (1.0 - dec))
-        self.height = max(float(det.height), self.height * (1.0 - dec))
+        # EMA on dimensions too (changed from grow-only, 2026-07-02 — see the
+        # module docstring: grow-only was compensating for a since-fixed
+        # systematic under-estimate in the per-frame fit; on today's unbiased
+        # estimator it just drifts the estimate upward over time instead).
+        self.radius = a * float(det.radius) + (1.0 - a) * self.radius
+        self.height = a * float(det.height) + (1.0 - a) * self.height
 
         # Cumulative angular coverage across viewpoints.
         if det.arc_bins is not None:

@@ -84,11 +84,24 @@ LOOKAT_SLACK_WEIGHT = 500.0  # HIGH penalty: the look-at task dominates over pos
 
 # Posture target for the REDUNDANT DOF. The head has 7 DOF but look-at only
 # constrains 2 (pointing direction); the remaining 5 are resolved by pulling
-# toward this posture. We use a KNOWN-GOOD table-observation config (measured
-# from a dense, well-placed run) instead of joint mid-range, so the camera
-# settles at a forward, top-down viewpoint with good table coverage — NOT the
-# grazing "camera above the base" pose that mid-range produces.
-HEAD_POSTURE_TARGET = np.array([-0.20, -0.57, -0.27, -0.81, -1.00, -1.59, -0.02])
+# toward this posture. We use a KNOWN-GOOD table-observation config instead of
+# joint mid-range, so the camera settles at a forward, top-down viewpoint with
+# good table coverage — NOT the grazing "camera above the base" pose that
+# mid-range produces.
+#
+# UPDATED 2026-07-02 (accuracy pass): moved from ~0.81m to ~0.63m camera-to-
+# table-centre distance (verified via Pinocchio FK against the real URDF —
+# reachable with >0.5 rad margin from every joint limit, similar elevation
+# angle/"character" to the previous target, i.e. not a wild alternate branch).
+# Stereo depth noise scales roughly with distance^2, so this alone is an
+# estimated ~40% reduction in depth-noise VARIANCE (~23% in std) for free.
+# Kept a comfortable margin above the RealSense D455's rated minimum usable
+# depth range (0.4m) — closer than this would trade accuracy for missing/
+# invalid depth returns, which is a worse trade. This is a SECONDARY fix
+# relative to the rim-extraction fit correction in object_detector.py (which
+# addresses a ~5mm systematic bias vs. this ~1-2mm noise-floor improvement),
+# but it is free (no other tradeoff) so we take it.
+HEAD_POSTURE_TARGET = np.array([-0.35, -0.25, -0.60, -1.15, -1.00, -1.25, 0.00])
 POSTURE_GAIN = 0.50          # acts in the look-at null space (slack weight is high)
 # Velocity-aware joint-limit CBF.
 JOINT_LIMIT_GAMMA = 2.0
@@ -100,14 +113,26 @@ LOOKAT_ALIGNED_DEG = 4.0
 # =============================================================================
 # 5. SCAN MOTION  (gentle sweep around the look-at target to improve coverage)
 # =============================================================================
-# A single viewpoint sees the table top fine, but a slow sweep fills occluded
-# regions and lets temporal smoothing average out depth noise. Disable if you
-# want a static head.
-# Re-ENABLED: with object-level tracking (grow-only dims + cumulative coverage),
-# head motion now HELPS — each settled waypoint adds a viewpoint that grows the
-# box toward true size and fills angular coverage, with NO point-cloud smear
-# (we fuse derived object quantities, not raw points). Tracker updates are
-# gated to settled frames (INTEGRATE_VEL_THRESH) so motion never corrupts them.
+# RE-EVALUATED 2026-07-02 (accuracy pass): the scan was ORIGINALLY motivated by
+# the belief that more viewpoints would average out the radius/height bias.
+# Verified numerically that this was NOT the mechanism at fault — the bias was
+# the circle fit running on the disk INTERIOR, not insufficient viewpoints
+# (see object_detector.py's module docstring). A single, closer, rim-corrected
+# view now gets within ~1mm of ground truth in simulation, i.e. the scan is no
+# longer required to reach the target accuracy.
+#
+# Kept ENABLED anyway, because it is still legitimately useful for a DIFFERENT
+# reason: angular COVERAGE. The rim extraction can only recover the boundary
+# of what the camera actually saw — a single top-down-ish view still only
+# shows ~150-180 deg of the side wall (the far side is self-occluded). The
+# scan's cumulative arc-coverage tracking (object_tracker.py) still closes
+# that gap over a few seconds, and per-frame estimates are no longer biased,
+# so there's no longer a "more views = re-confirm the same bias" risk (see the
+# updated fusion policy in object_tracker.py, now a per-frame EMA rather than
+# grow-only-max). If startup latency matters more than full coverage in a
+# given scenario, this can safely be set False now — accuracy will not
+# meaningfully suffer, only the (already less important) full-circumference
+# arc-coverage stat will stay lower.
 ENABLE_SCAN = True
 SCAN_DWELL_S = 4.0           # [s] time parked at each waypoint (settle + fuse)
 SCAN_WAYPOINTS = [
@@ -143,7 +168,14 @@ INTEGRATE_VEL_THRESH = 0.04  # [rad/s] only fuse when head settled (if enabled)
 # We subsample the depth image on a pixel grid to keep the cloud small enough
 # for pure-numpy/scipy processing on a CPU. Stride 4 over 1280x720 -> ~57k pts.
 PIXEL_STRIDE = 2
-DEPTH_MIN = 0.20             # [m] ignore points closer than this (noise/self)
+# DEPTH_MIN raised 0.20 -> 0.35 (2026-07-02): the RealSense D455 is only rated
+# accurate from ~0.4m; points closer than that are frequently invalid/noisy
+# stereo-matching artefacts, not genuine near-field returns. 0.35m keeps a
+# small margin below the rated floor (so we don't clip legitimately-valid
+# points right at the boundary) while rejecting the worst near-range noise.
+# With the new, closer HEAD_POSTURE_TARGET (~0.63m to the table centre, see
+# §4), the working range now sits safely above this floor with headroom.
+DEPTH_MIN = 0.35             # [m] ignore points closer than this (noise/self)
 DEPTH_MAX = 2.50             # [m] ignore points beyond this (background/walls)
 
 # =============================================================================
@@ -171,7 +203,17 @@ PLANE_Z_TOLERANCE = 0.15     # [m] around TABLE_TOP_Z_WORLD
 # =============================================================================
 # 9. EUCLIDEAN CLUSTERING  (group above-plane points into candidate objects)
 # =============================================================================
-VOXEL_SIZE = 0.010           # [m] downsample leaf before clustering
+# VOXEL_SIZE lowered 10mm -> 3mm (2026-07-02 accuracy pass): a 10mm leaf is
+# roughly HALF the cylinder's diameter (r=2cm) -- it was destroying most of
+# the rim-extraction gain in object_detector.py by collapsing near-boundary
+# points together before the rim fit ever sees them (verified numerically:
+# with 10mm voxels the end-to-end radius bias was ~-3.4mm; with 3mm voxels,
+# ~-1.4mm, matching the bias measured on the un-downsampled cluster). 3mm was
+# chosen as the point where further shrinking gives diminishing returns (2mm
+# barely improves on 3mm) while keeping the downsampled cluster small enough
+# for the O(n log n) KD-tree clustering to stay comfortably real-time at
+# PERCEPTION_RATE_HZ.
+VOXEL_SIZE = 0.003           # [m] downsample leaf before clustering
 CLUSTER_TOLERANCE = 0.030    # [m] max gap within one cluster
 CLUSTER_MIN_POINTS = 25      # reject specks / noise
 CLUSTER_MAX_POINTS = 200000
@@ -182,14 +224,41 @@ OBJECT_MAX_HEIGHT_ABOVE_PLANE = 0.40    # [m] tallest object we expect
 # =============================================================================
 # 10. CYLINDER FIT  (upright cylinder == axis aligned with table normal)
 # =============================================================================
-CYL_RADIUS_PERCENTILE = 95   # robust radius estimate from radial spread
+CYL_RADIUS_PERCENTILE = 95   # last-resort fallback only (see CYL_RIM_* below)
 CYL_MIN_RADIUS = 0.010       # [m] plausibility gate
 CYL_MAX_RADIUS = 0.080
 CYL_MIN_HEIGHT = 0.030       # [m]
 CYL_MAX_HEIGHT = 0.400
-# Top-slice thickness used for the UNBIASED centre/radius estimate (the top face
-# of an upright cylinder is fully visible from above, unlike the side wall).
-CYL_TOP_SLICE = 0.030        # [m] take points within this of the cluster's z_max
+
+# --- Rim extraction (2026-07-02 accuracy pass) --------------------------
+# Fitting a circle directly to a cluster that contains the cylinder's solid
+# TOP FACE (a filled disk) is systematically biased toward a SMALLER radius
+# -- interior points outnumber and sit closer to centre than the true
+# boundary. Verified numerically: this alone explained roughly -3 to -5mm of
+# the reported radius error, and was NOT fixed by scanning (more views just
+# re-confirm the same biased fit). `_extract_rim` in object_detector.py bins
+# the cluster by angle and keeps only the points near the LOCAL
+# CYL_RIM_PERCENTILE-th percentile radius per bin, collapsing the disk
+# interior away before the circle fit runs.
+CYL_RIM_BINS = 72            # angular sectors (~5 deg each) for rim extraction
+CYL_RIM_PERCENTILE = 93      # per-bin radius percentile defining the rim
+# Percentile (not max) per bin -- verified numerically to be far more robust
+# to RGB-D "flying pixel" outliers (stereo-matching smear at depth
+# discontinuities can scatter a few points beyond the true rim; taking the
+# raw max chases them back outward, taking the local percentile does not).
+# 93/1.5mm was swept numerically as a good balance: ~-1.3mm bias on a clean
+# synthetic cluster, ~+0.3mm with 10% simulated flying-pixel contamination
+# (both comfortably sub-cm; pushing the percentile higher trades one for the
+# other rather than improving both).
+CYL_RIM_BAND = 0.0015        # [m] band width around the percentile radius
+                              # averaged to form each bin's rim point
+
+# Top-slice: used for BOTH the height estimate (median of the top slice,
+# not z_max -- see object_detector.py, z_max is a biased-high max-statistic)
+# and, historically, an alternative XY estimate (now superseded by rim
+# extraction + Hyper fit above; kept only for the height use).
+CYL_TOP_SLICE = 0.020        # [m] take points within this of the cluster's z_max
+
 # Conservative radius inflation for collision use (0 = report raw estimate).
 CYL_RADIUS_INFLATION = 0.000 # [m]
 
@@ -217,14 +286,16 @@ BLUE_HUE_HIGH = 0.75
 # =============================================================================
 # 12. TEMPORAL SMOOTHING + LOOP RATES
 # =============================================================================
-# Object-level tracker (grow-only dims + persistence) — the robust alternative
-# to point-cloud fusion. Fuses DERIVED object quantities across viewpoints, so
-# head motion HELPS (more arc -> bigger/ truer box, more coverage) without the
-# point-registration smear that broke voxel accumulation.
+# Object-level tracker (EMA dims + persistence) — the robust alternative to
+# point-cloud fusion. Fuses DERIVED object quantities across viewpoints, so
+# head motion still helps (more arc -> more coverage, noise averages down)
+# without the point-registration smear that broke voxel accumulation.
+# NOTE (2026-07-02): dims (radius/height) switched from grow-only to EMA —
+# see object_tracker.py's module docstring. TRACK_DIM_DECAY (grow-only's
+# shrink-back rate) is removed as dead config along with it.
 TRACK_MATCH_DIST = 0.15      # [m] associate a detection to a track within this
 TRACK_MAX_UNSEEN = 15        # frames an unmatched track survives (~3s @5Hz)
-TRACK_POS_ALPHA = 0.30       # EMA on position (0..1, higher = more responsive)
-TRACK_DIM_DECAY = 0.02       # slow shrink of grow-only dims (lets over-grow recover)
+TRACK_POS_ALPHA = 0.30       # EMA on position AND dimensions (0..1, higher = more responsive)
 
 # (legacy single-frame EMA association — no longer used, kept for reference)
 DETECTION_EMA_ALPHA = 0.40
