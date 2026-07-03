@@ -898,7 +898,22 @@ def main(args=None):
 
     rclpy.init(args=args)
     node = TriagoDashboard()
-    node.set_parameters([rclpy.parameter.Parameter('use_sim_time', rclpy.Parameter.Type.BOOL, True)])
+
+    # --- Auto-detect sim vs real hardware (2026-07-03) ---
+    # If /clock is being published (Gazebo sim), use sim time so the
+    # dashboard's time-axis stays synchronised with the simulated world.
+    # On real hardware there is NO /clock topic, so we must use the wall
+    # clock -- otherwise self.get_clock().now() freezes at t=0 forever and
+    # the entire dashboard appears dead (all plot x-values collapse).
+    # Override via CLI if needed: --ros-args -p use_sim_time:=true/false
+    topic_names = [name for name, _ in node.get_topic_names_and_types()]
+    use_sim = '/clock' in topic_names
+    node.set_parameters([
+        rclpy.parameter.Parameter('use_sim_time', rclpy.Parameter.Type.BOOL, use_sim)
+    ])
+    node.get_logger().info(
+        f"[ENV] use_sim_time={'TRUE (sim)' if use_sim else 'FALSE (real hardware)'} "
+        f"— /clock {'found' if use_sim else 'NOT found'} in active topics.")
 
     spinner = threading.Thread(target=ros_thread_entry, args=(node,), daemon=True)
     spinner.start()
