@@ -129,6 +129,34 @@ GOV_A_MAX_ANG = 8.0                   # [rad/s²] max angular acceleration of th
 # these thresholds may need to be revisited.
 ENABLE_LOCAL_MINIMA_ESCAPE = True    # Master switch (independent of ENABLE_REFERENCE_GOVERNOR)
 
+# --- Escape STRATEGY selector (2026-07-03) ---
+# Detection (the "stuck" check below) and categorization ALWAYS run the same
+# way regardless of this flag -- it only decides what CORRECTIVE ACTION is
+# taken once a local minimum is detected:
+#   'posture' : legacy behaviour. Immediately applies the posture-weight
+#               nudge (+ task_dim=3 for an obstacle-induced minimum) while
+#               ALSO letting the RRT planner fire in the background as a
+#               fallback (RRT_TRIGGER_DELAY_S after the posture nudge started)
+#               if the cheap heuristic alone doesn't resolve the error.
+#   'rrt'     : the posture-weight nudge is NEVER applied (posture_scale stays
+#               at 1.0 the whole time) -- the arm is only allowed to move out
+#               of the local minimum once the RRT planner finds a validated,
+#               collision-checked path and that path is actively being
+#               executed. Until then the arm simply holds (QP naturally
+#               commands ~0 velocity against the binding CBF/joint-limit row).
+#               task_dim=3 (position-only) is applied ONLY while a planned
+#               path is being tracked (see ReferenceGovernor.is_executing_path
+#               in reference_governor.py) -- NOT tied to the raw detection
+#               state anymore. This fixes a real bug: previously task_dim=3
+#               was tied to "detection state == escaping", but consuming a
+#               waypoint can itself reduce the position error enough to flip
+#               detection back to 'normal' mid-path, snapping task_dim back to
+#               6D while the arm was still only following a position-only
+#               plan -- fighting itself. Now it is tied EXACTLY to "a
+#               validated RRT path is being executed", restored to 6D the
+#               instant execution ends (success / timeout / user override).
+LME_ESCAPE_STRATEGY = 'rrt'          # 'posture' or 'rrt'
+
 # --- Trigger: "stuck" detection (3D position error only, per instruction) ---
 LME_ERROR_TRIGGER = 0.15             # [m] error norm above which "stuck" is considered
 LME_ERROR_STUCK_WINDOW = 2.0         # [s] time window checked for a near-constant error

@@ -185,6 +185,12 @@ class SafetyQPController(Node):
         # Purple gripper marker (RRT planned waypoint visualization, 2026-07-01)
         from visualization_msgs.msg import Marker, MarkerArray
         self.pub_rrt_gripper = self.create_publisher(MarkerArray, '/rrt_planned_waypoint', 10)
+        # Red-dot FULL PATH visualization (2026-07-03): shows every waypoint of
+        # the path the RRT planner actually found (not just the single "current
+        # target" purple sphere above), so the operator can see the whole shape
+        # of the route. Populated only while a path is actively being executed;
+        # cleared (DELETEALL) the instant execution ends.
+        self.pub_rrt_path = self.create_publisher(MarkerArray, '/rrt_planned_path', 10)
         # RRT planner telemetry for the dedicated plotter window (2026-07-01):
         # [planning_time_ms, path_length_m, waypoint_progress_frac, samples_used,
         #  smoothed_waypoints_count, execution_elapsed_s] = 6 floats
@@ -437,6 +443,48 @@ class SafetyQPController(Node):
         ma.markers.extend(build_purple_gripper(rrt_wp_r, 0))
         ma.markers.extend(build_purple_gripper(rrt_wp_l, 1))
         self.pub_rrt_gripper.publish(ma)
+
+        # --- Red-dot FULL PATH visualization (2026-07-03) ---
+        # Shows every waypoint of the path currently being executed, per arm,
+        # so the operator can see the whole route the RRT planner found (the
+        # purple sphere above only shows the SINGLE waypoint being tracked
+        # right now). Namespaced per arm so the two paths never collide/
+        # overwrite each other; DELETEALL'd on that namespace the instant no
+        # path is active (covers success/timeout/user-abort uniformly, since
+        # is_executing_path already reflects all three via _wp_active).
+        path_ma = MarkerArray()
+
+        def build_path_dots(waypoints, ns):
+            markers = []
+            if not waypoints:
+                m = Marker()
+                m.header.frame_id = cfg.REF_FRAME
+                m.header.stamp = now
+                m.ns = ns
+                m.action = Marker.DELETEALL
+                return [m]
+            for i, wp in enumerate(waypoints):
+                m = Marker()
+                m.header.frame_id = cfg.REF_FRAME
+                m.header.stamp = now
+                m.ns = ns
+                m.id = i
+                m.type = Marker.SPHERE
+                m.action = Marker.ADD
+                m.pose.position.x = float(wp[0])
+                m.pose.position.y = float(wp[1])
+                m.pose.position.z = float(wp[2])
+                m.pose.orientation.w = 1.0
+                m.scale.x = 0.03
+                m.scale.y = 0.03
+                m.scale.z = 0.03
+                m.color = ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.85)  # red
+                markers.append(m)
+            return markers
+
+        path_ma.markers.extend(build_path_dots(self.gov_right.executing_path_waypoints, "rrt_path_right"))
+        path_ma.markers.extend(build_path_dots(self.gov_left.executing_path_waypoints, "rrt_path_left"))
+        self.pub_rrt_path.publish(path_ma)
 
         # RRT performance telemetry: [planning_time_ms, path_length_m,
         # waypoint_progress_frac, samples_used, smoothed_wps, exec_elapsed_s]
@@ -718,6 +766,26 @@ class SafetyQPController(Node):
                     self.x_ref_left, self.xdot_ref_left,
                     np.array(self.kin.data.oMf[self.kin.ee_id_left].translation),
                     self.kin.current_q, self.col.cmodel, dt, logger=print)
+
+        # --- RRT PATH-EXECUTION task_dim override (2026-07-03) ---
+        # Independent of the LME override above (which only fires under
+        # LME_ESCAPE_STRATEGY='posture'): force task_dim=3 (position-only)
+        # for EXACTLY as long as a validated RRT path is actively being
+        # tracked, under EITHER strategy -- the RRT planner never plans
+        # orientation (position-only IK, see rrt_planner.py), so the CLF must
+        # not be asked to also converge orientation while following it.
+        # Restored to the raw task_dim the INSTANT execution ends (success /
+        # timeout / user-resumed-motion abort), regardless of whether the
+        # underlying local minimum has itself "recovered" yet -- this is what
+        # fixes the old bug where task_dim snapped back to 6D mid-path simply
+        # because consuming a waypoint had shrunk the position error enough to
+        # flip the (unrelated) detection state back to 'normal'. Placed AFTER
+        # update_rrt_planner (not before) so a path found/started THIS tick
+        # already gets task_dim=3 on this same tick, no one-tick lag.
+        if self.gov_right.is_executing_path:
+            task_dim_eff_right = cfg.LME_TASK_DIM_OBSTACLE
+        if self.gov_left.is_executing_path:
+            task_dim_eff_left = cfg.LME_TASK_DIM_OBSTACLE
 
         # Compute CLF task errors from the GOVERNED references (not the raw ones).
         # task_dim_eff_{right,left} may be overridden to 3.0 (position-only) by

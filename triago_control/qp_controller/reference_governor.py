@@ -423,7 +423,21 @@ class ReferenceGovernor:
                 self._lme_error_history.clear()  # don't immediately re-trigger on stale samples
 
         # --- 4. COMPUTE the target multiplier + ramp it smoothly ---
-        if self._lme_state == 'escaping' and self._lme_category == 'obstacle':
+        # STRATEGY GATE (2026-07-03): under LME_ESCAPE_STRATEGY='rrt', the
+        # posture-weight correction is NEVER applied -- the arm is only allowed
+        # to move out of the local minimum via a validated, collision-checked
+        # RRT path. Detection/categorization above is UNCHANGED (still needed
+        # to time the RRT trigger below); only the corrective action differs.
+        # task_dim_override is ALSO forced to None here regardless of category:
+        # under 'rrt' it is no longer this function's responsibility -- see
+        # update_rrt_planner / is_executing_path, which tie task_dim=3 to
+        # actual path EXECUTION instead of raw detection state (fixes the
+        # "detection flips back to normal mid-path, task_dim snaps back to 6D
+        # while still only tracking a position-only plan" bug).
+        if cfg.LME_ESCAPE_STRATEGY == 'rrt':
+            target_scale = 1.0
+            task_dim_override = None
+        elif self._lme_state == 'escaping' and self._lme_category == 'obstacle':
             target_scale = cfg.LME_POSTURE_SCALE_OBSTACLE
             task_dim_override = cfg.LME_TASK_DIM_OBSTACLE
         elif self._lme_state == 'escaping' and self._lme_category == 'joint':
@@ -460,6 +474,36 @@ class ReferenceGovernor:
         """('normal'|'escaping', category or None) -- for external telemetry/logging."""
         return self._lme_state, self._lme_category
 
+    @property
+    def is_executing_path(self):
+        """True while a validated RRT waypoint path is actively being tracked.
+
+        2026-07-03: this is now the SOLE source of truth for forcing task_dim=3
+        (position-only CLF) around the RRT escape mechanism, REPLACING the old
+        coupling to the raw local-minima DETECTION state. The RRT planner only
+        ever produces POSITION waypoints (orientation is not planned -- see
+        rrt_planner.py's position-only IK), so orientation tracking must stay
+        relaxed for exactly as long as -- and no longer than -- a planned path
+        is actually driving the reference. Tying it to detection state instead
+        was a real bug: consuming a waypoint can itself shrink the position
+        error enough to flip detection back to 'normal' mid-path, snapping
+        task_dim back to 6D while the arm was still only tracking a
+        position-only plan (fighting the CLF against itself). Orientation is
+        restored the INSTANT this flips back to False (success / timeout /
+        user-resumed-motion abort -- see _abort_waypoint_execution), regardless
+        of whether the underlying local minimum has technically "recovered" yet.
+        """
+        return self._wp_active and len(self._wp_queue) > 0
+
+    @property
+    def executing_path_waypoints(self):
+        """The FULL list of waypoints (np.ndarray(3) each) of the path currently
+        being executed, or an empty list if none. For RViz "red dots" visualization
+        of what the RRT planner actually found -- distinct from the single
+        purple marker (current target waypoint) already returned by
+        update_rrt_planner. Read-only; callers must not mutate the returned list."""
+        return self._wp_queue if self._wp_active else []
+
     # =====================================================================
     # RRT PLANNER TRIGGER + INTEGRATION (2026-07-01)
     # =====================================================================
@@ -470,9 +514,15 @@ class ReferenceGovernor:
 
         The planner fires when ALL of the following are true simultaneously:
           - ENABLE_RRT_PLANNER is True
-          - The local-minima escape is in 'escaping' state (posture correction active)
-          - The escape has been active for >= RRT_TRIGGER_DELAY_S (gave the cheap
-            heuristic a chance)
+          - The local-minima escape is in 'escaping' state (DETECTED, regardless
+            of whether the posture correction is actually applied -- that
+            depends on cfg.LME_ESCAPE_STRATEGY, see update_local_minima_escape.
+            Under LME_ESCAPE_STRATEGY='rrt' detection still drives this timer
+            even though no posture nudge is running)
+          - The escape has been active for >= RRT_TRIGGER_DELAY_S (under
+            'posture' strategy this gives the cheap heuristic a chance first;
+            under 'rrt' strategy it is simply a debounce so a momentary blip
+            doesn't immediately launch a background planning thread)
           - The reference velocity is below RRT_REF_STILL_VELOCITY (user's hand
             is approximately still — no point planning toward a moving target)
           - The planner is not already running or has not already produced a result
@@ -541,9 +591,12 @@ class ReferenceGovernor:
                           f"planning time={result.planning_time_s*1000:.0f}ms, "
                           f"samples={result.samples_used}. Executing...\033[0m")
             else:
-                # FAILED (or empty). Do NOT track anything and do NOT re-launch:
-                # the caller keeps the posture-only correction (lowered posture
-                # weight + task_dim=3 from the obstacle-category escape). We only
+                # FAILED (or empty). Do NOT track anything and do NOT re-launch.
+                # Under 'posture' strategy the caller keeps the posture-only
+                # correction already applied. Under 'rrt' strategy NO correction
+                # is applied at all -- per instruction the arm simply HOLDS at
+                # the stuck point until a valid path is found on a future
+                # episode; there is no movement fallback. Either way we only
                 # try again once the CURRENT escape episode ends and a new one
                 # begins (see the RE-ARM block above).
                 if result is not None:
@@ -552,10 +605,11 @@ class ReferenceGovernor:
                 if logger is not None:
                     samples = result.samples_used if result is not None else 0
                     t_ms = result.planning_time_s * 1000 if result is not None else 0.0
+                    hold_desc = ("holding posture correction only" if cfg.LME_ESCAPE_STRATEGY == 'posture'
+                                else "HOLDING POSITION (strategy='rrt', no fallback movement)")
                     logger(f"\033[91m[RRT][{self.arm_side.upper()}] Planning FAILED "
-                          f"(samples={samples}, time={t_ms:.0f}ms). Holding posture "
-                          f"correction only (no path tracked); will retry only on the "
-                          f"NEXT escape episode.\033[0m")
+                          f"(samples={samples}, time={t_ms:.0f}ms). {hold_desc} "
+                          f"(no path tracked); will retry only on the NEXT escape episode.\033[0m")
 
         # --- TRIGGER CONDITION: start a new planning call (ONCE per episode) ---
         if (self._lme_state == 'escaping'
@@ -575,11 +629,15 @@ class ReferenceGovernor:
                 for req in cdata_plan.distanceRequests:
                     req.enable_nearest_points = True
                 if logger is not None:
+                    meanwhile_desc = ("QP keeps holding the posture correction meanwhile"
+                                      if cfg.LME_ESCAPE_STRATEGY == 'posture'
+                                      else "QP simply HOLDS the arm meanwhile (strategy='rrt', "
+                                           "no posture correction applied)")
                     logger(f"\033[95m[RRT][{self.arm_side.upper()}] Planner TRIGGERED "
                           f"(escape active for {self._lme_escape_elapsed:.1f}s, "
                           f"ref still |v_ref|={v_norm:.3f}m/s, error not resolved). "
                           f"Planning in background (one attempt this episode, no time "
-                          f"pressure -- QP keeps holding the posture correction meanwhile). "
+                          f"pressure -- {meanwhile_desc}). "
                           f"See below for the planner's own progress log.\033[0m")
                 # Forward the SAME logger into the planner thread so its internal
                 # goal-IK / RRT-Connect progress (see rrt_planner.py) is visible in

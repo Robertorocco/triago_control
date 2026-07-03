@@ -1,7 +1,17 @@
 # AI Agent Context — triago_control
 
 > **This file is maintained by the AI agent. Do not edit manually.**
-> Last updated: 2026-07-02 (§9.12: goal-IK was STILL failing 100% of the time even
+> Last updated: 2026-07-03 (§9.13: the local-minima escape's CORRECTIVE ACTION is
+> now selectable via `cfg.LME_ESCAPE_STRATEGY` ('posture' legacy nudge, or 'rrt' —
+> now the default — arm only moves via a validated RRT path, holds otherwise, no
+> fallback movement). Also fixed a real bug the operator hit: `task_dim=3` was
+> coupled to raw local-minima DETECTION state, which a waypoint's own progress
+> could flip back to 'normal' mid-path, snapping task_dim back to 6D while still
+> only running a position-only plan. Now driven solely by a new
+> `ReferenceGovernor.is_executing_path` property, restored the instant path
+> execution ends for ANY reason. Added a red-dot `/rrt_planned_path` RViz topic
+> showing the FULL path RRT found (not just the current single waypoint). See §9.13.)
+> Earlier: 2026-07-02 (§9.12: goal-IK was STILL failing 100% of the time even
 > after §9.11's widened budget — every restart converged to the exact target
 > position (sub-2mm) but always collided. Root cause: position is only 3
 > constraints on a 7-DOF arm (4 redundant DOF), and those 4 DOF were left to
@@ -1312,6 +1322,70 @@ before the outer loop would have re-checked it).
   above: null-space obstacle avoidance actively resolves the collision instead of
   hoping a random restart avoids it, which directly targets the exact failure
   pattern in the log (exact position, always colliding).
+
+### 9.13 Escape strategy decoupling: posture-nudge vs. RRT-only (2026-07-03)
+
+Per operator instruction, the local-minima escape's CORRECTIVE ACTION is now
+selectable via a new flag, independent of detection/categorization (which are
+UNCHANGED and still always run — see §9.9):
+
+```python
+cfg.LME_ESCAPE_STRATEGY = 'posture' | 'rrt'   # config.py §3c
+```
+
+- `'posture'` (legacy): immediate posture-weight nudge (+ `task_dim=3` for an
+  obstacle-induced minimum) on detection, with the RRT planner still firing in
+  the background as a fallback after `RRT_TRIGGER_DELAY_S` if the cheap
+  heuristic alone hasn't resolved the error.
+- `'rrt'` (**now the default**, per operator request): the posture-weight
+  nudge is **never applied** — `posture_scale` stays at `1.0` for the whole
+  episode. The arm is only allowed to move out of the local minimum once the
+  RRT planner finds a **validated, collision-checked** path AND that path is
+  actively being executed. Until then the arm simply **holds** (the QP
+  naturally commands ~0 against the binding CBF/joint-limit row) — there is
+  **no fallback movement** if RRT never finds a path; a new attempt is only
+  made on the *next* local-minima episode (per the one-attempt-per-episode
+  rule from §9.10).
+
+Gated in `ReferenceGovernor.update_local_minima_escape`: under `'rrt'`,
+`target_scale` is forced to `1.0` and `task_dim_override` to `None`
+unconditionally, regardless of category — task_dim=3 is no longer this
+function's responsibility at all (see the bug fix below).
+
+**Bug fix — task_dim was coupled to the wrong state.** The operator reported
+that "occasionally the local minima check condition stopped the algorithm" —
+traced to `task_dim=3` being tied to the raw **detection** state
+(`_lme_state == 'escaping'`), not to whether an RRT path was actually being
+tracked. Since following a waypoint reduces the position error, it could by
+itself flip detection back to `'normal'` **mid-path**, snapping `task_dim`
+back to `6.0` while the arm was still only executing a position-only plan —
+the CLF would then fight itself (demanding orientation convergence the RRT
+never planned for). **Fix**: new `ReferenceGovernor.is_executing_path`
+property (`True` exactly while `_wp_active and len(_wp_queue) > 0`) is now the
+**sole** source of truth for forcing `task_dim=3`, applied in
+`main_qp_controller.solve_and_publish` **after** `update_rrt_planner` runs (so
+a path that starts THIS tick already gets `task_dim=3` on this same tick, no
+one-tick lag) and **independent of** `LME_ESCAPE_STRATEGY` — under `'posture'`
+strategy this is now logically OR'd with the LME override (either can force
+position-only), under `'rrt'` strategy it is the ONLY source. Orientation is
+restored the INSTANT `is_executing_path` flips back to `False` (success /
+timeout / user-resumed-motion abort — all three already funnel through
+`_abort_waypoint_execution`, so this one property covers every exit path
+uniformly), regardless of whether the underlying local minimum has itself
+"recovered" yet.
+
+**Full-path red-dot RViz visualization** (new, per operator request): the
+existing purple sphere on `/rrt_planned_waypoint` only shows the SINGLE
+waypoint currently being tracked. A new topic, `/rrt_planned_path`
+(`MarkerArray`), now shows **every** waypoint of the path RRT actually found,
+as small red spheres, one marker array per arm (namespaces `rrt_path_right`/
+`rrt_path_left` so the two never collide). New `ReferenceGovernor.
+executing_path_waypoints` property (read-only) exposes the live `_wp_queue`
+while `is_executing_path` is true. Published from the same downsampled
+`_publish_rrt_telemetry` call (≈150Hz at `PUBLISH_EVERY_N=2` @ 300Hz — same
+cadence as the purple marker, no perceptible lag). `DELETEALL`'d on that
+namespace the instant no path is active, uniformly covering success/timeout/
+abort since `executing_path_waypoints` returns `[]` in all three cases.
 
 ### 9.1 Sensing constraints (real-hardware honesty, 2026-06-29)
 
