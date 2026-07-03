@@ -50,7 +50,7 @@ ORIENTATION_CTRL = True         # True = control Pos+Ori (6DOF), False = Pos onl
 #         integrates v_blend = (1-alpha)*v_user + alpha*pi_policy every tick
 #         and is the SOLE writer of /arm_*/cartesian_reference even in normal
 #         teleop (not just during grasp execution).
-BLENDING = False
+BLENDING = True
 
 # alpha(belief) shaping -- see main_shared_autonomy.compute_alpha for the
 # exact formula. x = normalised belief in [0,1] (0 at uniform, 1 at certainty).
@@ -259,35 +259,14 @@ GOV_A_MAX_ANG = 8.0                   # [rad/s²] max angular acceleration of th
 # CURRENT parameter set (GAMMA_CBF, D_SAFE_BASE, P_GAIN_LIMITS, etc. in
 # section 2, and MAX_WEIGHT_SLACK etc. in section 3). If those are retuned,
 # these thresholds may need to be revisited.
-ENABLE_LOCAL_MINIMA_ESCAPE = True    # Master switch (independent of ENABLE_REFERENCE_GOVERNOR)
-
-# --- Escape STRATEGY selector (2026-07-03) ---
-# Detection (the "stuck" check below) and categorization ALWAYS run the same
-# way regardless of this flag -- it only decides what CORRECTIVE ACTION is
-# taken once a local minimum is detected:
-#   'posture' : legacy behaviour. Immediately applies the posture-weight
-#               nudge (+ task_dim=3 for an obstacle-induced minimum) while
-#               ALSO letting the RRT planner fire in the background as a
-#               fallback (RRT_TRIGGER_DELAY_S after the posture nudge started)
-#               if the cheap heuristic alone doesn't resolve the error.
-#   'rrt'     : the posture-weight nudge is NEVER applied (posture_scale stays
-#               at 1.0 the whole time) -- the arm is only allowed to move out
-#               of the local minimum once the RRT planner finds a validated,
-#               collision-checked path and that path is actively being
-#               executed. Until then the arm simply holds (QP naturally
-#               commands ~0 velocity against the binding CBF/joint-limit row).
-#               task_dim=3 (position-only) is applied ONLY while a planned
-#               path is being tracked (see ReferenceGovernor.is_executing_path
-#               in reference_governor.py) -- NOT tied to the raw detection
-#               state anymore. This fixes a real bug: previously task_dim=3
-#               was tied to "detection state == escaping", but consuming a
-#               waypoint can itself reduce the position error enough to flip
-#               detection back to 'normal' mid-path, snapping task_dim back to
-#               6D while the arm was still only following a position-only
-#               plan -- fighting itself. Now it is tied EXACTLY to "a
-#               validated RRT path is being executed", restored to 6D the
-#               instant execution ends (success / timeout / user override).
-LME_ESCAPE_STRATEGY = 'rrt'          # 'posture' or 'rrt'
+ENABLE_LOCAL_MINIMA_ESCAPE = False    # Master switch (independent of ENABLE_REFERENCE_GOVERNOR)
+# NOTE (2026-07-03): an RRT-Connect joint-space planner was attempted as a
+# fallback escape strategy for this mechanism (background-thread planning,
+# Cartesian waypoint queue tracked by the reference governor). The attempt was
+# UNSUCCESSFUL and has been fully removed from the codebase (rrt_planner.py
+# deleted; reference_governor.py and main_qp_controller.py stripped of all RRT
+# integration). The ONLY corrective action this flag can now enable is the
+# posture-weight + task_dim nudge below (no planner, no strategy selector).
 
 # --- Trigger: "stuck" detection (3D position error only, per instruction) ---
 LME_ERROR_TRIGGER = 0.15             # [m] error norm above which "stuck" is considered
@@ -313,68 +292,16 @@ LME_RAMP_TAU = 0.3                   # [s] smooth ramp time-constant for the pos
 LME_CONSOLE_PERIOD = 3.0             # [s] throttle period for the non-spam status print while escaping
 
 # =============================================================================
-# 3d. RRT-CONNECT JOINT-SPACE PLANNER (2026-07-01)
+# 3d. [REMOVED] RRT-Connect joint-space planner (2026-07-01 -- 2026-07-03)
 # =============================================================================
-# A bidirectional RRT-Connect that plans in the FULL 7D joint-space of one arm,
-# using the SAME hppfcl collision model the CBF uses — so the planner and the
-# real-time controller agree on what's safe. Runs asynchronously in a background
-# thread, triggered by the local-minima escape when the posture correction alone
-# fails AND the reference is approximately still. Output: a sequence of Cartesian
-# waypoints (derived from the planned collision-free joint configs via FK) fed to
-# the governor's waypoint queue.
-ENABLE_RRT_PLANNER = True             # Master switch (requires ENABLE_LOCAL_MINIMA_ESCAPE too)
-# NOTE (2026-07-02): there is NO millisecond requirement on any of the planner's
-# budgets below. While the planner thread runs (possibly for several seconds),
-# the QP-CLF-CBF keeps driving the arm with the local-minima escape's posture
-# correction (lowered posture weight + task_dim=3 for an obstacle-induced
-# minimum) -- see reference_governor.update_local_minima_escape. Budgets were
-# previously tuned for sub-second returns, which starved the goal-IK search
-# (see §9.10/§9.11 in context.md) and are now widened.
-RRT_PLANNING_BUDGET_S = 5.0           # [s] max wall-clock time RRT-Connect itself is allowed
-RRT_STEP_SIZE = 0.15                  # [rad] max step per RRT extend in joint-space
-RRT_GOAL_BIAS = 0.10                  # probability of sampling the goal directly (vs random)
-RRT_GOAL_POS_TOLERANCE = 0.03         # [m] EE position tolerance for "goal reached" in the tree
-RRT_PROGRESS_LOG_PERIOD_S = 1.0       # [s] throttle period for RRT-Connect's "still growing" console line
-# --- Goal-configuration IK (damped least-squares, position-only) ---
-# The goal config is found by DLS IK (FK(q).translation -> x_goal), NOT by
-# uniform random rejection sampling (which cannot hit a 3cm Cartesian ball in
-# 7D and always failed with samples=0). Restarts from random seeds if a solve
-# converges into collision or stalls.
-RRT_IK_DAMPING = 0.05                 # DLS damping (rad·s/m-ish): larger = more stable near singularities
-RRT_IK_MAX_STEP = 0.20                # [rad] per-iteration joint step cap for the IK integrator
-RRT_IK_TIME_BUDGET_S = 2.0            # [s] max wall-clock time the goal-IK search is allowed
-RRT_IK_MAX_RESTARTS = 40              # max number of random-seed restarts within that time budget
-RRT_IK_ITERS_PER_RESTART = 150        # DLS iterations per restart before declaring it stuck
-# --- Goal-IK null-space obstacle avoidance (2026-07-02) ---
-# Position is only 3 constraints on a 7-DOF arm (4 redundant DOF). Pure random
-# restarts left those 4 DOF wherever chance put them, so the IK converged to the
-# EXACT target position every time but almost always with a colliding elbow/
-# wrist posture (a narrow obstacle-free band is unlikely to be hit by chance).
-# Fix: once close to the target AND under-clear, add a SECONDARY task -- climb
-# the (finite-differenced) collision-clearance gradient, PROJECTED into the
-# primary task's null space so it never fights position convergence.
-RRT_IK_CLEARANCE_MARGIN = 0.02        # [m] extra clearance beyond D_SAFE_BASE+RRT_COLLISION_MARGIN
-                                      #   the goal config must achieve (buffer above the CBF's own
-                                      #   margin so the accepted goal isn't immediately re-triggering)
-RRT_IK_CLEARANCE_ACTIVATION_RADIUS = 0.08  # [m] position-error radius below which the secondary
-                                           #   (clearance) task engages -- skips the extra distance
-                                           #   queries while still far from the target (cheap)
-RRT_IK_CLEARANCE_GAIN = 0.15          # [rad] per-iteration null-space step size along the
-                                      #   normalized clearance gradient
-RRT_IK_CLEARANCE_FD_EPS = 0.01        # [rad] finite-difference step for the clearance gradient
-RRT_COLLISION_MARGIN = 0.005          # [m] extra safety margin ON TOP of D_SAFE_BASE for the planner
-                                      #   (so the planned path is more conservative than the CBF)
-RRT_MAX_SAMPLES = 8000                # absolute sample cap (fallback if wall-clock budget is generous)
-RRT_SHORTCUT_ITERS = 50              # smoothing passes after a raw path is found
-RRT_WAYPOINT_ADVANCE_THRESH = 0.04    # [m] ||x_real - x_wp|| below which the governor advances
-                                      #   to the next waypoint in the queue
-RRT_EXECUTION_ERROR_EXIT = 0.03       # [m] error below which the planned-path execution ends (success)
-RRT_EXECUTION_TIMEOUT = 20.0          # [s] max time following the planned waypoints before giving up
-RRT_REF_STILL_VELOCITY = 0.02         # [m/s] reference velocity norm below which "still" is declared
-                                      #   (allows for small hand oscillation on the haptic device)
-RRT_TRIGGER_DELAY_S = 4.0             # [s] time the local-minima escape must be active (posture
-                                      #   correction already applied) before the RRT planner kicks in
-                                      #   (gives the cheap heuristic a chance to work first)
+# A bidirectional RRT-Connect local-minima-escape fallback was attempted here
+# (full 7D joint-space planning, damped-least-squares goal-IK with null-space
+# obstacle avoidance, background-thread execution, Cartesian waypoint queue).
+# The attempt was UNSUCCESSFUL and has been fully removed (2026-07-03):
+# rrt_planner.py deleted; reference_governor.py, main_qp_controller.py, and
+# plotter.py stripped of all RRT integration (subscriptions, telemetry,
+# markers, trigger logic). ENABLE_LOCAL_MINIMA_ESCAPE (see §3c above) now
+# offers ONLY the original posture-weight + task_dim correction.
 
 # =============================================================================
 # 4. LOOP / TELEMETRY SETTINGS

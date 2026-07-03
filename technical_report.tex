@@ -69,7 +69,7 @@ An intermediate layer between the raw Cartesian reference and the CLF bounds the
 
 A state machine monitors whether the governed position error has stagnated (above a threshold for a time window while not decreasing). On detection, the category is identified from shadow prices -- obstacle-induced (high $\lambda_{\text{cbf}}$) or joint-limit-induced (high $\lambda_{\text{jl}}$). The escape action is a per-arm temporary posture-weight modification: reduced weight for obstacle minima (freeing redundancy to slip past, combined with relaxation to position-only tracking) or increased weight for joint-limit minima (pushing harder away from the saturated limit). The correction is smoothly ramped and automatically exits on error reduction or timeout.
 
-As a last resort, a background RRT-Connect planner (non-blocking, epoch-fenced, fully isolated from the real-time loop) attempts to find a collision-free joint-space path using damped-least-squares IK for goal generation.
+A background RRT-Connect planner (non-blocking, epoch-fenced, isolated from the real-time loop) was also attempted as a last-resort fallback, using damped-least-squares IK for goal generation. The approach was ultimately unsuccessful and has since been removed from the system; the escape mechanism now relies solely on the posture-weight correction described above.
 
 %───────────────────────────────────────────────────────────────────────────────
 \section{Bimanual Architecture and Coupling Guarantees}

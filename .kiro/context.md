@@ -1,7 +1,20 @@
 # AI Agent Context — triago_control
 
 > **This file is maintained by the AI agent. Do not edit manually.**
-> Last updated: 2026-07-03 (§11.8 NEW: position-divergence authority override +
+> Last updated: 2026-07-03 (RRT-Connect abandoned: an RRT-Connect joint-space
+> planner was attempted (2026-07-01 -- 2026-07-03) as a fallback local-minima-
+> escape strategy alongside the existing posture-weight correction. The
+> approach was ultimately unsuccessful and has been fully removed from the
+> codebase (`rrt_planner.py` deleted; `reference_governor.py`,
+> `main_qp_controller.py`, and `plotter.py` stripped of all RRT integration
+> -- background planning thread, Cartesian waypoint queue, `/rrt_planned_*`
+> RViz topics, `/qp_debug/rrt_planner` telemetry, the RRT Planner plot
+> window, and the `cfg.LME_ESCAPE_STRATEGY` selector). `cfg.
+> ENABLE_LOCAL_MINIMA_ESCAPE` now offers ONLY the original posture-weight +
+> task_dim=3 correction and is set to `False` by default. `cfg.BLENDING` is
+> now `True` by default (shared-autonomy twist blending, §11.5-§11.8, is the
+> active teleoperation mode).)
+> Earlier: 2026-07-03 (§11.8 NEW: position-divergence authority override +
 > bounded reference catch-up. Operator report on §11.7: the velocity-effort
 > gate only reacts while the hand is ACTIVELY MOVING -- the instant the user
 > decelerates and HOLDS their hand displaced from the EE, ||v_user|| -> 0, the
@@ -69,35 +82,6 @@
 > `haptic_force_manager_blending_tutorial.py` (haption_teleoperation) for its
 > new "Authority Share" plot, rather than recomputing the blend independently.
 > See §11.5 for the full design.)
-> Earlier: 2026-07-03 (§9.13: the local-minima escape's CORRECTIVE ACTION is
-> now selectable via `cfg.LME_ESCAPE_STRATEGY` ('posture' legacy nudge, or 'rrt' —
-> now the default — arm only moves via a validated RRT path, holds otherwise, no
-> fallback movement). Also fixed a real bug the operator hit: `task_dim=3` was
-> coupled to raw local-minima DETECTION state, which a waypoint's own progress
-> could flip back to 'normal' mid-path, snapping task_dim back to 6D while still
-> only running a position-only plan. Now driven solely by a new
-> `ReferenceGovernor.is_executing_path` property, restored the instant path
-> execution ends for ANY reason. Added a red-dot `/rrt_planned_path` RViz topic
-> showing the FULL path RRT found (not just the current single waypoint). See §9.13.)
-> Earlier: 2026-07-02 (§9.12: goal-IK was STILL failing 100% of the time even
-> after §9.11's widened budget — every restart converged to the exact target
-> position (sub-2mm) but always collided. Root cause: position is only 3
-> constraints on a 7-DOF arm (4 redundant DOF), and those 4 DOF were left to
-> chance (random restart seed) instead of being actively steered. Fixed with
-> NULL-SPACE OBSTACLE AVOIDANCE — a secondary task that climbs the collision-
-> clearance gradient, projected into the primary position task's null space, so
-> it can never fight convergence. See §9.12 for the full analysis and the
-> roadmap/no-roadmap clarification the operator asked for.)
-> Earlier: 2026-07-02 (§9.11: after §9.10's fix stopped the crash/spam, the
-> planner was STILL failing every episode with `samples=0` in ~16ms — because the
-> goal-IK search's time/restart budget was starved (a leftover from when tight
-> budgets mattered for the old, broken finder). There is NO millisecond
-> requirement on this search: the QP keeps holding the escape's posture
-> correction the whole time it runs. Widened `RRT_IK_TIME_BUDGET_S` 0(implicit)→2.0s,
-> `RRT_PLANNING_BUDGET_S` 1.5→5.0s, and added verbose, throttled console
-> diagnostics through every stage (goal-IK per-restart trace, RRT-Connect
-> periodic growth report) so a failure/success can be read as a report instead
-> of a single opaque one-liner. See §9.11.)
 > Also 2026-07-02 (§5.10: head cylinder-perception accuracy pass —
 > found and fixed the dominant error source in `main_head.py`'s geometric
 > pipeline: the circle fit ran on the disk INTERIOR, not just the boundary,
@@ -1228,232 +1212,23 @@ vs. the real EE position for the error norm. The resulting
 value from the cartesian-reference topic) is never mutated, so the escape is
 fully transparent to any other consumer of that state.
 
-### 9.10 RRT-Connect planner fixes (2026-07-02) — the "samples=0 / QP crash" bug
+### 9.10 [REMOVED] RRT-Connect planner attempt (2026-07-02 -- 2026-07-03)
 
-Follow-up on §3d/§9.9's joint-space RRT-Connect planner (the local-minima escape's
-last-resort). The operator reported the planner ALWAYS failing with `samples=0`
-(~300ms each) and re-triggering forever, and — critically — destabilising the
-QP-CLF-CBF (which must never happen). Three independent defects were found and fixed
-(`triago_control/qp_controller/rrt_planner.py` + `reference_governor.py`).
-
-**Defect 1 — goal finder could never succeed (`samples=0`).** `samples` is only
-incremented in the RRT-Connect main loop, which runs AFTER a goal configuration is
-found. The goal finder used **uniform random rejection sampling**: draw a random 7-DOF
-joint config, keep it if `‖FK(q).translation − x_goal‖ < 3cm`. The probability of a
-uniformly-random 7-DOF config landing the EE inside a 3cm Cartesian ball is
-astronomically small, so all 2000 tries missed → `q_goal_arm=None` → `success=False`
-with `samples=0`; the ~300ms was just 2000 FK+collision checks. **The RRT never even
-started.**
-- **Fix**: `RRTPlanner._find_goal_config_ik` — damped least-squares position-only IK
-  (`dq = Jᵀ(JJᵀ + λ²I)⁻¹·e` on the arm's own Jacobian columns), seeded from the stuck
-  config, with random restarts if a solve converges into collision or stalls. New
-  config: `RRT_IK_DAMPING=0.05`, `RRT_IK_MAX_STEP=0.20`. If IK cannot reach the target
-  collision-free (genuinely unreachable / inside an obstacle) the planner fails
-  cleanly — which is fine, the caller then just holds the posture correction.
-
-**Defect 2 — per-tick re-launch spam + control-loop stalls (the "crash").** On failure
-the old code set `self._rrt_triggered = False`, which **re-armed the trigger every
-tick**: at 300Hz a fresh background thread + `GeometryData` + 2000-sample collision
-sweep was spawned continuously, starving the real-time loop. Compounding it, `abort()`
-did `self._thread.join(timeout=0.5)` and was called from `plan_async`/`reset`/
-`_abort_waypoint_execution` — **all on the 300Hz control loop** — so it could block the
-controller for up to half a second.
-- **Fix A (one attempt per episode)**: `reference_governor` gained `_rrt_episode_attempted`.
-  The planner is launched EXACTLY ONCE per local-minima episode; a failed plan does NOT
-  relaunch. The latch clears only when the escape ends (`_lme_state` back to `'normal'`),
-  re-arming for the NEXT episode.
-- **Fix B (non-blocking abort)**: `abort()` no longer joins — it sets the abort flag and
-  bumps a monotonic `_plan_epoch`. The daemon thread captures its epoch and fences itself
-  out (`_should_abort`) the instant the epoch changes; `_finish` only publishes a result
-  if its epoch is still current, so a superseded/aborted thread's result is discarded.
-
-**Defect 3 — a planner failure could reach the QP.** The planning thread's body is now
-wrapped in a blanket `try/except` that resolves ANY failure (unreachable target,
-numerical issue, abort) to a well-defined `success=False` result and can never
-propagate. The control loop only ever READS the result, so the QP-CLF-CBF is fully
-insulated from the planner.
-
-**On planner failure the behaviour is now exactly what the operator asked for**: track
-NOTHING (no waypoint queue activated), and simply keep the obstacle-category escape
-correction — lowered posture weight (`LME_POSTURE_SCALE_OBSTACLE=0.2`) + `task_dim=3.0`
-(position-only) — driven independently by `update_local_minima_escape`. The planner
-never touches the QP formulation.
-
-**Reference-resumed handling**: if the operator moves the reference
-(`‖v_ref‖ > RRT_REF_STILL_VELOCITY`) while a plan is still computing, the in-flight plan
-is aborted immediately (non-blocking) and control returns to tracking the (always-live)
-blue reference gripper. During waypoint execution the same still-velocity check aborts
-the path (unchanged, §govern).
-
-### 9.11 RRT planner: starved IK budget + verbose diagnostics (2026-07-02)
-
-Follow-up on §9.10. That fix stopped the crash/spam, but the planner was still
-failing EVERY escape episode: `Planning FAILED (samples=0, time=16-17ms)`. The
-`samples=0` confirmed the goal-IK step (§9.10's fix) itself was failing, and the
-~16ms runtime showed WHY: `_find_goal_config_ik` was called with hard-coded
-defaults `max_restarts=10, iters=120` — a leftover from when the OLD (broken)
-finder needed a tight budget to keep the per-tick spam from being even worse. At
-~150µs per DLS iteration, 10 restarts × 120 iters is only ~15ms of wall-clock —
-nowhere near enough for 40 random 7D seeds to reliably find one that both (a)
-converges to the target position AND (b) is collision-free, especially with an
-obstacle actively blocking the region near the current pose.
-
-**Key clarification confirmed by the operator**: there is **no millisecond
-requirement anywhere in this pipeline**. While the planner thread runs — even for
-several seconds — the QP-CLF-CBF keeps driving the arm via the local-minima
-escape's already-applied posture correction (lowered posture weight + `task_dim
-=3` for an obstacle-induced minimum, see `update_local_minima_escape`). The
-planner and the real-time safety loop are fully decoupled by design (§9.10); there
-was never a reason to keep its budgets tight.
-
-**Fix — widen the budgets** (`config.py`):
-- `RRT_IK_TIME_BUDGET_S = 2.0` (new — wall-clock cap on the whole goal-IK search)
-- `RRT_IK_MAX_RESTARTS = 40` (was the hard-coded default of 10)
-- `RRT_IK_ITERS_PER_RESTART = 150` (was the hard-coded default of 120)
-- `RRT_PLANNING_BUDGET_S = 1.5 → 5.0` (RRT-Connect's own growth budget, same
-  reasoning — no need to rush)
-- `RRT_PROGRESS_LOG_PERIOD_S = 1.0` (new — throttle period for the new progress logs)
-
-**Fix — verbose, throttled diagnostics** (`rrt_planner.py`), so a run can be read
-as an actual report instead of one opaque line:
-- On thread start: target position, IK budget, RRT-Connect budget.
-- Per goal-IK restart: converged-and-accepted / converged-but-colliding
-  (reseeding) / did-not-converge (final error norm), plus a final summary
-  (restarts used, best error norm reached) if the whole IK search fails.
-- Per RRT-Connect run: a throttled "still growing" line (sample count, both
-  tree sizes, elapsed/budget) every `RRT_PROGRESS_LOG_PERIOD_S`, plus an
-  explicit CONNECTED or EXHAUSTED summary.
-- `plan_async` now takes an optional `logger` callable, threaded through from
-  `reference_governor.update_rrt_planner` (which already had one from
-  `main_qp_controller`) — the SAME per-arm colored `print` used for every other
-  governor/escape log line, so all planner diagnostics land in the same console
-  stream the operator already watches.
-
-### 9.12 Goal-IK null-space obstacle avoidance (2026-07-02) — the "always converges, always collides" bug
-
-Follow-up on §9.11. Even after widening the IK time/restart budget, the operator's
-report showed the SAME pattern on all 40/40 restarts: converge to the exact
-target position (final error ~1.9mm) and STILL fail collision-free, every time.
-
-**Root cause**: goal-IK only constrains **position** (3 equations) on a 7-DOF
-arm — 4 DOF are redundant and were left ENTIRELY TO CHANCE: each restart seeded
-a uniformly random 7D configuration, then DLS-drove only the position error to
-zero, so whatever elbow/wrist posture the random seed happened to imply around
-that position is what the solver kept. Near a table edge, only a narrow band of
-postures keeps the ~25cm gripper collision box clear; a random seed essentially
-never lands in that band, so the previous "restart on collision" strategy was
-statistically almost guaranteed to fail regardless of how many restarts it was
-given — the operator's target position genuinely WAS reachable (confirmed by the
-consistent sub-2mm convergence), the search just never actively looked for a
-collision-free posture around it.
-
-**Fix — standard redundancy resolution** (`RRTPlanner._find_goal_config_ik`,
-`rrt_planner.py`): each IK iteration now computes
-```
-dq = dq_task + N @ dq_secondary
-dq_task      = J_pinv @ err                  (primary: drive EE position to x_goal, DLS)
-N            = I - J_pinv @ J                (projector onto the primary task's null space)
-dq_secondary = k_clear * grad(min_distance) / ||grad||   (secondary: climb AWAY from the
-                                                            nearest obstacle)
-```
-`grad(min_distance)` is estimated by central finite differences over the SAME
-`hppfcl` `computeDistances` query the CBF/collision-check already use (no new
-analytic collision-Jacobian plumbing) — cheap relative to the multi-second
-budget (7 extra distance queries per activation). The secondary task is
-projected into `N` so it can **never fight primary-task convergence** — the
-arm keeps driving to the target position while simultaneously using its
-redundant DOF to unstick itself from the obstacle, INSTEAD OF gambling that a
-random seed avoided it. It only activates once close to the target
-(`RRT_IK_CLEARANCE_ACTIVATION_RADIUS=0.08m`) and under-clear
-(`RRT_IK_CLEARANCE_MARGIN=0.02m` buffer above the CBF's own margin, so the
-accepted goal isn't immediately re-triggering the local-minima detector),
-keeping early iterations (while still far away) cheap. Random restarts are
-KEPT — they still provide basin diversity (elbow-up vs. elbow-down, etc.) — but
-are no longer the ONLY mechanism for resolving a collision.
-
-New config (`config.py` §3d): `RRT_IK_CLEARANCE_MARGIN=0.02`,
-`RRT_IK_CLEARANCE_ACTIVATION_RADIUS=0.08`, `RRT_IK_CLEARANCE_GAIN=0.15`,
-`RRT_IK_CLEARANCE_FD_EPS=0.01`. Also added an explicit wall-clock check inside
-the per-restart iteration loop (the extra finite-difference distance queries
-made a single stubborn restart capable of overshooting `RRT_IK_TIME_BUDGET_S`
-before the outer loop would have re-checked it).
-
-**Answering the operator's two direct questions**:
-- *"Are we running an RRT which builds a map in config space, or restarts every
-  time?"* — Fully restarts. There is no persistent roadmap/PRM today: each local-
-  minima episode launches one fresh `plan_async` call with zero memory of prior
-  attempts, and even WITHIN one call the goal-IK restarts are independent random
-  seeds with no shared tree. A PRM/roadmap is a natural future upgrade if planning
-  latency ever becomes the bottleneck (it currently is not — RRT-Connect itself,
-  once handed a valid goal, was never the failing piece; the goal-IK was).
-- *"How to make it succeed reliably, even if slower / non-optimal?"* — Answered
-  above: null-space obstacle avoidance actively resolves the collision instead of
-  hoping a random restart avoids it, which directly targets the exact failure
-  pattern in the log (exact position, always colliding).
-
-### 9.13 Escape strategy decoupling: posture-nudge vs. RRT-only (2026-07-03)
-
-Per operator instruction, the local-minima escape's CORRECTIVE ACTION is now
-selectable via a new flag, independent of detection/categorization (which are
-UNCHANGED and still always run — see §9.9):
-
-```python
-cfg.LME_ESCAPE_STRATEGY = 'posture' | 'rrt'   # config.py §3c
-```
-
-- `'posture'` (legacy): immediate posture-weight nudge (+ `task_dim=3` for an
-  obstacle-induced minimum) on detection, with the RRT planner still firing in
-  the background as a fallback after `RRT_TRIGGER_DELAY_S` if the cheap
-  heuristic alone hasn't resolved the error.
-- `'rrt'` (**now the default**, per operator request): the posture-weight
-  nudge is **never applied** — `posture_scale` stays at `1.0` for the whole
-  episode. The arm is only allowed to move out of the local minimum once the
-  RRT planner finds a **validated, collision-checked** path AND that path is
-  actively being executed. Until then the arm simply **holds** (the QP
-  naturally commands ~0 against the binding CBF/joint-limit row) — there is
-  **no fallback movement** if RRT never finds a path; a new attempt is only
-  made on the *next* local-minima episode (per the one-attempt-per-episode
-  rule from §9.10).
-
-Gated in `ReferenceGovernor.update_local_minima_escape`: under `'rrt'`,
-`target_scale` is forced to `1.0` and `task_dim_override` to `None`
-unconditionally, regardless of category — task_dim=3 is no longer this
-function's responsibility at all (see the bug fix below).
-
-**Bug fix — task_dim was coupled to the wrong state.** The operator reported
-that "occasionally the local minima check condition stopped the algorithm" —
-traced to `task_dim=3` being tied to the raw **detection** state
-(`_lme_state == 'escaping'`), not to whether an RRT path was actually being
-tracked. Since following a waypoint reduces the position error, it could by
-itself flip detection back to `'normal'` **mid-path**, snapping `task_dim`
-back to `6.0` while the arm was still only executing a position-only plan —
-the CLF would then fight itself (demanding orientation convergence the RRT
-never planned for). **Fix**: new `ReferenceGovernor.is_executing_path`
-property (`True` exactly while `_wp_active and len(_wp_queue) > 0`) is now the
-**sole** source of truth for forcing `task_dim=3`, applied in
-`main_qp_controller.solve_and_publish` **after** `update_rrt_planner` runs (so
-a path that starts THIS tick already gets `task_dim=3` on this same tick, no
-one-tick lag) and **independent of** `LME_ESCAPE_STRATEGY` — under `'posture'`
-strategy this is now logically OR'd with the LME override (either can force
-position-only), under `'rrt'` strategy it is the ONLY source. Orientation is
-restored the INSTANT `is_executing_path` flips back to `False` (success /
-timeout / user-resumed-motion abort — all three already funnel through
-`_abort_waypoint_execution`, so this one property covers every exit path
-uniformly), regardless of whether the underlying local minimum has itself
-"recovered" yet.
-
-**Full-path red-dot RViz visualization** (new, per operator request): the
-existing purple sphere on `/rrt_planned_waypoint` only shows the SINGLE
-waypoint currently being tracked. A new topic, `/rrt_planned_path`
-(`MarkerArray`), now shows **every** waypoint of the path RRT actually found,
-as small red spheres, one marker array per arm (namespaces `rrt_path_right`/
-`rrt_path_left` so the two never collide). New `ReferenceGovernor.
-executing_path_waypoints` property (read-only) exposes the live `_wp_queue`
-while `is_executing_path` is true. Published from the same downsampled
-`_publish_rrt_telemetry` call (≈150Hz at `PUBLISH_EVERY_N=2` @ 300Hz — same
-cadence as the purple marker, no perceptible lag). `DELETEALL`'d on that
-namespace the instant no path is active, uniformly covering success/timeout/
-abort since `executing_path_waypoints` returns `[]` in all three cases.
+An RRT-Connect joint-space planner was built as a local-minima-escape fallback
+for §9.9 (background-thread planning, damped-least-squares goal-IK with
+null-space obstacle avoidance, an escape-strategy selector choosing between
+the posture nudge and an RRT-only mode, and supporting RViz/telemetry). After
+several rounds of debugging (goal-IK sampling failures, starved time budgets,
+an always-converges-but-always-collides bug, a task_dim coupling bug), the
+approach was ultimately judged unsuccessful and abandoned on 2026-07-03. All
+of that code has been fully removed: `rrt_planner.py` deleted;
+`reference_governor.py` stripped of the RRT state/waypoint-queue/trigger
+logic (keeping only the original posture-weight + task_dim correction from
+§9.9); `main_qp_controller.py` and `plotter.py` stripped of the RRT
+publishers, telemetry, and plot window; `config.py`'s §3d RRT block and the
+`LME_ESCAPE_STRATEGY` selector removed. `cfg.ENABLE_LOCAL_MINIMA_ESCAPE`
+defaults to `False`; if re-enabled, it now offers ONLY the §9.9 posture
+correction.
 
 ### 9.1 Sensing constraints (real-hardware honesty, 2026-06-29)
 
