@@ -1,7 +1,16 @@
 # AI Agent Context — triago_control
 
 > **This file is maintained by the AI agent. Do not edit manually.**
-> Last updated: 2026-07-02 (§9.11: after §9.10's fix stopped the crash/spam, the
+> Last updated: 2026-07-02 (§9.12: goal-IK was STILL failing 100% of the time even
+> after §9.11's widened budget — every restart converged to the exact target
+> position (sub-2mm) but always collided. Root cause: position is only 3
+> constraints on a 7-DOF arm (4 redundant DOF), and those 4 DOF were left to
+> chance (random restart seed) instead of being actively steered. Fixed with
+> NULL-SPACE OBSTACLE AVOIDANCE — a secondary task that climbs the collision-
+> clearance gradient, projected into the primary position task's null space, so
+> it can never fight convergence. See §9.12 for the full analysis and the
+> roadmap/no-roadmap clarification the operator asked for.)
+> Earlier: 2026-07-02 (§9.11: after §9.10's fix stopped the crash/spam, the
 > planner was STILL failing every episode with `samples=0` in ~16ms — because the
 > goal-IK search's time/restart budget was starved (a leftover from when tight
 > budgets mattered for the old, broken finder). There is NO millisecond
@@ -1241,6 +1250,68 @@ as an actual report instead of one opaque line:
   `main_qp_controller`) — the SAME per-arm colored `print` used for every other
   governor/escape log line, so all planner diagnostics land in the same console
   stream the operator already watches.
+
+### 9.12 Goal-IK null-space obstacle avoidance (2026-07-02) — the "always converges, always collides" bug
+
+Follow-up on §9.11. Even after widening the IK time/restart budget, the operator's
+report showed the SAME pattern on all 40/40 restarts: converge to the exact
+target position (final error ~1.9mm) and STILL fail collision-free, every time.
+
+**Root cause**: goal-IK only constrains **position** (3 equations) on a 7-DOF
+arm — 4 DOF are redundant and were left ENTIRELY TO CHANCE: each restart seeded
+a uniformly random 7D configuration, then DLS-drove only the position error to
+zero, so whatever elbow/wrist posture the random seed happened to imply around
+that position is what the solver kept. Near a table edge, only a narrow band of
+postures keeps the ~25cm gripper collision box clear; a random seed essentially
+never lands in that band, so the previous "restart on collision" strategy was
+statistically almost guaranteed to fail regardless of how many restarts it was
+given — the operator's target position genuinely WAS reachable (confirmed by the
+consistent sub-2mm convergence), the search just never actively looked for a
+collision-free posture around it.
+
+**Fix — standard redundancy resolution** (`RRTPlanner._find_goal_config_ik`,
+`rrt_planner.py`): each IK iteration now computes
+```
+dq = dq_task + N @ dq_secondary
+dq_task      = J_pinv @ err                  (primary: drive EE position to x_goal, DLS)
+N            = I - J_pinv @ J                (projector onto the primary task's null space)
+dq_secondary = k_clear * grad(min_distance) / ||grad||   (secondary: climb AWAY from the
+                                                            nearest obstacle)
+```
+`grad(min_distance)` is estimated by central finite differences over the SAME
+`hppfcl` `computeDistances` query the CBF/collision-check already use (no new
+analytic collision-Jacobian plumbing) — cheap relative to the multi-second
+budget (7 extra distance queries per activation). The secondary task is
+projected into `N` so it can **never fight primary-task convergence** — the
+arm keeps driving to the target position while simultaneously using its
+redundant DOF to unstick itself from the obstacle, INSTEAD OF gambling that a
+random seed avoided it. It only activates once close to the target
+(`RRT_IK_CLEARANCE_ACTIVATION_RADIUS=0.08m`) and under-clear
+(`RRT_IK_CLEARANCE_MARGIN=0.02m` buffer above the CBF's own margin, so the
+accepted goal isn't immediately re-triggering the local-minima detector),
+keeping early iterations (while still far away) cheap. Random restarts are
+KEPT — they still provide basin diversity (elbow-up vs. elbow-down, etc.) — but
+are no longer the ONLY mechanism for resolving a collision.
+
+New config (`config.py` §3d): `RRT_IK_CLEARANCE_MARGIN=0.02`,
+`RRT_IK_CLEARANCE_ACTIVATION_RADIUS=0.08`, `RRT_IK_CLEARANCE_GAIN=0.15`,
+`RRT_IK_CLEARANCE_FD_EPS=0.01`. Also added an explicit wall-clock check inside
+the per-restart iteration loop (the extra finite-difference distance queries
+made a single stubborn restart capable of overshooting `RRT_IK_TIME_BUDGET_S`
+before the outer loop would have re-checked it).
+
+**Answering the operator's two direct questions**:
+- *"Are we running an RRT which builds a map in config space, or restarts every
+  time?"* — Fully restarts. There is no persistent roadmap/PRM today: each local-
+  minima episode launches one fresh `plan_async` call with zero memory of prior
+  attempts, and even WITHIN one call the goal-IK restarts are independent random
+  seeds with no shared tree. A PRM/roadmap is a natural future upgrade if planning
+  latency ever becomes the bottleneck (it currently is not — RRT-Connect itself,
+  once handed a valid goal, was never the failing piece; the goal-IK was).
+- *"How to make it succeed reliably, even if slower / non-optimal?"* — Answered
+  above: null-space obstacle avoidance actively resolves the collision instead of
+  hoping a random restart avoids it, which directly targets the exact failure
+  pattern in the log (exact position, always colliding).
 
 ### 9.1 Sensing constraints (real-hardware honesty, 2026-06-29)
 

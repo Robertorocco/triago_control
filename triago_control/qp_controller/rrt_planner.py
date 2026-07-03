@@ -216,14 +216,20 @@ class RRTPlanner:
                 pin.updateFramePlacements(self.model, data)
                 return np.array(data.oMf[self.ee_frame_id].translation)
 
-            # Helper: collision check (True = collision-free)
-            def is_collision_free(q_arm):
+            # Helper: raw closest distance across all active collision pairs.
+            # Needed (not just the boolean below) by the null-space collision
+            # resolution in _find_goal_config_ik, which climbs the CONTINUOUS
+            # clearance gradient rather than just testing a threshold.
+            def get_min_distance(q_arm):
                 q_full = q_start_full.copy()
                 set_arm_q(q_full, q_arm)
                 pin.updateGeometryPlacements(self.model, data, cmodel, cdata, q_full)
                 pin.computeDistances(cmodel, cdata)
-                min_dist = min(r.min_distance for r in cdata.distanceResults)
-                return min_dist > (cfg.D_SAFE_BASE + cfg.RRT_COLLISION_MARGIN)
+                return min(r.min_distance for r in cdata.distanceResults)
+
+            # Helper: collision check (True = collision-free)
+            def is_collision_free(q_arm):
+                return get_min_distance(q_arm) > (cfg.D_SAFE_BASE + cfg.RRT_COLLISION_MARGIN)
 
             # Helper: random sample in joint limits
             def random_sample():
@@ -274,7 +280,7 @@ class RRTPlanner:
             # cleanly and the caller keeps the posture-only correction.
             t_ik0 = time.perf_counter()
             q_goal_arm = self._find_goal_config_ik(
-                q_start_full, x_goal, data, is_collision_free, set_arm_q, epoch, log)
+                q_start_full, x_goal, data, get_min_distance, epoch, log)
             ik_time = time.perf_counter() - t_ik0
             if q_goal_arm is None:
                 log(f"{tag} Goal-IK FAILED after {ik_time*1000:.0f}ms — no collision-free "
@@ -402,18 +408,39 @@ class RRTPlanner:
             print(f"\033[91m[RRT][{self.arm_side.upper()}] Planner thread exception "
                   f"(handled, planning marked failed): {e}\033[0m", flush=True)
 
-    def _find_goal_config_ik(self, q_start_full, x_goal, data, is_collision_free,
-                             set_arm_q, epoch, log=lambda msg: None):
-        """Position-only damped least-squares IK for a collision-free goal config.
+    def _find_goal_config_ik(self, q_start_full, x_goal, data, get_min_distance,
+                             epoch, log=lambda msg: None):
+        """Position-only damped least-squares IK for a collision-free goal config,
+        using NULL-SPACE OBSTACLE AVOIDANCE as the secondary task.
 
-        Iteratively drives THIS arm's joints so FK(q).translation → x_goal, then
-        verifies the converged config is collision-free. On non-convergence or a
-        collision, restarts from a fresh random seed (the local minimum caused by
-        the obstacle usually still leaves a valid goal config, just not reachable
-        by the greedy CLF gradient). Returns the arm's 7-vector or None.
+        WHY the previous version (pure random-restart IK) failed 100% of the time
+        near an obstacle: position is only 3 constraints on a 7-DOF arm, leaving 4
+        redundant DOF free. The old code let those 4 DOF fall wherever a randomly
+        SEEDED restart happened to converge -- i.e. it hoped a random elbow/wrist
+        posture would, by chance, keep the 25cm gripper collision box clear of the
+        table near the target. That "reach exact position, then discover it always
+        collides" pattern is exactly what the operator's log showed on all 40/40
+        restarts (converged to ~1.9mm, always colliding): random posture sampling
+        essentially never lands in the narrow collision-free band near a surface.
 
-        Fixes the previous uniform-random-rejection finder, which could not hit a
-        3cm Cartesian ball in 7D and therefore always failed with samples=0.
+        FIX: standard redundancy resolution. Each iteration takes
+            dq = dq_task + N @ dq_secondary
+        where:
+            dq_task      = J^+ @ err                    (primary: drive position to x_goal)
+            N            = I - J^+ @ J                  (projector onto the task's null space)
+            dq_secondary = k_clear * grad(min_distance)  (secondary: climb AWAY from the
+                                                           nearest obstacle, estimated by
+                                                           central finite differences over
+                                                           the min collision distance --
+                                                           no new collision-Jacobian plumbing
+                                                           needed, just extra distance queries,
+                                                           which is cheap next to the budget)
+        This ACTIVELY steers the redundant DOF away from collision while the
+        primary task still converges on position -- instead of gambling on a
+        random seed. Random restarts are KEPT (diversity for different elbow-up/
+        down basins) but are no longer the only mechanism; each restart now
+        actively tries to resolve a collision it discovers, rather than just
+        giving up and reseeding immediately.
 
         Budgeted by WALL-CLOCK time (cfg.RRT_IK_TIME_BUDGET_S), not just a fixed
         restart count — there is no hard millisecond requirement on this search;
@@ -423,10 +450,38 @@ class RRTPlanner:
         tag = f"[RRT][{self.arm_side.upper()}]"
         damp2 = cfg.RRT_IK_DAMPING ** 2
         eye3 = np.eye(3)
+        eye_n = np.eye(self.n_dof)
         q_full = q_start_full.copy()
+        clearance_target = cfg.D_SAFE_BASE + cfg.RRT_COLLISION_MARGIN + cfg.RRT_IK_CLEARANCE_MARGIN
+        fd_eps = cfg.RRT_IK_CLEARANCE_FD_EPS
+
+        def set_arm_q(q_arm):
+            for i, idx in enumerate(self.arm_idx_q):
+                q_full[idx] = q_arm[i]
+
+        def fk_pos(q_arm):
+            set_arm_q(q_arm)
+            pin.forwardKinematics(self.model, data, q_full)
+            pin.updateFramePlacements(self.model, data)
+            return np.array(data.oMf[self.ee_frame_id].translation)
+
+        def clearance_gradient(q_arm, center_dist):
+            """Central-difference gradient of min_distance w.r.t. this arm's 7
+            joints. Cheap relative to the multi-second budget (n_dof+1 extra
+            distance queries); avoids needing a new analytic collision Jacobian."""
+            grad = np.zeros(self.n_dof)
+            for i in range(self.n_dof):
+                q_plus = q_arm.copy()
+                q_plus[i] += fd_eps
+                q_plus = np.clip(q_plus, self.q_lower_plan, self.q_upper_plan)
+                d_plus = get_min_distance(q_plus)
+                grad[i] = (d_plus - center_dist) / max(q_plus[i] - q_arm[i], 1e-9)
+            return grad
+
         t_budget_end = time.perf_counter() + cfg.RRT_IK_TIME_BUDGET_S
         restart = 0
         best_err_norm = None
+        best_clearance = None
         while restart < cfg.RRT_IK_MAX_RESTARTS and time.perf_counter() < t_budget_end:
             if self._should_abort(epoch):
                 return None
@@ -436,50 +491,68 @@ class RRTPlanner:
             else:
                 q_arm = np.random.uniform(self.q_lower_plan, self.q_upper_plan)
             err_norm = None
+            clearance = None
             for it in range(cfg.RRT_IK_ITERS_PER_RESTART):
                 if self._should_abort(epoch):
                     return None
-                set_arm_q(q_full, q_arm)
-                pin.forwardKinematics(self.model, data, q_full)
-                pin.updateFramePlacements(self.model, data)
-                x_cur = np.array(data.oMf[self.ee_frame_id].translation)
+                if time.perf_counter() >= t_budget_end:
+                    # Respect the overall IK time budget even mid-restart: the
+                    # null-space clearance step adds extra distance queries per
+                    # iteration, so a single stubborn restart could otherwise
+                    # overshoot the budget before the outer loop rechecks it.
+                    break
+                x_cur = fk_pos(q_arm)
                 err = x_goal - x_cur
                 err_norm = float(np.linalg.norm(err))
-                if err_norm < cfg.RRT_GOAL_POS_TOLERANCE:
-                    # Converged in position -- accept only if collision-free.
-                    if is_collision_free(q_arm):
-                        log(f"{tag} Goal-IK restart {restart+1}/{cfg.RRT_IK_MAX_RESTARTS}: "
-                            f"CONVERGED at iter {it} (|err|={err_norm*1000:.1f}mm), "
-                            f"collision-free -> ACCEPTED.")
-                        return q_arm.copy()
+                clearance = get_min_distance(q_arm)
+
+                if err_norm < cfg.RRT_GOAL_POS_TOLERANCE and clearance > clearance_target:
                     log(f"{tag} Goal-IK restart {restart+1}/{cfg.RRT_IK_MAX_RESTARTS}: "
-                        f"reached target position at iter {it} but the config COLLIDES "
-                        f"-> reseeding.")
-                    break  # good position but colliding -> reseed
-                # Position-only frame Jacobian, restricted to this arm's columns.
+                        f"CONVERGED at iter {it} (|err|={err_norm*1000:.1f}mm, "
+                        f"clearance={clearance*1000:.1f}mm) -> ACCEPTED.")
+                    return q_arm.copy()
+
+                # --- Primary task: position (DLS pseudo-inverse) ---
                 J6 = pin.computeFrameJacobian(
                     self.model, data, q_full, self.ee_frame_id,
                     pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)
                 J = J6[:3, :][:, self.arm_idx_v]
-                # Damped least-squares step: dq = J^T (J J^T + damp^2 I)^-1 err
-                dq = J.T @ np.linalg.solve(J @ J.T + damp2 * eye3, err)
-                # Cap the step for numerical stability near singularities.
+                J_pinv = J.T @ np.linalg.inv(J @ J.T + damp2 * eye3)
+                dq_task = J_pinv @ err
+
+                # --- Secondary task: climb the clearance gradient, projected
+                # into the primary task's NULL SPACE so it never fights position
+                # convergence. Only engaged once position is already close AND
+                # clearance is insufficient -- keeps early iterations cheap
+                # (skips n_dof+1 extra distance queries while still far away). ---
+                dq_secondary = np.zeros(self.n_dof)
+                if err_norm < cfg.RRT_IK_CLEARANCE_ACTIVATION_RADIUS and clearance < clearance_target:
+                    grad = clearance_gradient(q_arm, clearance)
+                    g_norm = np.linalg.norm(grad)
+                    if g_norm > 1e-9:
+                        N = eye_n - J_pinv @ J
+                        dq_secondary = N @ (cfg.RRT_IK_CLEARANCE_GAIN * grad / g_norm)
+
+                dq = dq_task + dq_secondary
                 step = np.linalg.norm(dq)
                 if step > cfg.RRT_IK_MAX_STEP:
                     dq *= cfg.RRT_IK_MAX_STEP / step
                 q_arm = np.clip(q_arm + dq, self.q_lower_plan, self.q_upper_plan)
             else:
-                # Loop exhausted without breaking (i.e. never converged in position)
+                # Loop exhausted without converging on BOTH position and clearance.
                 log(f"{tag} Goal-IK restart {restart+1}/{cfg.RRT_IK_MAX_RESTARTS}: did NOT "
-                    f"converge in {cfg.RRT_IK_ITERS_PER_RESTART} iters (final |err|="
-                    f"{err_norm*1000:.1f}mm) -- likely stuck at a singularity/joint-limit "
-                    f"wall -> reseeding.")
+                    f"reach an accepted config in {cfg.RRT_IK_ITERS_PER_RESTART} iters "
+                    f"(final |err|={err_norm*1000:.1f}mm, clearance={clearance*1000:.1f}mm) "
+                    f"-> reseeding.")
             if best_err_norm is None or (err_norm is not None and err_norm < best_err_norm):
                 best_err_norm = err_norm
+                best_clearance = clearance
             restart += 1
-        log(f"{tag} Goal-IK exhausted ({restart} restarts, "
-            f"best |err| reached={('%.1fmm' % (best_err_norm*1000)) if best_err_norm is not None else 'n/a'}) "
-            f"without a collision-free convergence.")
+        log(f"{tag} Goal-IK exhausted ({restart} restarts, best |err|="
+            f"{('%.1fmm' % (best_err_norm*1000)) if best_err_norm is not None else 'n/a'}, "
+            f"best clearance={('%.1fmm' % (best_clearance*1000)) if best_clearance is not None else 'n/a'} "
+            f"vs required {clearance_target*1000:.1f}mm) without a collision-free convergence. "
+            f"The target position may only be reachable through a persistently narrow gap.")
         return None
 
     def _shortcut_smooth(self, path, is_collision_free):

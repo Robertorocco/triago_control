@@ -185,6 +185,23 @@ RRT_IK_MAX_STEP = 0.20                # [rad] per-iteration joint step cap for t
 RRT_IK_TIME_BUDGET_S = 2.0            # [s] max wall-clock time the goal-IK search is allowed
 RRT_IK_MAX_RESTARTS = 40              # max number of random-seed restarts within that time budget
 RRT_IK_ITERS_PER_RESTART = 150        # DLS iterations per restart before declaring it stuck
+# --- Goal-IK null-space obstacle avoidance (2026-07-02) ---
+# Position is only 3 constraints on a 7-DOF arm (4 redundant DOF). Pure random
+# restarts left those 4 DOF wherever chance put them, so the IK converged to the
+# EXACT target position every time but almost always with a colliding elbow/
+# wrist posture (a narrow obstacle-free band is unlikely to be hit by chance).
+# Fix: once close to the target AND under-clear, add a SECONDARY task -- climb
+# the (finite-differenced) collision-clearance gradient, PROJECTED into the
+# primary task's null space so it never fights position convergence.
+RRT_IK_CLEARANCE_MARGIN = 0.02        # [m] extra clearance beyond D_SAFE_BASE+RRT_COLLISION_MARGIN
+                                      #   the goal config must achieve (buffer above the CBF's own
+                                      #   margin so the accepted goal isn't immediately re-triggering)
+RRT_IK_CLEARANCE_ACTIVATION_RADIUS = 0.08  # [m] position-error radius below which the secondary
+                                           #   (clearance) task engages -- skips the extra distance
+                                           #   queries while still far from the target (cheap)
+RRT_IK_CLEARANCE_GAIN = 0.15          # [rad] per-iteration null-space step size along the
+                                      #   normalized clearance gradient
+RRT_IK_CLEARANCE_FD_EPS = 0.01        # [rad] finite-difference step for the clearance gradient
 RRT_COLLISION_MARGIN = 0.005          # [m] extra safety margin ON TOP of D_SAFE_BASE for the planner
                                       #   (so the planned path is more conservative than the CBF)
 RRT_MAX_SAMPLES = 8000                # absolute sample cap (fallback if wall-clock budget is generous)
