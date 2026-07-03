@@ -384,6 +384,17 @@ class SharedControlNode(Node):
         # gripper, split out of /shared_policy_markers so it can be shown/hidden
         # independently in RViz, same rationale as the guidance marker above.
         self.pub_robot_policy_marker = self.create_publisher(MarkerArray, '/robot_policy_marker', 10)
+        # --- Blended-reference gripper (2026-07-03, TWIST BLENDING mode only) ---
+        # Shows the ACTUAL pose being integrated from the blended twist
+        # (target_twist = (1-alpha)*v_user + alpha*pi_policy) and sent to the QP
+        # CLF-CBF on /arm_*/cartesian_reference -- i.e. the literal reference the
+        # robot is tracking, NOT a speculative lookahead. Rendered in the SAME
+        # light-blue color as /guidance_policy_marker (the pure-user-intent
+        # gripper) so the operator can visually A/B the two: "pure user intent"
+        # vs. "what is actually being sent to the robot". BOTH topics stay live
+        # simultaneously (independently toggleable in RViz) so the operator can
+        # switch between them to judge which is more intuitive.
+        self.pub_blended_ref_marker = self.create_publisher(MarkerArray, '/blended_reference_marker', 10)
         # Bug fix: this used to be assigned a second time later in __init__,
         # silently leaking the first TransformBroadcaster. Assigned exactly once.
         self.tf_broadcaster = TransformBroadcaster(self)
@@ -1113,7 +1124,10 @@ class SharedControlNode(Node):
             self._release_object()
 
         if cfg.BLENDING and tick_output.new_state == "SHARED_AUTONOMY":
-            alpha = self.compute_alpha(b_max)
+            # pos_error (EE -> active goal, computed above from current_T_EE)
+            # drives the smooth proximity boost so the assistive twist can
+            # actually finish the approach near the goal (see compute_alpha).
+            alpha = self.compute_alpha(b_max, pos_error=pos_error)
             self.last_alpha = alpha
             # v_blend = (1-alpha)*v_user + alpha*pi_policy -- blended at the
             # TWIST level (not a one-shot pose offset), so it accumulates into
@@ -1299,6 +1313,21 @@ class SharedControlNode(Node):
             cmd_data = np.concatenate((p_ref, rpy_ref, target_twist, [self.TASK_DIM]))
             msg_cmd = Float64MultiArray()
             msg_cmd.data = cmd_data.tolist()
+
+            # --- Blended-reference gripper marker (2026-07-03) ---
+            # T_virtual_ref IS the literal pose about to be published below on
+            # /arm_*/cartesian_reference -- i.e. the QP CLF-CBF's actual
+            # reference, integrated from the blended twist. Same light-blue
+            # color/style as /guidance_policy_marker (pure user intent) so the
+            # two can be visually A/B'd; kept independent so BOTH stay live and
+            # toggleable in RViz.
+            blended_ref_markers = MarkerArray()
+            blended_now = self.get_clock().now().to_msg()
+            blended_ref_markers.markers.extend(
+                self.create_gripper_markers(
+                    T_virtual_ref, 0.85, 0, blended_now,
+                    ns="blended_reference", rgb=(0.3, 0.7, 1.0)))
+            self.pub_blended_ref_marker.publish(blended_ref_markers)
 
             if self.active_arm == 'right':
                 self.pub_blend_right.publish(msg_cmd)
@@ -1597,7 +1626,8 @@ class SharedControlNode(Node):
         delete_all.action = Marker.DELETEALL
         ma = MarkerArray()
         ma.markers.append(delete_all)
-        for pub in (self.pub_markers, self.pub_guidance_marker, self.pub_robot_policy_marker):
+        for pub in (self.pub_markers, self.pub_guidance_marker, self.pub_robot_policy_marker,
+                    self.pub_blended_ref_marker):
             pub.publish(ma)
 
     def publish_grasp_guidance(self, T_EE, T_goal, pos_error, ang_error, now=None):
@@ -1875,7 +1905,15 @@ class SharedControlNode(Node):
 
         return pi.copy() + white_noise + self._ou_bias
 
-    def compute_alpha(self, b_max):
+    @staticmethod
+    def _smoothstep(x, lo, hi):
+        """C1-continuous ramp: 0 at x<=lo, 1 at x>=hi, smooth in between."""
+        if hi <= lo:
+            return 1.0 if x >= hi else 0.0
+        t = float(np.clip((x - lo) / (hi - lo), 0.0, 1.0))
+        return t * t * (3.0 - 2.0 * t)
+
+    def compute_alpha(self, b_max, pos_error=None):
         """Maps the maximum belief probability to the autonomy arbitration weight.
 
         alpha = cfg.ALPHA_MAX * x**cfg.ALPHA_GAMMA, where x is b_max normalised
@@ -1886,11 +1924,23 @@ class SharedControlNode(Node):
         ALPHA_MAX well before belief is fully certain (a "sufficiently
         confident" belief already hands strong authority to the policy,
         instead of only the last few % of certainty mattering).
-        The result is additionally LOW-PASS FILTERED (cfg.ALPHA_LPF_COEFF) via
-        self.alpha_lpf so alpha never jumps discontinuously between ticks, even
-        if the belief distribution itself shifts abruptly.
         ALPHA_MAX < 1.0 guarantees the user retains at least (1-ALPHA_MAX)
         authority at all times, regardless of belief.
+
+        --- Proximity boost (task-completion fix, 2026-07-03) ---
+        pi_policy naturally shrinks toward zero as the EE nears the goal
+        (CLF-style convergence), so the blended contribution can become too
+        weak to actually FINISH the approach even with belief at 100%. If
+        `pos_error` (EE-to-active-goal distance, meters) is provided, a smooth
+        proximity gain (smoothstep, 1.0 far away -> cfg.ALPHA_PROXIMITY_MAX_GAIN
+        at/inside cfg.ALPHA_PROXIMITY_NEAR) multiplies alpha_raw BEFORE the LPF,
+        then the boosted value is capped at cfg.ALPHA_PROXIMITY_CAP (a higher
+        ceiling than ALPHA_MAX, but still < 1.0 -- the user always retains some
+        authority, even at task completion).
+
+        The result is LOW-PASS FILTERED (cfg.ALPHA_LPF_COEFF) via self.alpha_lpf
+        so alpha never jumps discontinuously between ticks, even if the belief
+        distribution or proximity gain shifts abruptly.
         """
         active_goals = [k for k in self.target_keys
                         if k not in self.belief_estimator.get_excluded_goals()]
@@ -1905,6 +1955,15 @@ class SharedControlNode(Node):
 
         alpha_raw = cfg.ALPHA_MAX * (x ** cfg.ALPHA_GAMMA)
         alpha_raw = float(np.clip(alpha_raw, 0.0, cfg.ALPHA_MAX))
+
+        if pos_error is not None:
+            # far (>= ALPHA_PROXIMITY_FAR) -> proximity_t=0 -> gain=1.0 (no boost)
+            # near (<= ALPHA_PROXIMITY_NEAR) -> proximity_t=1 -> gain=ALPHA_PROXIMITY_MAX_GAIN
+            proximity_t = self._smoothstep(
+                cfg.ALPHA_PROXIMITY_FAR - float(pos_error),
+                0.0, cfg.ALPHA_PROXIMITY_FAR - cfg.ALPHA_PROXIMITY_NEAR)
+            gain = 1.0 + proximity_t * (cfg.ALPHA_PROXIMITY_MAX_GAIN - 1.0)
+            alpha_raw = min(alpha_raw * gain, cfg.ALPHA_PROXIMITY_CAP)
 
         self.alpha_lpf = ((cfg.ALPHA_LPF_COEFF * alpha_raw)
                          + (1.0 - cfg.ALPHA_LPF_COEFF) * self.alpha_lpf)

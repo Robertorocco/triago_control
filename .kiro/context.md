@@ -1,7 +1,21 @@
 # AI Agent Context — triago_control
 
 > **This file is maintained by the AI agent. Do not edit manually.**
-> Last updated: 2026-07-03 (§11.5 NEW: config-driven shared-autonomy TWIST
+> Last updated: 2026-07-03 (§11.6 NEW: three usability fixes to the TWIST
+> BLENDING architecture (§11.5), based on operator hands-on feedback: (1) new
+> `/blended_reference_marker` RViz gripper (light-blue, same style as the
+> existing pure-user-intent `/guidance_policy_marker`) showing the LITERAL pose
+> integrated from the blended twist and sent to the QP -- both light-blue
+> markers stay live simultaneously so the operator can A/B which is more
+> intuitive; (2) `cfg.ALPHA_MAX` 0.80 -> 0.60 (user's guaranteed authority floor
+> raised from 20% -> 40%) since once a goal was picked the autonomy had too
+> much authority for the user to meaningfully override; (3) a new smooth,
+> distance-based proximity boost (`cfg.ALPHA_PROXIMITY_*`) on `compute_alpha`
+> so the assistive twist doesn't fade to uselessness near the goal --
+> compensating for `pi_policy`'s own natural CLF-style falloff so the task can
+> actually be CONCLUDED, still capped below 100% authority via
+> `ALPHA_PROXIMITY_CAP`. See §11.6.)
+> Earlier: 2026-07-03 (§11.5 NEW: config-driven shared-autonomy TWIST
 > BLENDING architecture. `cfg.BLENDING` in `qp_controller/config.py` is now the
 > SINGLE source of truth for the flag (removed the old local, always-false,
 > never-wired `self.BLENDING` on `SharedControlNode` — `compute_alpha` used to
@@ -1713,6 +1727,77 @@ snapping `ref_pos`/`ref_rot` toward the real EE when divergence exceeds a
 threshold) is a natural next step if this proves disorienting in practice —
 not implemented now since it wasn't part of the agreed plan for this pass.
 
+### 11.6 TWIST BLENDING usability fixes (2026-07-03)
+
+Follow-up on §11.5, based on operator hands-on feedback after testing the
+architecture: (a) confusion about what the two light-blue-ish RViz grippers
+actually represent, (b) the autonomy having too much authority once a goal
+was locked in ("almost anything can be done" — not desirable as the primary
+feel), and (c) the robot being unable to CONCLUDE the approach near the goal.
+
+**1. New `/blended_reference_marker` RViz gripper.** Renders the LITERAL pose
+integrated from `target_twist` (the blended twist actually sent to the QP)
+and about to be published on `/arm_*/cartesian_reference` — i.e. exactly what
+the robot is tracking this tick, not a speculative lookahead. Built at the
+same point in `timer_callback` where `T_virtual_ref` (the 20 ms lookahead
+pose) is computed, right before it's packed into the outgoing
+`Float64MultiArray`. Same style/color as the existing `/guidance_policy_marker`
+(light blue, `rgb=(0.3, 0.7, 1.0)`, `create_gripper_markers(..., ns=
+"blended_reference", ...)`) so the two can be visually compared side-by-side:
+- `/guidance_policy_marker` — pure USER intent (reference-anchored, integrates
+  `pi_blend_user` — the belief-weighted user-policy blend, NOT the actual
+  blended twist).
+- `/blended_reference_marker` — what is ACTUALLY being sent to the QP
+  (EE-anchored, integrates the true `target_twist`).
+
+Both topics are published independently and BOTH stay live simultaneously
+(the operator manually toggles visibility in RViz to judge which is more
+intuitive to show — no code-level exclusivity was added). Included in the
+existing `_sweep_all_markers` DELETEALL self-heal pass (every
+`MARKER_CLEANUP_PERIOD_S=3.0s`) alongside the other three marker topics.
+
+**2. `cfg.ALPHA_MAX` 0.80 → 0.60 — user authority floor raised 20%→40%.**
+Operator report: once a goal was confidently picked, the blend gave the
+autonomy so much authority that the user could effectively only "change the
+robot's mind about the goal" but couldn't meaningfully steer once committed —
+not a desirable default feel. Lowering the ceiling by 20 percentage points
+raises the user's GUARANTEED floor from `1-0.80=20%` to `1-0.60=40%` at every
+belief level (the `compute_alpha` formula and `ALPHA_GAMMA` ramp shape are
+unchanged — only the ceiling moved).
+
+**3. Smooth proximity boost — fixes "can't conclude the task near the
+goal".** Root cause: `pi_policy` (the QP-constrained policy twist, `tick_
+output.target_twist` in `_shared_autonomy`) is itself a CLF-style
+proportional term that naturally shrinks toward zero as the EE approaches the
+goal (by design — no overshoot). Combined with `ALPHA_MAX` capping the blend
+weight, the ALREADY-SMALL near-goal policy twist got a bounded fraction
+applied to it, and the resulting `v_blend` could be too weak to close the
+final few centimeters. New mechanism (`compute_alpha`, now takes an optional
+`pos_error` argument — the real EE-to-active-goal distance, already computed
+earlier in the same tick):
+
+```
+gain = 1.0 + smoothstep(FAR - pos_error, 0, FAR - NEAR) * (MAX_GAIN - 1.0)
+alpha_boosted = min(alpha_raw * gain, ALPHA_PROXIMITY_CAP)
+```
+- `cfg.ALPHA_PROXIMITY_FAR=0.20m` / `cfg.ALPHA_PROXIMITY_NEAR=0.05m`: the gain
+  ramps smoothly (C1-continuous smoothstep, `_smoothstep` static helper) from
+  `1.0` (no boost, beyond 20cm) to `cfg.ALPHA_PROXIMITY_MAX_GAIN=1.5` (at/inside
+  5cm), so there is no discontinuity in the blended reference as the EE
+  approaches.
+- `cfg.ALPHA_PROXIMITY_CAP=0.90`: hard ceiling on the BOOSTED alpha — HIGHER
+  than the away-from-goal `ALPHA_MAX=0.60` (deliberately, since this is
+  specifically meant to help finish the task), but still `< 1.0`, so the user
+  retains at least 10% authority even at the exact moment of task completion.
+- The boosted value is computed BEFORE the existing LPF (`cfg.
+  ALPHA_LPF_COEFF`), so temporal smoothness is preserved exactly as before —
+  no new discontinuity source was introduced.
+
+The proximity boost is unconditional whenever `pos_error` is supplied (which
+it always is, from the call site in `timer_callback` — `compute_alpha(b_max,
+pos_error=pos_error)`); it has no effect (`gain=1.0`) far from any goal, so
+free-space blending behavior away from a goal is unchanged by this fix.
+
 ---
 
 ## 12. Current State & Known Issues
@@ -1727,7 +1812,7 @@ not implemented now since it wasn't part of the agreed plan for this pass.
 | Post-grasp (LIFT + HOLDING + place) | ✅ Working | 9 cm slow lift → HOLDING resumes shared autonomy → Platform placement manifold → release → RELEASE_LIFT → SHARED_AUTONOMY |
 | RViz visualization | ✅ Working | Light-green=EE robot policy (own topic `/robot_policy_marker`), Light-blue=reference guidance (own topic `/guidance_policy_marker`). Commanded gripper is now PER-ARM (2026-07-01, §9.4): each arm independently Blue=actively tracking / Grey=frozen (`right_frozen`/`left_frozen` ground truth via `/qp_debug/arm_frozen`) — both render blue simultaneously under `trajectory_generator.py` or dual teleop, exactly one blue+one grey in single-arm teleop. Belief-opacity goal grippers + grasp-ready cue on `/shared_policy_markers`. Grasp-guidance move/rotate arrows REMOVED (cluttered the view). Periodic DELETEALL sweep every 3s on all 3 marker topics (self-heals stuck/ghost markers). Dual belief subplot (active colored, inactive greyscale). Task-authority soft-cost plot (`/qp_debug/task_authority`). Plotter dashboard also has a NEW "Joint Positions" slider-panel GUI window (§9.5, real Pinocchio joint limits) and per-arm "Slack Weight" (R/L) traces. |
 | Haption teleoperation (Virtual Fixture mode) | ✅ Working | `teleop_triago_clutch.py` + `haptic_force_manager_tutorial.py`. Force layers: F_guide (velocity-field, v_max_user 0.04/0.10) + F_fixture (position spring near goal). Handle drag during autonomous phases (KP+KD velocity-following). Active when `cfg.BLENDING=False` (default). |
-| Shared-autonomy TWIST BLENDING mode | 🔧 New (2026-07-03), untested on real hardware | `cfg.BLENDING=True` (§11.5): `main_shared_autonomy.py` becomes the sole persistent publisher of `/arm_*/cartesian_reference`, integrating `v_blend=(1-alpha)*v_user+alpha*pi_policy` every tick; `teleop_triago_clutch.py` redirects to `/arm_*/user_cartesian_reference`; `haptic_force_manager_blending_tutorial.py` renders ONLY F_sync (tethered to the pure user pose) + a new "Authority Share" plot sourced from `/shared_autonomy/blend_debug`. |
+| Shared-autonomy TWIST BLENDING mode | 🔧 New (2026-07-03), untested on real hardware | `cfg.BLENDING=True` (§11.5): `main_shared_autonomy.py` becomes the sole persistent publisher of `/arm_*/cartesian_reference`, integrating `v_blend=(1-alpha)*v_user+alpha*pi_policy` every tick; `teleop_triago_clutch.py` redirects to `/arm_*/user_cartesian_reference`; `haptic_force_manager_blending_tutorial.py` renders ONLY F_sync (tethered to the pure user pose) + a new "Authority Share" plot sourced from `/shared_autonomy/blend_debug`. Usability pass (§11.6): `ALPHA_MAX` 0.80→0.60 (user floor 20%→40%), smooth distance-based proximity boost so the task can be concluded near the goal (capped `ALPHA_PROXIMITY_CAP=0.90`), new `/blended_reference_marker` RViz gripper (light-blue, literal QP-bound pose) shown alongside the existing pure-user-intent `/guidance_policy_marker` for A/B comparison. |
 | Head control (visual servoing) | 🔧 Active dev | `qp_head_visual_servo.py`: QP-based hand-tracking, independent loop. Starting point — no image processing yet. |
 | Head cylinder perception (`main_head.py`) | ✅ Improved (2026-07-02, §5.10) | Rim-extraction + Hyper circle fit (removed a ~-4 to -5mm disk-interior bias in the radius fit), top-slice-median height (removed a `z_max` high-bias), 3mm voxel leaf (was 10mm — too coarse vs. a 2cm cylinder radius), closer/verified-reachable `HEAD_POSTURE_TARGET`, distortion-correctness gap closed in `camera_interface.py`, tracker fusion switched grow-only→EMA. Verified numerically (not on real hardware) to land single-view/scanned radius+height error at roughly -1 to -4mm, comfortably under the 1cm target. `feature/head-sweep-compute-track` reviewed, not merged (incompatible kwargs, re-enables the already-disabled point-level VoxelMap) — see §5.10 for salvageable ideas. |
 | Arm-vs-head collision avoidance | ✅ Working | Head chain modeled as a quasi-static CBF obstacle in the ARM QP (§9.7): live FK-driven capsules (yellow in Meshcat), zero head joints added to the decision vector. `arm_right_1`/`arm_left_1` excluded from head pairs per instruction. Head's OWN separate controller/collision model (`qp_head_visual_servo.py`) is unchanged. |

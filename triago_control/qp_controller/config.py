@@ -55,12 +55,35 @@ BLENDING = False
 # alpha(belief) shaping -- see main_shared_autonomy.compute_alpha for the
 # exact formula. x = normalised belief in [0,1] (0 at uniform, 1 at certainty).
 #   alpha = ALPHA_MAX * x**ALPHA_GAMMA
-ALPHA_MAX = 0.80          # Hard cap on autonomy authority (user retains >= 20%)
+ALPHA_MAX = 0.60          # Hard cap on autonomy authority away from the goal
+                          #   (user retains >= 40%). [was 0.80/20% -- operator
+                          #   reported that once a goal was picked, autonomy had
+                          #   too much authority and "almost anything can be
+                          #   done" without the user being able to meaningfully
+                          #   override; lowered by 20 percentage points, i.e.
+                          #   the user's guaranteed floor rises from 20% -> 40%.]
 ALPHA_GAMMA = 0.5         # <1 = alpha ramps toward ALPHA_MAX quickly once belief
                           #   is "sufficiently high"; 1.0 = linear ramp
 ALPHA_LPF_COEFF = 0.08    # Low-pass filter coefficient on alpha (lower = smoother,
                           #   avoids any discontinuity in the blended reference
                           #   when the belief distribution shifts)
+
+# --- Distance-based assistance-intensity boost (task completion, 2026-07-03) ---
+# The QP-constrained policy twist (pi_policy) naturally shrinks toward zero as
+# the EE nears the goal (proportional/CLF-style convergence -- by design, so it
+# doesn't overshoot). Combined with ALPHA_MAX capping the blend weight, the
+# operator reported the robot sometimes couldn't actually CONCLUDE the
+# approach: near the goal the assistive contribution became too weak to close
+# the last few centimeters. This SEPARATE, smooth proximity gain temporarily
+# raises the EFFECTIVE alpha as the EE nears the active goal -- compensating
+# for pi_policy's own natural falloff -- capped by ALPHA_PROXIMITY_CAP so full
+# autonomy is still never reached even at the goal. Smoothstep-shaped in the
+# EE-to-goal distance (see compute_alpha), so it introduces no discontinuity.
+ALPHA_PROXIMITY_NEAR = 0.05      # m -- full boost gain at/inside this distance
+ALPHA_PROXIMITY_FAR = 0.20       # m -- no boost beyond this distance (gain = 1.0)
+ALPHA_PROXIMITY_MAX_GAIN = 1.5   # multiplier applied to alpha at ALPHA_PROXIMITY_NEAR
+ALPHA_PROXIMITY_CAP = 0.90       # hard ceiling on the BOOSTED alpha (user retains >= 10%
+                                 #   even at the moment of task completion)
 
 # =============================================================================
 # 2. SAFETY + CONTROL HYPERPARAMETERS
