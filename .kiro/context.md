@@ -1,7 +1,17 @@
 # AI Agent Context — triago_control
 
 > **This file is maintained by the AI agent. Do not edit manually.**
-> Last updated: 2026-07-02 (§5.10: head cylinder-perception accuracy pass —
+> Last updated: 2026-07-02 (§9.11: after §9.10's fix stopped the crash/spam, the
+> planner was STILL failing every episode with `samples=0` in ~16ms — because the
+> goal-IK search's time/restart budget was starved (a leftover from when tight
+> budgets mattered for the old, broken finder). There is NO millisecond
+> requirement on this search: the QP keeps holding the escape's posture
+> correction the whole time it runs. Widened `RRT_IK_TIME_BUDGET_S` 0(implicit)→2.0s,
+> `RRT_PLANNING_BUDGET_S` 1.5→5.0s, and added verbose, throttled console
+> diagnostics through every stage (goal-IK per-restart trace, RRT-Connect
+> periodic growth report) so a failure/success can be read as a report instead
+> of a single opaque one-liner. See §9.11.)
+> Also 2026-07-02 (§5.10: head cylinder-perception accuracy pass —
 > found and fixed the dominant error source in `main_head.py`'s geometric
 > pipeline: the circle fit ran on the disk INTERIOR, not just the boundary,
 > systematically biasing the radius small by ~-4 to -5mm; no amount of
@@ -1187,6 +1197,50 @@ never touches the QP formulation.
 is aborted immediately (non-blocking) and control returns to tracking the (always-live)
 blue reference gripper. During waypoint execution the same still-velocity check aborts
 the path (unchanged, §govern).
+
+### 9.11 RRT planner: starved IK budget + verbose diagnostics (2026-07-02)
+
+Follow-up on §9.10. That fix stopped the crash/spam, but the planner was still
+failing EVERY escape episode: `Planning FAILED (samples=0, time=16-17ms)`. The
+`samples=0` confirmed the goal-IK step (§9.10's fix) itself was failing, and the
+~16ms runtime showed WHY: `_find_goal_config_ik` was called with hard-coded
+defaults `max_restarts=10, iters=120` — a leftover from when the OLD (broken)
+finder needed a tight budget to keep the per-tick spam from being even worse. At
+~150µs per DLS iteration, 10 restarts × 120 iters is only ~15ms of wall-clock —
+nowhere near enough for 40 random 7D seeds to reliably find one that both (a)
+converges to the target position AND (b) is collision-free, especially with an
+obstacle actively blocking the region near the current pose.
+
+**Key clarification confirmed by the operator**: there is **no millisecond
+requirement anywhere in this pipeline**. While the planner thread runs — even for
+several seconds — the QP-CLF-CBF keeps driving the arm via the local-minima
+escape's already-applied posture correction (lowered posture weight + `task_dim
+=3` for an obstacle-induced minimum, see `update_local_minima_escape`). The
+planner and the real-time safety loop are fully decoupled by design (§9.10); there
+was never a reason to keep its budgets tight.
+
+**Fix — widen the budgets** (`config.py`):
+- `RRT_IK_TIME_BUDGET_S = 2.0` (new — wall-clock cap on the whole goal-IK search)
+- `RRT_IK_MAX_RESTARTS = 40` (was the hard-coded default of 10)
+- `RRT_IK_ITERS_PER_RESTART = 150` (was the hard-coded default of 120)
+- `RRT_PLANNING_BUDGET_S = 1.5 → 5.0` (RRT-Connect's own growth budget, same
+  reasoning — no need to rush)
+- `RRT_PROGRESS_LOG_PERIOD_S = 1.0` (new — throttle period for the new progress logs)
+
+**Fix — verbose, throttled diagnostics** (`rrt_planner.py`), so a run can be read
+as an actual report instead of one opaque line:
+- On thread start: target position, IK budget, RRT-Connect budget.
+- Per goal-IK restart: converged-and-accepted / converged-but-colliding
+  (reseeding) / did-not-converge (final error norm), plus a final summary
+  (restarts used, best error norm reached) if the whole IK search fails.
+- Per RRT-Connect run: a throttled "still growing" line (sample count, both
+  tree sizes, elapsed/budget) every `RRT_PROGRESS_LOG_PERIOD_S`, plus an
+  explicit CONNECTED or EXHAUSTED summary.
+- `plan_async` now takes an optional `logger` callable, threaded through from
+  `reference_governor.update_rrt_planner` (which already had one from
+  `main_qp_controller`) — the SAME per-arm colored `print` used for every other
+  governor/escape log line, so all planner diagnostics land in the same console
+  stream the operator already watches.
 
 ### 9.1 Sensing constraints (real-hardware honesty, 2026-06-29)
 

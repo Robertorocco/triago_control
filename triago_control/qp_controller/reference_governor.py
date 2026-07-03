@@ -574,12 +574,19 @@ class ReferenceGovernor:
                 cdata_plan = cmodel.createData()
                 for req in cdata_plan.distanceRequests:
                     req.enable_nearest_points = True
-                self._rrt.plan_async(current_q_full, np.array(x_ref), cmodel, cdata_plan)
                 if logger is not None:
                     logger(f"\033[95m[RRT][{self.arm_side.upper()}] Planner TRIGGERED "
                           f"(escape active for {self._lme_escape_elapsed:.1f}s, "
-                          f"ref still, error not resolved). Planning in background "
-                          f"(one attempt this episode)...\033[0m")
+                          f"ref still |v_ref|={v_norm:.3f}m/s, error not resolved). "
+                          f"Planning in background (one attempt this episode, no time "
+                          f"pressure -- QP keeps holding the posture correction meanwhile). "
+                          f"See below for the planner's own progress log.\033[0m")
+                # Forward the SAME logger into the planner thread so its internal
+                # goal-IK / RRT-Connect progress (see rrt_planner.py) is visible in
+                # the console -- this is what lets the operator build a report of
+                # what the algorithm actually did (converged? where? how long?).
+                self._rrt.plan_async(current_q_full, np.array(x_ref), cmodel, cdata_plan,
+                                     logger=logger)
 
         # --- Return the current waypoint for visualization (purple gripper) ---
         if self._wp_active and self._wp_queue and self._wp_index < len(self._wp_queue):

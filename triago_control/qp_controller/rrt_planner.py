@@ -111,7 +111,7 @@ class RRTPlanner:
     # PUBLIC API
     # =====================================================================
 
-    def plan_async(self, q_start_full, x_goal, cmodel, cdata):
+    def plan_async(self, q_start_full, x_goal, cmodel, cdata, logger=None):
         """Launch the planning in a background thread. Non-blocking.
 
         Args:
@@ -121,6 +121,9 @@ class RRTPlanner:
             cmodel: the collision GeometryModel (shared, read-only).
             cdata: a FRESH GeometryData created for this planning call (NOT the
                    live one used by the control loop — avoids data races).
+            logger: optional callable(str) for verbose progress diagnostics
+                    (goal-IK per-restart trace, RRT-Connect periodic progress).
+                    None = silent (still returns a full RRTPlannerResult).
         """
         # Bump the epoch (fences any previous run) and start fresh. We do NOT
         # join the old thread -- it is a daemon that will notice the epoch change
@@ -132,7 +135,7 @@ class RRTPlanner:
             self._last_result = None
         self._thread = threading.Thread(
             target=self._plan_thread,
-            args=(q_start_full.copy(), x_goal.copy(), cmodel, cdata, epoch),
+            args=(q_start_full.copy(), x_goal.copy(), cmodel, cdata, epoch, logger),
             daemon=True)
         self._thread.start()
 
@@ -165,7 +168,7 @@ class RRTPlanner:
     # PLANNING THREAD
     # =====================================================================
 
-    def _plan_thread(self, q_start_full, x_goal, cmodel, cdata, epoch):
+    def _plan_thread(self, q_start_full, x_goal, cmodel, cdata, epoch, logger=None):
         """The actual RRT-Connect algorithm (runs in background thread).
 
         Wrapped in a blanket try/except so that ANY failure — an unreachable
@@ -173,10 +176,27 @@ class RRTPlanner:
         `success=False` result and can NEVER propagate out of the thread. The
         control loop only ever READS the result, so the QP-CLF-CBF is fully
         insulated from whatever happens here.
+
+        `logger`, if given, receives verbose progress lines (goal-IK search,
+        RRT-Connect growth) so the operator can see WHY a run failed/succeeded.
+        There is NO time requirement on this thread other than the configured
+        budgets below — running for several seconds is fine; the QP keeps
+        driving the arm with the (already-applied) posture correction the
+        whole time.
         """
         t0 = time.perf_counter()
         result = RRTPlannerResult()
+        tag = f"[RRT][{self.arm_side.upper()}]"
+
+        def log(msg):
+            if logger is not None:
+                logger(msg)
+
         try:
+            log(f"{tag} --- Planning thread started. Target x_goal={np.round(x_goal, 4).tolist()} "
+                f"(base_footprint). IK budget={cfg.RRT_IK_TIME_BUDGET_S:.1f}s "
+                f"(max {cfg.RRT_IK_MAX_RESTARTS} restarts x {cfg.RRT_IK_ITERS_PER_RESTART} iters), "
+                f"RRT-Connect budget={cfg.RRT_PLANNING_BUDGET_S:.1f}s. ---")
             # Extract this arm's joint positions from the full config
             q_arm_start = np.array([q_start_full[i] for i in self.arm_idx_q])
 
@@ -252,12 +272,22 @@ class RRTPlanner:
             # the target is actually reachable; if it can't (target inside an
             # obstacle / out of the collision-free workspace) the planner fails
             # cleanly and the caller keeps the posture-only correction.
+            t_ik0 = time.perf_counter()
             q_goal_arm = self._find_goal_config_ik(
-                q_start_full, x_goal, data, is_collision_free, set_arm_q, epoch)
+                q_start_full, x_goal, data, is_collision_free, set_arm_q, epoch, log)
+            ik_time = time.perf_counter() - t_ik0
             if q_goal_arm is None:
+                log(f"{tag} Goal-IK FAILED after {ik_time*1000:.0f}ms — no collision-free "
+                    f"configuration found that places the EE within "
+                    f"{cfg.RRT_GOAL_POS_TOLERANCE*100:.1f}cm of the target. RRT-Connect will "
+                    f"NOT run (no goal to grow toward). Target is likely unreachable / inside "
+                    f"an obstacle / outside the joint-limited workspace.")
                 result.success = False
                 self._finish(result, t0, epoch)
                 return
+            log(f"{tag} Goal-IK SUCCESS after {ik_time*1000:.0f}ms — collision-free goal config "
+                f"found (EE within {cfg.RRT_GOAL_POS_TOLERANCE*100:.1f}cm of target). "
+                f"Starting bidirectional RRT-Connect...")
 
             # --- Bidirectional RRT-Connect ---
             tree_start = [RRTNode(q_arm_start)]
@@ -268,9 +298,12 @@ class RRTPlanner:
             connect_idx_goal = -1
 
             deadline = t0 + cfg.RRT_PLANNING_BUDGET_S
+            last_progress_log = t0
 
             while samples < cfg.RRT_MAX_SAMPLES and time.perf_counter() < deadline:
                 if self._should_abort(epoch):
+                    log(f"{tag} RRT-Connect ABORTED at sample {samples} "
+                        f"(reference resumed motion / superseded).")
                     self._finish(result, t0, epoch)
                     return
                 samples += 1
@@ -286,25 +319,39 @@ class RRTPlanner:
                 if idx_new < 0:
                     # Swap trees and retry
                     tree_start, tree_goal = tree_goal, tree_start
-                    continue
+                else:
+                    # Try to connect tree_goal to the new node in tree_start
+                    q_new = tree_start[idx_new].q
+                    idx_connect, connected = connect(tree_goal, q_new)
+                    if connected:
+                        connect_idx_start = idx_new
+                        connect_idx_goal = idx_connect
+                        path_found = True
+                        break
+                    # Swap trees for balanced growth
+                    tree_start, tree_goal = tree_goal, tree_start
 
-                # Try to connect tree_goal to the new node in tree_start
-                q_new = tree_start[idx_new].q
-                idx_connect, connected = connect(tree_goal, q_new)
-                if connected:
-                    connect_idx_start = idx_new
-                    connect_idx_goal = idx_connect
-                    path_found = True
-                    break
-
-                # Swap trees for balanced growth
-                tree_start, tree_goal = tree_goal, tree_start
+                # Periodic progress report (non-spam) so a multi-second run is
+                # visible in the console instead of looking hung.
+                now = time.perf_counter()
+                if now - last_progress_log >= cfg.RRT_PROGRESS_LOG_PERIOD_S:
+                    last_progress_log = now
+                    log(f"{tag} RRT-Connect growing... samples={samples}, "
+                        f"tree sizes=({len(tree_start)},{len(tree_goal)}), "
+                        f"elapsed={now - t0:.1f}s / budget={cfg.RRT_PLANNING_BUDGET_S:.1f}s")
 
             if not path_found:
+                log(f"{tag} RRT-Connect EXHAUSTED budget/samples without connecting the two "
+                    f"trees (samples={samples}, tree sizes=({len(tree_start)},{len(tree_goal)}), "
+                    f"elapsed={time.perf_counter() - t0:.1f}s). The obstacle likely splits the "
+                    f"reachable joint-space into disconnected regions the step size couldn't "
+                    f"bridge in time.")
                 result.success = False
                 result.samples_used = samples
                 self._finish(result, t0, epoch)
                 return
+            log(f"{tag} RRT-Connect CONNECTED after samples={samples} "
+                f"(elapsed={time.perf_counter() - t0:.1f}s). Extracting + smoothing path...")
 
             # --- Extract path (backtrack from both trees to their roots) ---
             start_is_original = np.allclose(tree_start[0].q, q_arm_start, atol=1e-6)
@@ -356,7 +403,7 @@ class RRTPlanner:
                   f"(handled, planning marked failed): {e}\033[0m", flush=True)
 
     def _find_goal_config_ik(self, q_start_full, x_goal, data, is_collision_free,
-                             set_arm_q, epoch, max_restarts=10, iters=120):
+                             set_arm_q, epoch, log=lambda msg: None):
         """Position-only damped least-squares IK for a collision-free goal config.
 
         Iteratively drives THIS arm's joints so FK(q).translation → x_goal, then
@@ -367,11 +414,20 @@ class RRTPlanner:
 
         Fixes the previous uniform-random-rejection finder, which could not hit a
         3cm Cartesian ball in 7D and therefore always failed with samples=0.
+
+        Budgeted by WALL-CLOCK time (cfg.RRT_IK_TIME_BUDGET_S), not just a fixed
+        restart count — there is no hard millisecond requirement on this search;
+        the QP keeps driving the arm with the posture correction while this runs,
+        for up to several seconds if needed.
         """
+        tag = f"[RRT][{self.arm_side.upper()}]"
         damp2 = cfg.RRT_IK_DAMPING ** 2
         eye3 = np.eye(3)
         q_full = q_start_full.copy()
-        for restart in range(max_restarts):
+        t_budget_end = time.perf_counter() + cfg.RRT_IK_TIME_BUDGET_S
+        restart = 0
+        best_err_norm = None
+        while restart < cfg.RRT_IK_MAX_RESTARTS and time.perf_counter() < t_budget_end:
             if self._should_abort(epoch):
                 return None
             if restart == 0:
@@ -379,7 +435,8 @@ class RRTPlanner:
                 q_arm = np.array([q_start_full[i] for i in self.arm_idx_q])
             else:
                 q_arm = np.random.uniform(self.q_lower_plan, self.q_upper_plan)
-            for _ in range(iters):
+            err_norm = None
+            for it in range(cfg.RRT_IK_ITERS_PER_RESTART):
                 if self._should_abort(epoch):
                     return None
                 set_arm_q(q_full, q_arm)
@@ -387,10 +444,17 @@ class RRTPlanner:
                 pin.updateFramePlacements(self.model, data)
                 x_cur = np.array(data.oMf[self.ee_frame_id].translation)
                 err = x_goal - x_cur
-                if np.linalg.norm(err) < cfg.RRT_GOAL_POS_TOLERANCE:
+                err_norm = float(np.linalg.norm(err))
+                if err_norm < cfg.RRT_GOAL_POS_TOLERANCE:
                     # Converged in position -- accept only if collision-free.
                     if is_collision_free(q_arm):
+                        log(f"{tag} Goal-IK restart {restart+1}/{cfg.RRT_IK_MAX_RESTARTS}: "
+                            f"CONVERGED at iter {it} (|err|={err_norm*1000:.1f}mm), "
+                            f"collision-free -> ACCEPTED.")
                         return q_arm.copy()
+                    log(f"{tag} Goal-IK restart {restart+1}/{cfg.RRT_IK_MAX_RESTARTS}: "
+                        f"reached target position at iter {it} but the config COLLIDES "
+                        f"-> reseeding.")
                     break  # good position but colliding -> reseed
                 # Position-only frame Jacobian, restricted to this arm's columns.
                 J6 = pin.computeFrameJacobian(
@@ -404,6 +468,18 @@ class RRTPlanner:
                 if step > cfg.RRT_IK_MAX_STEP:
                     dq *= cfg.RRT_IK_MAX_STEP / step
                 q_arm = np.clip(q_arm + dq, self.q_lower_plan, self.q_upper_plan)
+            else:
+                # Loop exhausted without breaking (i.e. never converged in position)
+                log(f"{tag} Goal-IK restart {restart+1}/{cfg.RRT_IK_MAX_RESTARTS}: did NOT "
+                    f"converge in {cfg.RRT_IK_ITERS_PER_RESTART} iters (final |err|="
+                    f"{err_norm*1000:.1f}mm) -- likely stuck at a singularity/joint-limit "
+                    f"wall -> reseeding.")
+            if best_err_norm is None or (err_norm is not None and err_norm < best_err_norm):
+                best_err_norm = err_norm
+            restart += 1
+        log(f"{tag} Goal-IK exhausted ({restart} restarts, "
+            f"best |err| reached={('%.1fmm' % (best_err_norm*1000)) if best_err_norm is not None else 'n/a'}) "
+            f"without a collision-free convergence.")
         return None
 
     def _shortcut_smooth(self, path, is_collision_free):

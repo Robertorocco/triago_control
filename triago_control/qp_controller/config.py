@@ -163,10 +163,18 @@ LME_CONSOLE_PERIOD = 3.0             # [s] throttle period for the non-spam stat
 # waypoints (derived from the planned collision-free joint configs via FK) fed to
 # the governor's waypoint queue.
 ENABLE_RRT_PLANNER = True             # Master switch (requires ENABLE_LOCAL_MINIMA_ESCAPE too)
-RRT_PLANNING_BUDGET_S = 1.5           # [s] max wall-clock time the planner thread is allowed
+# NOTE (2026-07-02): there is NO millisecond requirement on any of the planner's
+# budgets below. While the planner thread runs (possibly for several seconds),
+# the QP-CLF-CBF keeps driving the arm with the local-minima escape's posture
+# correction (lowered posture weight + task_dim=3 for an obstacle-induced
+# minimum) -- see reference_governor.update_local_minima_escape. Budgets were
+# previously tuned for sub-second returns, which starved the goal-IK search
+# (see §9.10/§9.11 in context.md) and are now widened.
+RRT_PLANNING_BUDGET_S = 5.0           # [s] max wall-clock time RRT-Connect itself is allowed
 RRT_STEP_SIZE = 0.15                  # [rad] max step per RRT extend in joint-space
 RRT_GOAL_BIAS = 0.10                  # probability of sampling the goal directly (vs random)
 RRT_GOAL_POS_TOLERANCE = 0.03         # [m] EE position tolerance for "goal reached" in the tree
+RRT_PROGRESS_LOG_PERIOD_S = 1.0       # [s] throttle period for RRT-Connect's "still growing" console line
 # --- Goal-configuration IK (damped least-squares, position-only) ---
 # The goal config is found by DLS IK (FK(q).translation -> x_goal), NOT by
 # uniform random rejection sampling (which cannot hit a 3cm Cartesian ball in
@@ -174,6 +182,9 @@ RRT_GOAL_POS_TOLERANCE = 0.03         # [m] EE position tolerance for "goal reac
 # converges into collision or stalls.
 RRT_IK_DAMPING = 0.05                 # DLS damping (rad·s/m-ish): larger = more stable near singularities
 RRT_IK_MAX_STEP = 0.20                # [rad] per-iteration joint step cap for the IK integrator
+RRT_IK_TIME_BUDGET_S = 2.0            # [s] max wall-clock time the goal-IK search is allowed
+RRT_IK_MAX_RESTARTS = 40              # max number of random-seed restarts within that time budget
+RRT_IK_ITERS_PER_RESTART = 150        # DLS iterations per restart before declaring it stuck
 RRT_COLLISION_MARGIN = 0.005          # [m] extra safety margin ON TOP of D_SAFE_BASE for the planner
                                       #   (so the planned path is more conservative than the CBF)
 RRT_MAX_SAMPLES = 8000                # absolute sample cap (fallback if wall-clock budget is generous)
