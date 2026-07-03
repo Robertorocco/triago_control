@@ -1,7 +1,24 @@
 # AI Agent Context — triago_control
 
 > **This file is maintained by the AI agent. Do not edit manually.**
-> Last updated: 2026-07-03 (§11.6 NEW: three usability fixes to the TWIST
+> Last updated: 2026-07-03 (§11.7 NEW: user-effort authority gating. Operator
+> reported the arm was almost "blind" to their own hand twist in TWIST
+> BLENDING mode -- `pi_policy` is a large, saturated velocity while comfortable
+> hand motion is much smaller, so even a moderate `alpha(belief)` let the
+> policy dominate `v_blend`; the user could only ever pick a different goal,
+> never meaningfully resist/steer once one was inferred. Fix: `compute_alpha`
+> now also takes the raw human twist (`current_v_h`) and scales alpha DOWN by
+> how hard the user is ACTIVELY moving the handle --
+> `effort = clip(||v_user_lin|| / ALPHA_EFFORT_THRESHOLD, 0, 1)`,
+> `alpha *= (1 - effort * ALPHA_EFFORT_OVERRIDE)` -- LPF'd, fully smooth,
+> deliberately NOT sourced from any QP Lagrangian/shadow-price (avoids the
+> discontinuity/filtering-delay tradeoff explicitly flagged by the operator).
+> `ALPHA_EFFORT_THRESHOLD=0.4 m/s` (fast hand motion), `ALPHA_EFFORT_OVERRIDE=
+> 0.5` (half of alpha displaced at full effort -- the rest of the "follow"
+> reduction already comes from fast motion naturally lowering the belief
+> estimate). Still handle -> unaffected (full belief-driven assistance, exactly
+> where it's wanted: near obstacles / when intent changes). See §11.7.)
+> Earlier: 2026-07-03 (§11.6 NEW: three usability fixes to the TWIST
 > BLENDING architecture (§11.5), based on operator hands-on feedback: (1) new
 > `/blended_reference_marker` RViz gripper (light-blue, same style as the
 > existing pure-user-intent `/guidance_policy_marker`) showing the LITERAL pose
@@ -1798,6 +1815,89 @@ it always is, from the call site in `timer_callback` — `compute_alpha(b_max,
 pos_error=pos_error)`); it has no effect (`gain=1.0`) far from any goal, so
 free-space blending behavior away from a goal is unchanged by this fix.
 
+### 11.7 User-effort authority gating (2026-07-03)
+
+Follow-up on §11.5/§11.6. After testing with the raised `ALPHA_MAX=0.60`
+floor, the operator reported the deeper issue was NOT the belief-driven
+ceiling itself but that **the arm was almost blind to the user's own hand
+twist**: `F_sync` (haptic side, correctly tuned, NOT to be changed) keeps the
+handle near the real EE, so the user always FEELS where the robot is, but the
+blended REFERENCE the robot tracks barely reflects the user's own motion —
+only their inferred GOAL (via belief) had any real leverage. Root cause:
+`pi_policy` (`tick_output.target_twist`) is a large, tanh-saturated velocity
+(`v_max_lin=0.1 m/s`), while comfortable Haption hand motion is much smaller
+(`v_max_lin_user=0.04 m/s` is the CEILING used for the user-anchored policy
+solve, but typical relaxed motion is well below that) — so even at a modest
+`alpha`, `alpha·pi_policy` can dominate `(1-alpha)·v_user` in the blend by a
+wide margin. The user effectively could only "change the robot's mind about
+the goal" (via belief), never resist or steer once a goal was inferred.
+
+**Explicit constraint from the operator**: do NOT introduce dynamic weighting
+sourced from the QP's own feedback (Lagrangian multipliers / shadow prices)
+on the FORCE side — those are known to be discontinuous tick-to-tick, or need
+heavy filtering that reintroduces lag. The fix below is deliberately built
+from a signal that is neither of those things: the user's OWN commanded twist
+norm, which is inherently smooth (integrated from a human hand) and entirely
+independent of the QP solve.
+
+**Fix — user-effort gate on `compute_alpha`** (NOT on the force/haptic side
+at all; still purely a REFERENCE-level blending weight):
+
+```
+effort_raw = clip(||v_user[:3]|| / ALPHA_EFFORT_THRESHOLD, 0, 1)
+effort     = LPF(effort_raw, coeff=ALPHA_EFFORT_LPF_COEFF)     # self.alpha_effort_lpf
+alpha     *= (1 - effort * ALPHA_EFFORT_OVERRIDE)
+```
+applied to `alpha_raw` AFTER the proximity boost (§11.6) and BEFORE the final
+`alpha_lpf` low-pass — so the existing continuity guarantee is preserved (no
+new discontinuity source; effort is just one more smooth multiplicative term
+folded into the same filtered pipeline).
+
+`compute_alpha(b_max, pos_error=None, v_user=None)` gained the `v_user`
+parameter; the call site in `timer_callback` passes `self.current_v_h` (the
+raw human twist, already used everywhere else as "what the user is doing
+right now").
+
+**Tuned values (operator-selected, first trial)**:
+- `ALPHA_EFFORT_THRESHOLD = 0.4` m/s — chosen as "a credible fast hand
+  movement" ceiling; effort saturates to 1.0 at/above this linear speed.
+- `ALPHA_EFFORT_OVERRIDE = 0.5` — at full effort, alpha is HALVED (not
+  zeroed): the operator's reasoning is that fast hand motion already lowers
+  the belief estimate itself (via `BeliefEstimator`'s `engagement` term and
+  the twist-cost update), so roughly half of the total "policy stops
+  following" effect comes from THAT channel already; this gate supplies the
+  other half directly at the blend-weight level.
+- `ALPHA_EFFORT_LPF_COEFF = 0.15` — independent LPF coefficient from
+  `ALPHA_LPF_COEFF` (which smooths the FINAL alpha); this one smooths the
+  effort signal itself before it multiplies in.
+
+**Why this satisfies all the stated requirements**:
+- Near an obstacle: the user is not typically pushing hard INTO the obstacle
+  (their own twist stays small), so `effort≈0` and belief-driven assistance
+  (including the CBF-aware component baked into `pi_policy`) stays at full
+  strength — safety behavior is unchanged.
+- When intent changes: same — turning the hand toward a new goal is
+  initially "still learning" (low `b_max` -> low `alpha_raw` regardless), and
+  once the user commits and moves briskly, effort rises and hands them
+  authority directly, on top of the belief update happening in parallel.
+  Both channels reinforce "let the user redirect".
+  - When idle/slow: `effort≈0` -> assistance behaves exactly as sized by
+  belief alone (§11.5/§11.6, unchanged) — this is deliberately where the
+  system should be MOST helpful, per the operator's own framing ("guidance
+  is helpful... while... almost negligible when low twist is being expressed"
+  refers to the OPPOSITE case, fast motion — see below).
+- When the user expresses a fast, deliberate twist: `effort→1`, `alpha`
+  drops toward `0.5·alpha_belief` — the user's own motion now carries
+  proportionally more weight in `v_blend`, directly addressing "the arm is
+  blind to user movement."
+
+**Not touched**: `F_sync` gains (per explicit instruction), the proximity
+boost (§11.6, still applies independently), `ALPHA_MAX`/`ALPHA_GAMMA` shape
+(§11.5/§11.6, unchanged), and nothing on the haptic/force side of the
+architecture (§4.3 in `haption_teleoperation`'s context.md) was touched at
+all — this fix is 100% contained to `compute_alpha` in `main_shared_
+autonomy.py` plus the four new `cfg.ALPHA_EFFORT_*` constants.
+
 ---
 
 ## 12. Current State & Known Issues
@@ -1812,7 +1912,7 @@ free-space blending behavior away from a goal is unchanged by this fix.
 | Post-grasp (LIFT + HOLDING + place) | ✅ Working | 9 cm slow lift → HOLDING resumes shared autonomy → Platform placement manifold → release → RELEASE_LIFT → SHARED_AUTONOMY |
 | RViz visualization | ✅ Working | Light-green=EE robot policy (own topic `/robot_policy_marker`), Light-blue=reference guidance (own topic `/guidance_policy_marker`). Commanded gripper is now PER-ARM (2026-07-01, §9.4): each arm independently Blue=actively tracking / Grey=frozen (`right_frozen`/`left_frozen` ground truth via `/qp_debug/arm_frozen`) — both render blue simultaneously under `trajectory_generator.py` or dual teleop, exactly one blue+one grey in single-arm teleop. Belief-opacity goal grippers + grasp-ready cue on `/shared_policy_markers`. Grasp-guidance move/rotate arrows REMOVED (cluttered the view). Periodic DELETEALL sweep every 3s on all 3 marker topics (self-heals stuck/ghost markers). Dual belief subplot (active colored, inactive greyscale). Task-authority soft-cost plot (`/qp_debug/task_authority`). Plotter dashboard also has a NEW "Joint Positions" slider-panel GUI window (§9.5, real Pinocchio joint limits) and per-arm "Slack Weight" (R/L) traces. |
 | Haption teleoperation (Virtual Fixture mode) | ✅ Working | `teleop_triago_clutch.py` + `haptic_force_manager_tutorial.py`. Force layers: F_guide (velocity-field, v_max_user 0.04/0.10) + F_fixture (position spring near goal). Handle drag during autonomous phases (KP+KD velocity-following). Active when `cfg.BLENDING=False` (default). |
-| Shared-autonomy TWIST BLENDING mode | 🔧 New (2026-07-03), untested on real hardware | `cfg.BLENDING=True` (§11.5): `main_shared_autonomy.py` becomes the sole persistent publisher of `/arm_*/cartesian_reference`, integrating `v_blend=(1-alpha)*v_user+alpha*pi_policy` every tick; `teleop_triago_clutch.py` redirects to `/arm_*/user_cartesian_reference`; `haptic_force_manager_blending_tutorial.py` renders ONLY F_sync (tethered to the pure user pose) + a new "Authority Share" plot sourced from `/shared_autonomy/blend_debug`. Usability pass (§11.6): `ALPHA_MAX` 0.80→0.60 (user floor 20%→40%), smooth distance-based proximity boost so the task can be concluded near the goal (capped `ALPHA_PROXIMITY_CAP=0.90`), new `/blended_reference_marker` RViz gripper (light-blue, literal QP-bound pose) shown alongside the existing pure-user-intent `/guidance_policy_marker` for A/B comparison. |
+| Shared-autonomy TWIST BLENDING mode | 🔧 New (2026-07-03), untested on real hardware | `cfg.BLENDING=True` (§11.5): `main_shared_autonomy.py` becomes the sole persistent publisher of `/arm_*/cartesian_reference`, integrating `v_blend=(1-alpha)*v_user+alpha*pi_policy` every tick; `teleop_triago_clutch.py` redirects to `/arm_*/user_cartesian_reference`; `haptic_force_manager_blending_tutorial.py` renders ONLY F_sync (tethered to the pure user pose) + a new "Authority Share" plot sourced from `/shared_autonomy/blend_debug`. Usability pass (§11.6): `ALPHA_MAX` 0.80→0.60 (user floor 20%→40%), smooth distance-based proximity boost so the task can be concluded near the goal (capped `ALPHA_PROXIMITY_CAP=0.90`), new `/blended_reference_marker` RViz gripper (light-blue, literal QP-bound pose) shown alongside the existing pure-user-intent `/guidance_policy_marker` for A/B comparison. User-effort gating (§11.7, first trial values): `compute_alpha` scales alpha down by how briskly the user is moving the handle (`ALPHA_EFFORT_THRESHOLD=0.4 m/s`, `ALPHA_EFFORT_OVERRIDE=0.5`), fixing the "arm blind to user twist" report — no QP Lagrangian/shadow-price feedback involved. |
 | Head control (visual servoing) | 🔧 Active dev | `qp_head_visual_servo.py`: QP-based hand-tracking, independent loop. Starting point — no image processing yet. |
 | Head cylinder perception (`main_head.py`) | ✅ Improved (2026-07-02, §5.10) | Rim-extraction + Hyper circle fit (removed a ~-4 to -5mm disk-interior bias in the radius fit), top-slice-median height (removed a `z_max` high-bias), 3mm voxel leaf (was 10mm — too coarse vs. a 2cm cylinder radius), closer/verified-reachable `HEAD_POSTURE_TARGET`, distortion-correctness gap closed in `camera_interface.py`, tracker fusion switched grow-only→EMA. Verified numerically (not on real hardware) to land single-view/scanned radius+height error at roughly -1 to -4mm, comfortably under the 1cm target. `feature/head-sweep-compute-track` reviewed, not merged (incompatible kwargs, re-enables the already-disabled point-level VoxelMap) — see §5.10 for salvageable ideas. |
 | Arm-vs-head collision avoidance | ✅ Working | Head chain modeled as a quasi-static CBF obstacle in the ARM QP (§9.7): live FK-driven capsules (yellow in Meshcat), zero head joints added to the decision vector. `arm_right_1`/`arm_left_1` excluded from head pairs per instruction. Head's OWN separate controller/collision model (`qp_head_visual_servo.py`) is unchanged. |

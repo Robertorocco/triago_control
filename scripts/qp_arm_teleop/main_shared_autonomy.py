@@ -115,6 +115,8 @@ class SharedControlNode(Node):
         # Persistent LPF state for the belief->alpha mapping (see compute_alpha).
         self.alpha_lpf = 0.0
         self.last_alpha = 0.0   # most recent alpha actually applied (for telemetry)
+        # Persistent LPF state for the user-effort gating signal (see compute_alpha).
+        self.alpha_effort_lpf = 0.0
 
         self.POLICY_BELIEF_TEST = False   # <-- flip this to switch modes
         # When True:  the node injects pi_stars[test_goal_key] as the fake human
@@ -1126,8 +1128,10 @@ class SharedControlNode(Node):
         if cfg.BLENDING and tick_output.new_state == "SHARED_AUTONOMY":
             # pos_error (EE -> active goal, computed above from current_T_EE)
             # drives the smooth proximity boost so the assistive twist can
-            # actually finish the approach near the goal (see compute_alpha).
-            alpha = self.compute_alpha(b_max, pos_error=pos_error)
+            # actually finish the approach near the goal. current_v_h (the raw
+            # human twist) drives the user-effort gate so active hand motion
+            # takes precedence over the policy (see compute_alpha).
+            alpha = self.compute_alpha(b_max, pos_error=pos_error, v_user=self.current_v_h)
             self.last_alpha = alpha
             # v_blend = (1-alpha)*v_user + alpha*pi_policy -- blended at the
             # TWIST level (not a one-shot pose offset), so it accumulates into
@@ -1913,7 +1917,7 @@ class SharedControlNode(Node):
         t = float(np.clip((x - lo) / (hi - lo), 0.0, 1.0))
         return t * t * (3.0 - 2.0 * t)
 
-    def compute_alpha(self, b_max, pos_error=None):
+    def compute_alpha(self, b_max, pos_error=None, v_user=None):
         """Maps the maximum belief probability to the autonomy arbitration weight.
 
         alpha = cfg.ALPHA_MAX * x**cfg.ALPHA_GAMMA, where x is b_max normalised
@@ -1933,14 +1937,33 @@ class SharedControlNode(Node):
         weak to actually FINISH the approach even with belief at 100%. If
         `pos_error` (EE-to-active-goal distance, meters) is provided, a smooth
         proximity gain (smoothstep, 1.0 far away -> cfg.ALPHA_PROXIMITY_MAX_GAIN
-        at/inside cfg.ALPHA_PROXIMITY_NEAR) multiplies alpha_raw BEFORE the LPF,
-        then the boosted value is capped at cfg.ALPHA_PROXIMITY_CAP (a higher
-        ceiling than ALPHA_MAX, but still < 1.0 -- the user always retains some
+        at/inside cfg.ALPHA_PROXIMITY_NEAR) multiplies alpha_raw, then the
+        boosted value is capped at cfg.ALPHA_PROXIMITY_CAP (a higher ceiling
+        than ALPHA_MAX, but still < 1.0 -- the user always retains some
         authority, even at task completion).
 
-        The result is LOW-PASS FILTERED (cfg.ALPHA_LPF_COEFF) via self.alpha_lpf
-        so alpha never jumps discontinuously between ticks, even if the belief
-        distribution or proximity gain shifts abruptly.
+        --- User-effort authority gating (2026-07-03) ---
+        Fixes "the arm is blind to the user's own twist": pi_policy is a large,
+        saturated velocity while comfortable hand motion is much smaller, so a
+        fixed alpha(belief) lets the policy dominate v_blend even when the user
+        is actively trying to steer. If `v_user` (the raw human twist,
+        current_v_h) is provided, its LINEAR norm gates alpha down by how hard
+        the user is actually pushing:
+            effort = clip(||v_user[:3]|| / cfg.ALPHA_EFFORT_THRESHOLD, 0, 1)
+            alpha *= (1 - effort * cfg.ALPHA_EFFORT_OVERRIDE)
+        Still (effort=0) -> alpha unaffected (full belief-driven assistance --
+        helpful near obstacles / when intent changes, exactly where the user
+        typically ISN'T pushing hard). Fast hand motion (effort=1) -> alpha
+        scaled down by cfg.ALPHA_EFFORT_OVERRIDE, handing more of v_blend to the
+        user's own twist. This is a smooth function of the user's OWN commanded
+        twist norm ONLY -- no Lagrangian/shadow-price feedback, no force-side
+        dynamics, so no discontinuity or filtering-induced delay from the QP
+        dual variables is introduced. The effort signal itself is LPF'd
+        (cfg.ALPHA_EFFORT_LPF_COEFF, self.alpha_effort_lpf) before gating.
+
+        The final result is LOW-PASS FILTERED (cfg.ALPHA_LPF_COEFF) via
+        self.alpha_lpf so alpha never jumps discontinuously between ticks, even
+        if belief, proximity, or effort shift abruptly.
         """
         active_goals = [k for k in self.target_keys
                         if k not in self.belief_estimator.get_excluded_goals()]
@@ -1964,6 +1987,13 @@ class SharedControlNode(Node):
                 0.0, cfg.ALPHA_PROXIMITY_FAR - cfg.ALPHA_PROXIMITY_NEAR)
             gain = 1.0 + proximity_t * (cfg.ALPHA_PROXIMITY_MAX_GAIN - 1.0)
             alpha_raw = min(alpha_raw * gain, cfg.ALPHA_PROXIMITY_CAP)
+
+        if v_user is not None:
+            v_user_lin_norm = float(np.linalg.norm(np.asarray(v_user)[0:3]))
+            effort_raw = float(np.clip(v_user_lin_norm / cfg.ALPHA_EFFORT_THRESHOLD, 0.0, 1.0))
+            self.alpha_effort_lpf = ((cfg.ALPHA_EFFORT_LPF_COEFF * effort_raw)
+                                     + (1.0 - cfg.ALPHA_EFFORT_LPF_COEFF) * self.alpha_effort_lpf)
+            alpha_raw *= (1.0 - self.alpha_effort_lpf * cfg.ALPHA_EFFORT_OVERRIDE)
 
         self.alpha_lpf = ((cfg.ALPHA_LPF_COEFF * alpha_raw)
                          + (1.0 - cfg.ALPHA_LPF_COEFF) * self.alpha_lpf)

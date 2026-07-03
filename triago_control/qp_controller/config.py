@@ -85,6 +85,38 @@ ALPHA_PROXIMITY_MAX_GAIN = 1.5   # multiplier applied to alpha at ALPHA_PROXIMIT
 ALPHA_PROXIMITY_CAP = 0.90       # hard ceiling on the BOOSTED alpha (user retains >= 10%
                                  #   even at the moment of task completion)
 
+# --- User-effort authority gating (2026-07-03) ---
+# Operator report: with a fixed alpha(belief), the arm is almost "blind" to the
+# user's own hand twist -- pi_policy is a large, tanh-saturated velocity while
+# comfortable hand motion is much smaller, so even at a moderate/low alpha the
+# policy's contribution to v_blend dominates the user's. The user could only
+# ever "pick a different goal" (via belief), never meaningfully resist/steer
+# once a goal was inferred.
+#
+# Fix: scale alpha DOWN by how much the user is ACTIVELY moving the handle,
+# not just by belief. When the user is (near-)still, alpha is unaffected (full
+# belief-driven assistance -- helpful when intent changes or near an obstacle,
+# where the user naturally isn't pushing). When the user is moving briskly,
+# alpha drops -- their own effort takes precedence.
+#
+#   effort = clip(||v_user|| / ALPHA_EFFORT_THRESHOLD, 0, 1)
+#   alpha_effective = alpha_belief * (1 - effort * ALPHA_EFFORT_OVERRIDE)
+#
+# Deliberately NOT implemented on the force/haptic side (no Lagrangian
+# multipliers, no discontinuous/filtered shadow-price feedback) -- this is a
+# smooth function of the user's OWN commanded twist norm, always continuous
+# and independent of any QP dual variable.
+ALPHA_EFFORT_THRESHOLD = 0.4    # m/s -- user linear twist norm considered "fast hand
+                                 #   movement"; effort saturates to 1.0 at/above this
+ALPHA_EFFORT_OVERRIDE = 0.5     # fraction of alpha_belief displaced by full user effort.
+                                 #   0.5: at max effort, alpha is halved -- the rest of
+                                 #   the reduction in autonomy "following" already comes
+                                 #   from fast motion naturally lowering the belief
+                                 #   estimate itself (see BeliefEstimator/engagement).
+ALPHA_EFFORT_LPF_COEFF = 0.15    # low-pass filter on the effort signal (smooths the
+                                 #   ||v_user|| norm before it gates alpha; independent
+                                 #   of ALPHA_LPF_COEFF, which smooths the final alpha)
+
 # =============================================================================
 # 2. SAFETY + CONTROL HYPERPARAMETERS
 # =============================================================================
