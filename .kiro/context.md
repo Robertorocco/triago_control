@@ -1,7 +1,26 @@
 # AI Agent Context — triago_control
 
 > **This file is maintained by the AI agent. Do not edit manually.**
-> Last updated: 2026-07-03 (§9.13: the local-minima escape's CORRECTIVE ACTION is
+> Last updated: 2026-07-03 (§11.5 NEW: config-driven shared-autonomy TWIST
+> BLENDING architecture. `cfg.BLENDING` in `qp_controller/config.py` is now the
+> SINGLE source of truth for the flag (removed the old local, always-false,
+> never-wired `self.BLENDING` on `SharedControlNode` — `compute_alpha` used to
+> `raise NotImplementedError` and was dead code even when the local flag was
+> flipped, since the blended twist was only ever PUBLISHED during grasp
+> execution / `POLICY_BELIEF_TEST`, never in normal teleop). `teleop_triago_
+> clutch.py` (haption_teleoperation) reads the SAME flag to decide whether it
+> publishes the pure user reference on `/arm_*/cartesian_reference` (BLENDING=
+> False, legacy, unchanged) or on a NEW topic `/arm_*/user_cartesian_reference`
+> (BLENDING=True) — freeing `main_shared_autonomy.py` to become the SOLE,
+> PERSISTENT publisher of the real `/arm_*/cartesian_reference` at all times
+> when blending is on, so the two nodes never race over the same topic. New
+> telemetry topic `/shared_autonomy/blend_debug` (19 floats:
+> `[alpha, v_user(6), v_policy(6), v_blend(6)]`) is the single source of truth
+> for "who is commanding what" — consumed verbatim by the rewritten
+> `haptic_force_manager_blending_tutorial.py` (haption_teleoperation) for its
+> new "Authority Share" plot, rather than recomputing the blend independently.
+> See §11.5 for the full design.)
+> Earlier: 2026-07-03 (§9.13: the local-minima escape's CORRECTIVE ACTION is
 > now selectable via `cfg.LME_ESCAPE_STRATEGY` ('posture' legacy nudge, or 'rrt' —
 > now the default — arm only moves via a validated RRT path, holds otherwise, no
 > fallback movement). Also fixed a real bug the operator hit: `task_dim=3` was
@@ -1562,6 +1581,138 @@ got stuck (lifetime never re-triggered, or a namespace changed between versions)
 instead of lingering forever; the very next control tick republishes what should actually be
 visible, so at most one frame is dropped.
 
+### 11.5 Shared-autonomy TWIST BLENDING architecture (2026-07-03)
+
+**Motivation**: the operator wanted a shared-autonomy mode where the robot's
+Cartesian reference is a continuous BLEND of the user's own hand motion and a
+belief-weighted assistive policy toward the most likely goal — instead of the
+existing "haptic Virtual Fixture" mode (§13.5) where the user's raw reference
+is fed to the QP unmodified and ALL assistance is rendered purely as force at
+the Haption handle.
+
+**Bug history (why this took multiple passes to land correctly)**:
+1. A first attempt computed the blend entirely inside a NEW haptic-side script
+   (`haptic_force_manager_blending_tutorial.py`) and published it to
+   `/arm_right/blended_cartesian_reference` — a topic `main_qp_controller.py`
+   never subscribed to. The blend was computed but had ZERO effect on the
+   robot (silently orphaned topic).
+2. That same attempt also blended at the POSE level (`ref_blended = (1-alpha)*
+   pos_user + alpha*(pos_user + policy_twist*dt)`), recomputed from scratch
+   every tick — since it was never integrated persistently, a stationary user
+   never accumulated any real motion toward the goal no matter how high alpha
+   got.
+3. **Root cause once actually investigated**: `main_shared_autonomy.py`
+   ALREADY had the correct twist-level blend formula
+   (`target_twist = (1-alpha)*current_v_h + alpha*tick_output.target_twist`,
+   inside `timer_callback`) and already PERSISTENTLY integrates its output
+   every tick via `integrate_twist` (the exact mechanism trusted for grasp
+   execution / `POLICY_BELIEF_TEST`) — but (a) `compute_alpha` was a stub that
+   unconditionally `raise NotImplementedError`, and (b) even with alpha
+   implemented, the blended `target_twist` was only ever PUBLISHED to
+   `/arm_*/cartesian_reference` when `POLICY_BELIEF_TEST or grasp_exec` — in
+   ordinary teleop the blend was computed and thrown away every tick, and
+   `teleop_triago_clutch.py` remained the sole publisher of the user's raw pose.
+
+**Final architecture** (config-flag-driven, per operator instruction — no
+new script for `teleop_triago_clutch.py`, and no local `self.BLENDING` flag
+on `SharedControlNode`):
+
+```
+                          cfg.BLENDING (qp_controller/config.py)
+                     SINGLE SOURCE OF TRUTH, read by BOTH nodes below
+                     ┌─────────────────────┴─────────────────────┐
+                     │                                           │
+        teleop_triago_clutch.py                     main_shared_autonomy.py
+        (haption_teleoperation)                      (triago_control)
+                     │                                           │
+   BLENDING=False:                              BLENDING=False:
+     publishes user pose on                       only subscribes (belief
+     /arm_*/cartesian_reference                    inference); only PUBLISHES
+     (unchanged legacy behavior)                    during grasp_exec / TEST
+                     │                                           │
+   BLENDING=True:                                BLENDING=True:
+     publishes user pose on                        subscribes on
+     /arm_*/user_cartesian_reference                /arm_*/user_cartesian_reference;
+     INSTEAD (so the two nodes                      alpha = compute_alpha(b_max);
+     never race for the same topic)                 v_blend = (1-alpha)*v_user
+                                                       + alpha*pi_policy;
+                                                     PERSISTENTLY integrates v_blend
+                                                       every tick (same integrate_twist
+                                                       used for grasp exec);
+                                                     becomes the SOLE, ALWAYS-ON
+                                                       publisher of the real
+                                                       /arm_*/cartesian_reference
+                                                     also publishes
+                                                       /shared_autonomy/blend_debug
+                                                       every tick (19 floats:
+                                                       [alpha, v_user(6), v_policy(6),
+                                                        v_blend(6)]) -- single source
+                                                       of truth for "who commanded what"
+                     │                                           │
+                     └─────────────────────┬─────────────────────┘
+                                            ▼
+                             /arm_*/cartesian_reference
+                                            ▼
+                              main_qp_controller.py (QP CLF-CBF)
+                                     [UNCHANGED -- still only ever
+                                      reads /arm_*/cartesian_reference;
+                                      no topic-routing awareness needed here]
+```
+
+**`cfg.BLENDING` and its tuning constants** (`qp_controller/config.py`, §1):
+```python
+BLENDING = False          # master switch (see topic-routing table above)
+ALPHA_MAX = 0.80          # hard cap on autonomy authority (user retains >= 20%)
+ALPHA_GAMMA = 0.5         # <1 = alpha ramps toward ALPHA_MAX quickly once belief
+                          #   is "sufficiently high" (not just near-certainty)
+ALPHA_LPF_COEFF = 0.08    # LPF on alpha -- guarantees C0 continuity in the
+                          #   blended reference even if belief itself jumps
+```
+
+**`compute_alpha(b_max)` formula** (`main_shared_autonomy.py`):
+```
+x = 0                                                 if b_max <= 1/N_active_goals (uniform)
+x = clip((b_max - 1/N_active_goals) / (1 - 1/N_active_goals), 0, 1)   otherwise
+alpha_raw = ALPHA_MAX * x**ALPHA_GAMMA
+alpha = LPF(alpha_raw, coeff=ALPHA_LPF_COEFF)     # self.alpha_lpf, persistent state
+```
+`N_active_goals` excludes goals currently pinned to 0 by `BeliefEstimator.
+get_excluded_goals()` (e.g. the already-grasped color's own goals), so the
+"uniform belief" baseline always reflects the TRUE number of live candidates.
+
+**Why F_sync (haptic side) must read the PURE user pose, not the blended
+one**: `haptic_force_manager_blending_tutorial.py`'s `target_cb`/`target_cb_
+left` subscribe to `/arm_*/user_cartesian_reference` when `cfg.BLENDING=True`
+(the SAME conditional topic teleop_triago_clutch.py now publishes to) — NOT
+the now-blended `/arm_*/cartesian_reference`. If it read the blended pose,
+F_sync would tether the handle toward a target that already includes the
+user's own contribution, hiding exactly the divergence (autonomy pulling the
+real EE away from the user's raw intent) the operator wants to FEEL through
+the handle.
+
+**Why the debug topic exists**: `/shared_autonomy/blend_debug` is published
+EVERY tick (alpha=0, v_policy=tick_output.target_twist even when `cfg.
+BLENDING=False`) so the haptic-side "Authority Share" plot always has a
+well-defined, non-recomputed signal — the exact numbers that did (or, if
+disabled, WOULD) command the robot, never a second independently-drifting
+copy of the same math.
+
+**Cross-package dependency**: `haption_teleoperation/package.xml` now
+`<depend>triago_control</depend>` (both `teleop_triago_clutch.py` and
+`haptic_force_manager_blending_tutorial.py` `import triago_control.qp_
+controller.config as cfg`).
+
+**Known limitation (flagged, not solved in this pass)**: the pure-user
+integrator (`teleop_triago_clutch.py`, still owns its own `ref_pos`/`ref_rot`
+state regardless of which topic it publishes to) keeps integrating from the
+Haption twist independently of where the robot actually ends up. At
+sustained high alpha the user's own pure pose and the real EE can drift apart
+over time (bounded only by F_sync's spring pulling the HANDLE, never the
+user's internal integrator state). Re-anchoring logic (e.g. periodically
+snapping `ref_pos`/`ref_rot` toward the real EE when divergence exceeds a
+threshold) is a natural next step if this proves disorienting in practice —
+not implemented now since it wasn't part of the agreed plan for this pass.
+
 ---
 
 ## 12. Current State & Known Issues
@@ -1575,7 +1726,8 @@ visible, so at most one frame is dropped.
 | Grasp failure | ✅ Working | Clear `[GRASP FAILED]` log. ABORT_RETREAT: backs out along reverse approach axis (gripper open, CBF bypass active during retreat, then restore). |
 | Post-grasp (LIFT + HOLDING + place) | ✅ Working | 9 cm slow lift → HOLDING resumes shared autonomy → Platform placement manifold → release → RELEASE_LIFT → SHARED_AUTONOMY |
 | RViz visualization | ✅ Working | Light-green=EE robot policy (own topic `/robot_policy_marker`), Light-blue=reference guidance (own topic `/guidance_policy_marker`). Commanded gripper is now PER-ARM (2026-07-01, §9.4): each arm independently Blue=actively tracking / Grey=frozen (`right_frozen`/`left_frozen` ground truth via `/qp_debug/arm_frozen`) — both render blue simultaneously under `trajectory_generator.py` or dual teleop, exactly one blue+one grey in single-arm teleop. Belief-opacity goal grippers + grasp-ready cue on `/shared_policy_markers`. Grasp-guidance move/rotate arrows REMOVED (cluttered the view). Periodic DELETEALL sweep every 3s on all 3 marker topics (self-heals stuck/ghost markers). Dual belief subplot (active colored, inactive greyscale). Task-authority soft-cost plot (`/qp_debug/task_authority`). Plotter dashboard also has a NEW "Joint Positions" slider-panel GUI window (§9.5, real Pinocchio joint limits) and per-arm "Slack Weight" (R/L) traces. |
-| Haption teleoperation | ✅ Working | `teleop_triago_clutch.py` + `haptic_force_manager_tutorial.py`. Force layers: F_guide (velocity-field, v_max_user 0.04/0.10) + F_fixture (position spring near goal). Handle drag during autonomous phases (KP+KD velocity-following). |
+| Haption teleoperation (Virtual Fixture mode) | ✅ Working | `teleop_triago_clutch.py` + `haptic_force_manager_tutorial.py`. Force layers: F_guide (velocity-field, v_max_user 0.04/0.10) + F_fixture (position spring near goal). Handle drag during autonomous phases (KP+KD velocity-following). Active when `cfg.BLENDING=False` (default). |
+| Shared-autonomy TWIST BLENDING mode | 🔧 New (2026-07-03), untested on real hardware | `cfg.BLENDING=True` (§11.5): `main_shared_autonomy.py` becomes the sole persistent publisher of `/arm_*/cartesian_reference`, integrating `v_blend=(1-alpha)*v_user+alpha*pi_policy` every tick; `teleop_triago_clutch.py` redirects to `/arm_*/user_cartesian_reference`; `haptic_force_manager_blending_tutorial.py` renders ONLY F_sync (tethered to the pure user pose) + a new "Authority Share" plot sourced from `/shared_autonomy/blend_debug`. |
 | Head control (visual servoing) | 🔧 Active dev | `qp_head_visual_servo.py`: QP-based hand-tracking, independent loop. Starting point — no image processing yet. |
 | Head cylinder perception (`main_head.py`) | ✅ Improved (2026-07-02, §5.10) | Rim-extraction + Hyper circle fit (removed a ~-4 to -5mm disk-interior bias in the radius fit), top-slice-median height (removed a `z_max` high-bias), 3mm voxel leaf (was 10mm — too coarse vs. a 2cm cylinder radius), closer/verified-reachable `HEAD_POSTURE_TARGET`, distortion-correctness gap closed in `camera_interface.py`, tracker fusion switched grow-only→EMA. Verified numerically (not on real hardware) to land single-view/scanned radius+height error at roughly -1 to -4mm, comfortably under the 1cm target. `feature/head-sweep-compute-track` reviewed, not merged (incompatible kwargs, re-enables the already-disabled point-level VoxelMap) — see §5.10 for salvageable ideas. |
 | Arm-vs-head collision avoidance | ✅ Working | Head chain modeled as a quasi-static CBF obstacle in the ARM QP (§9.7): live FK-driven capsules (yellow in Meshcat), zero head joints added to the decision vector. `arm_right_1`/`arm_left_1` excluded from head pairs per instruction. Head's OWN separate controller/collision model (`qp_head_visual_servo.py`) is unchanged. |
@@ -1673,10 +1825,18 @@ ros2 run haption_teleoperation haptic_force_manager_tutorial.py
 ### Active-script note (naming)
 
 The **active** force-feedback node is **`haptic_force_manager_tutorial.py`**
-(NOT `haptic_force_manager.py`, which no longer exists). Sibling variants in
+(NOT `haptic_force_manager.py`, which no longer exists) when `cfg.BLENDING=
+False` (default, Virtual Fixture mode). Sibling variants in
 `haption_teleoperation/scripts/`:
-- `haptic_force_manager_tutorial.py` — ★ active node used in the tutorial-world flow.
+- `haptic_force_manager_tutorial.py` — ★ active node, Virtual Fixture mode (`cfg.BLENDING=False`).
+- `haptic_force_manager_blending_tutorial.py` — ★ active node, TWIST BLENDING mode (`cfg.BLENDING=True`, §11.5). Renders ONLY F_sync + an "Authority Share" plot; no blending math of its own.
 - `haptic_force_manager_battery.py` — alternate/experimental variant.
+
+**Switching modes**: flip `BLENDING` in `triago_control/qp_controller/config.py`
+and restart BOTH `main_shared_autonomy.py` and `teleop_triago_clutch.py` (they
+both read the flag once at their own startup — there is no live-toggle). Run
+`haptic_force_manager_tutorial.py` for `BLENDING=False`, or
+`haptic_force_manager_blending_tutorial.py` for `BLENDING=True`.
 
 `haptic_force_manager_tutorial.py` currently runs with **`DEBUG_ONLY_GUIDE = True`**,
 which means it outputs **only `F_guide`** (the belief-weighted Virtual-Fixture

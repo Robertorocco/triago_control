@@ -34,6 +34,34 @@ DYNAMIC_GAMMA_CLF = False       # Vary CLF convergence rate with the safety marg
 SIMULATE_IDEAL_KINEMATICS = False  # True = pure math digital twin, False = real hardware
 ORIENTATION_CTRL = True         # True = control Pos+Ori (6DOF), False = Pos only (3DOF)
 
+# --- Shared-autonomy TWIST BLENDING (2026-07-03) ---
+# Master switch for the shared-autonomy blending architecture. This is the
+# SINGLE source of truth consumed by BOTH:
+#   - main_shared_autonomy.py  (applies the blend formula + becomes the sole
+#                                publisher of /arm_*/cartesian_reference)
+#   - teleop_triago_clutch.py  (redirects its OWN publisher to
+#                                /arm_*/user_cartesian_reference instead of
+#                                /arm_*/cartesian_reference, so the two nodes
+#                                never fight over the same topic)
+# False = legacy behavior: teleop_triago_clutch.py drives the robot directly,
+#         main_shared_autonomy.py only takes over during autonomous grasp
+#         execution or POLICY_BELIEF_TEST (unchanged from before).
+# True  = shared-autonomy blending: main_shared_autonomy.py persistently
+#         integrates v_blend = (1-alpha)*v_user + alpha*pi_policy every tick
+#         and is the SOLE writer of /arm_*/cartesian_reference even in normal
+#         teleop (not just during grasp execution).
+BLENDING = False
+
+# alpha(belief) shaping -- see main_shared_autonomy.compute_alpha for the
+# exact formula. x = normalised belief in [0,1] (0 at uniform, 1 at certainty).
+#   alpha = ALPHA_MAX * x**ALPHA_GAMMA
+ALPHA_MAX = 0.80          # Hard cap on autonomy authority (user retains >= 20%)
+ALPHA_GAMMA = 0.5         # <1 = alpha ramps toward ALPHA_MAX quickly once belief
+                          #   is "sufficiently high"; 1.0 = linear ramp
+ALPHA_LPF_COEFF = 0.08    # Low-pass filter coefficient on alpha (lower = smoother,
+                          #   avoids any discontinuity in the blended reference
+                          #   when the belief distribution shifts)
+
 # =============================================================================
 # 2. SAFETY + CONTROL HYPERPARAMETERS
 # =============================================================================

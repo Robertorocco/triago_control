@@ -78,6 +78,7 @@ import matplotlib.pyplot as plt
 from triago_control.shared_autonomy.goal_set import GoalSet, create_transform
 from triago_control.shared_autonomy.belief_estimator import BeliefEstimator
 from triago_control.shared_autonomy.grasp_state_machine import GraspStateMachine, TickInput, CLEAR_MARGIN
+import triago_control.qp_controller.config as cfg
 
 # Gazebo IFRA_LinkAttacher plugin service (kinematic grasp in simulation)
 try:
@@ -103,8 +104,17 @@ class SharedControlNode(Node):
 
         # --- Architecture Flags ---
         self.PREDICTION = True   # Update belief and evaluate all policies vs. just the active goal policy
-        self.BLENDING = False    # Augment human input with the optimal policy vs. strictly executing it
+        # NOTE (2026-07-03): BLENDING is NO LONGER a local flag on this node.
+        # It is read directly from triago_control.qp_controller.config (cfg.BLENDING)
+        # -- the SAME flag teleop_triago_clutch.py reads to decide which topic it
+        # publishes on (/arm_*/cartesian_reference vs /arm_*/user_cartesian_reference).
+        # A single source of truth avoids the two nodes ever disagreeing about who
+        # owns /arm_*/cartesian_reference. See cfg.BLENDING's docstring for the
+        # full topic-routing explanation. Use `cfg.BLENDING` everywhere below.
         self.TASK_DIM = 6        # 6 for full SE(3) tracking, 5 for S^2 grasping (align X-axis only)
+        # Persistent LPF state for the belief->alpha mapping (see compute_alpha).
+        self.alpha_lpf = 0.0
+        self.last_alpha = 0.0   # most recent alpha actually applied (for telemetry)
 
         self.POLICY_BELIEF_TEST = False   # <-- flip this to switch modes
         # When True:  the node injects pi_stars[test_goal_key] as the fake human
@@ -300,10 +310,26 @@ class SharedControlNode(Node):
         self.trajectory_data = deque(maxlen=500)
 
         # --- ROS2 TOPICS ---
+        # Topic routing depends on cfg.BLENDING (single source of truth, shared
+        # with teleop_triago_clutch.py):
+        #   BLENDING=False (legacy): teleop_triago_clutch.py publishes the pure
+        #     user pose directly on /arm_*/cartesian_reference -- this node just
+        #     listens in to build current_T_user/current_v_h for belief inference,
+        #     and only becomes the publisher during grasp execution / test mode.
+        #   BLENDING=True: teleop_triago_clutch.py redirects its publisher to
+        #     /arm_*/user_cartesian_reference (pure user intent, NOT read by the
+        #     QP controller) so the two nodes never fight over
+        #     /arm_*/cartesian_reference. THIS node listens on the NEW topic for
+        #     current_T_user/current_v_h, and becomes the SOLE publisher of the
+        #     real /arm_*/cartesian_reference (see the publish_cmd gate below).
+        _human_ref_topic_right = ('/arm_right/user_cartesian_reference' if cfg.BLENDING
+                                  else '/arm_right/cartesian_reference')
+        _human_ref_topic_left = ('/arm_left/user_cartesian_reference' if cfg.BLENDING
+                                 else '/arm_left/cartesian_reference')
         self.sub_human_reference_right = self.create_subscription(
-            Float64MultiArray, '/arm_right/cartesian_reference', self.human_reference_callback_right, 10)
+            Float64MultiArray, _human_ref_topic_right, self.human_reference_callback_right, 10)
         self.sub_human_reference_left = self.create_subscription(
-            Float64MultiArray, '/arm_left/cartesian_reference', self.human_reference_callback_left, 10)
+            Float64MultiArray, _human_ref_topic_left, self.human_reference_callback_left, 10)
         self.sub_ee_pose = self.create_subscription(
             Float64MultiArray, '/qp_debug/ee_real', self.robot_state_callback, 10)
         self.sub_collision = self.create_subscription(
@@ -332,6 +358,17 @@ class SharedControlNode(Node):
         # [x, y, z, roll, pitch, yaw, confidence] in base_footprint.
         self.pub_active_goal_pose = self.create_publisher(
             Float64MultiArray, '/shared_autonomy/active_goal_pose', 10)
+
+        # --- Blending telemetry (2026-07-03) ---
+        # Single source of truth for "who is commanding what": published every
+        # tick regardless of cfg.BLENDING (alpha=0 / v_policy=0 when disabled)
+        # so the haptic force manager's Authority Share plot always reflects
+        # EXACTLY what this node computed and (if BLENDING) actually integrated
+        # -- never a duplicated/independent computation that could drift from
+        # the real one. Layout (19 floats):
+        #   [alpha, v_user(6), v_policy(6), v_blend(6)]
+        self.pub_blend_debug = self.create_publisher(
+            Float64MultiArray, '/shared_autonomy/blend_debug', 10)
 
         self.sub_wrench_removed = None  # Force sensor removed — not used in this architecture.
 
@@ -379,7 +416,13 @@ class SharedControlNode(Node):
         self.get_logger().info("=========================================")
         self.get_logger().info(f" State:       {self.grasp_sm.state}")
         self.get_logger().info(f" Prediction:  {'ENABLED (Inferring Intent)' if self.PREDICTION else 'DISABLED (Fixed Goal)'}")
-        self.get_logger().info(f" Blending:    {'ENABLED (Mixing Commands)' if self.BLENDING else 'DISABLED (Strict Optimal Policy)'}")
+        self.get_logger().info(f" Blending:    {'ENABLED (Mixing Commands)' if cfg.BLENDING else 'DISABLED (Strict Optimal Policy)'} [cfg.BLENDING]")
+        if cfg.BLENDING:
+            self.get_logger().info(
+                f" Blending activates above uniform belief (1/N_goals); "
+                f"alpha = {cfg.ALPHA_MAX} * belief_norm**{cfg.ALPHA_GAMMA}, "
+                f"capped at ALPHA_MAX={cfg.ALPHA_MAX} (user retains >= "
+                f"{100*(1-cfg.ALPHA_MAX):.0f}% authority).")
         self.get_logger().info(f" Active Goal: {self.active_goal_key} (Used if Prediction is False)")
         self.get_logger().info(f" Total Goals: {len(self.target_keys)}")
         self.get_logger().info("=========================================")
@@ -1069,11 +1112,27 @@ class SharedControlNode(Node):
         if tick_output.release_object:
             self._release_object()
 
-        if self.BLENDING and tick_output.new_state == "SHARED_AUTONOMY":
+        if cfg.BLENDING and tick_output.new_state == "SHARED_AUTONOMY":
             alpha = self.compute_alpha(b_max)
+            self.last_alpha = alpha
+            # v_blend = (1-alpha)*v_user + alpha*pi_policy -- blended at the
+            # TWIST level (not a one-shot pose offset), so it accumulates into
+            # genuine, persistent motion when integrated below (section 6).
             target_twist = (1 - alpha) * self.current_v_h + alpha * tick_output.target_twist
         else:
+            alpha = 0.0
+            self.last_alpha = 0.0
             target_twist = tick_output.target_twist
+
+        # Authority-share telemetry: published EVERY tick (not just in blending
+        # mode) so the haptic force manager's plot has a continuous, well-defined
+        # signal to show. v_policy is tick_output.target_twist -- exactly the
+        # twist that WOULD be blended in, whether or not BLENDING is active.
+        blend_debug_msg = Float64MultiArray()
+        blend_debug_msg.data = ([float(alpha)] + list(map(float, self.current_v_h))
+                                + list(map(float, tick_output.target_twist))
+                                + list(map(float, target_twist)))
+        self.pub_blend_debug.publish(blend_debug_msg)
 
         # --- AUTHORITY HANDOVER + HAPTIC FIXTURE STATE ---
         # During autonomous grasp execution (approach/close/lift) the node DRIVES
@@ -1211,9 +1270,17 @@ class SharedControlNode(Node):
 
         # --- 6. PUBLISH COMMAND TO ROBOT ---
         # Test mode: the node is the sole reference source (always publishes).
-        # Teleop mode: the node ONLY publishes during autonomous grasp execution,
-        # taking authority from the Haption clutch (which freezes on grasp_active).
-        publish_cmd = self.POLICY_BELIEF_TEST or grasp_exec
+        # Teleop mode (BLENDING=False): the node ONLY publishes during autonomous
+        #   grasp execution, taking authority from the Haption clutch (which
+        #   freezes on grasp_active). teleop_triago_clutch.py owns
+        #   /arm_*/cartesian_reference the rest of the time.
+        # BLENDING mode (cfg.BLENDING=True): this node is the SOLE, PERSISTENT
+        #   publisher of /arm_*/cartesian_reference at all times (teleop_triago_clutch.py
+        #   has redirected itself to /arm_*/user_cartesian_reference instead, so
+        #   there is never a race between the two). target_twist above is already
+        #   the blended twist (1-alpha)*v_user + alpha*pi_policy, integrated below
+        #   exactly like the grasp-execution / test-mode reference always was.
+        publish_cmd = self.POLICY_BELIEF_TEST or grasp_exec or cfg.BLENDING
         if publish_cmd and not np.allclose(self.current_T_EE, np.eye(4)):
             # Virtual Haptic Cursor: integrate the optimal policy twist a short
             # distance into the future so the QP's CLF always has a moving,
@@ -1811,20 +1878,37 @@ class SharedControlNode(Node):
     def compute_alpha(self, b_max):
         """Maps the maximum belief probability to the autonomy arbitration weight.
 
-        Bug fix: the original was a stub that always returned 0.0, which
-        silently disabled blending any time BLENDING=True (no warning, no
-        error -- it just quietly did nothing). This now raises explicitly so a
-        BLENDING=True misconfiguration is caught immediately instead of
-        producing confusing "blending does nothing" behavior at runtime.
-
-        Implement the actual confidence-to-alpha mapping before enabling
-        BLENDING=True (e.g. a saturating ramp such as
-        np.clip((b_max - b_low) / (b_high - b_low), 0, 1)).
+        alpha = cfg.ALPHA_MAX * x**cfg.ALPHA_GAMMA, where x is b_max normalised
+        against the uniform-belief baseline (1/N_goals) into [0, 1]:
+          - b_max <= 1/N_goals (uniform / no information)  -> x = 0 -> alpha = 0
+          - b_max -> 1 (full certainty)                     -> x = 1 -> alpha = ALPHA_MAX
+        cfg.ALPHA_GAMMA < 1 bows the curve upward so alpha reaches most of
+        ALPHA_MAX well before belief is fully certain (a "sufficiently
+        confident" belief already hands strong authority to the policy,
+        instead of only the last few % of certainty mattering).
+        The result is additionally LOW-PASS FILTERED (cfg.ALPHA_LPF_COEFF) via
+        self.alpha_lpf so alpha never jumps discontinuously between ticks, even
+        if the belief distribution itself shifts abruptly.
+        ALPHA_MAX < 1.0 guarantees the user retains at least (1-ALPHA_MAX)
+        authority at all times, regardless of belief.
         """
-        raise NotImplementedError(
-            "compute_alpha has no implementation yet. Set self.BLENDING = False, "
-            "or implement a confidence-to-alpha mapping here before enabling it."
-        )
+        active_goals = [k for k in self.target_keys
+                        if k not in self.belief_estimator.get_excluded_goals()]
+        n_active = max(len(active_goals), 1)
+        uniform_max = 1.0 / n_active
+
+        if b_max <= uniform_max:
+            x = 0.0
+        else:
+            x = (b_max - uniform_max) / max(1.0 - uniform_max, 1e-9)
+            x = float(np.clip(x, 0.0, 1.0))
+
+        alpha_raw = cfg.ALPHA_MAX * (x ** cfg.ALPHA_GAMMA)
+        alpha_raw = float(np.clip(alpha_raw, 0.0, cfg.ALPHA_MAX))
+
+        self.alpha_lpf = ((cfg.ALPHA_LPF_COEFF * alpha_raw)
+                         + (1.0 - cfg.ALPHA_LPF_COEFF) * self.alpha_lpf)
+        return self.alpha_lpf
 
     def _console_input_thread(self):
         """Blocking console loop that lets the developer switch the test goal at runtime.
