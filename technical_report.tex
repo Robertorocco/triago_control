@@ -1,0 +1,125 @@
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.5cm]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{enumitem}
+\usepackage{hyperref}
+\usepackage{titlesec}
+
+\titlespacing*{\section}{0pt}{1.2ex plus 0.3ex minus 0.2ex}{0.6ex plus 0.1ex}
+\titlespacing*{\subsection}{0pt}{0.8ex plus 0.2ex minus 0.1ex}{0.4ex plus 0.1ex}
+
+\setlength{\parskip}{0.4em}
+\setlength{\parindent}{0pt}
+
+\title{\textbf{QP-CLF-CBF Shared-Autonomy Teleoperation\\for a Bimanual Mobile Manipulator:\\Architecture, Guarantees, and Design Choices}}
+\author{Roberto Rocco \\ IRISA, Rennes}
+\date{July 2026}
+
+\begin{document}
+\maketitle
+
+%───────────────────────────────────────────────────────────────────────────────
+\section{System Overview}
+
+The system provides safe bimanual teleoperation of a PAL TRIAGo++ (two 7-DOF arms, head, mobile base) through a Haption Virtuose 6-DOF haptic interface, with shared-autonomy intent prediction and haptic guidance.
+The architecture is factored into three decoupled real-time loops: (i)~a QP-based safety controller at 300\,Hz enforcing collision and joint-limit invariants on both arms; (ii)~a shared-autonomy inference layer running Bayesian intent estimation over a discrete goal set and issuing blended policies; (iii)~a haptic force-feedback layer rendering the inferred intent as virtual-fixture guidance forces on the operator's device at 150\,Hz. An independent head-servoing QP tracks the operator's hands in the camera FOV without sharing any decision variable with the arm controller.
+
+%───────────────────────────────────────────────────────────────────────────────
+\section{QP-CLF-CBF Safety Controller}
+
+\subsection{Formulation}
+
+The optimisation solved every tick is:
+\begin{equation}
+\min_{\dot{q},\,\delta_R,\,\delta_L} \;\;
+\underbrace{\lambda\|\dot{q}\|^2}_{\text{damping}}
++ \underbrace{\sum_i w_i^{\text{post}}\bigl(\dot{q}_i - v_i^{\text{ref}}\bigr)^2}_{\text{posture}}
++ \underbrace{W_R\,\delta_R^2 + W_L\,\delta_L^2}_{\text{slack}}
+\end{equation}
+subject to:
+\begin{align}
+J_{\text{task},X}\,\dot{q} - \delta_X &\;\ge\; -\gamma\, e_X, &\quad &\text{(CLF, per arm } X\text{)} \label{eq:clf}\\
+J_{\text{soft},X}\,\dot{q} &\;\ge\; -\gamma_{\text{cbf}}\,(h_{\text{soft},X} - d_{\text{safe},X}), &\quad &\text{(CBF, per arm)} \label{eq:cbf}\\
+\dot{q}_{\min}^{\text{safe}} \;\le\; \dot{q} &\;\le\; \dot{q}_{\max}^{\text{safe}}, &\quad &\text{(joint limits)} \label{eq:jl}
+\end{align}
+where the decision vector is $[\dot{q}\in\mathbb{R}^{n_v},\;\delta_R,\;\delta_L]$. Joints outside the two arm chains are hard-locked to zero velocity via~\eqref{eq:jl}, rendering the head, torso, base, and gripper kinematically frozen from the QP's perspective.
+
+\subsection{CLF -- Task Tracking with Relaxation}
+
+Constraint~\eqref{eq:clf} is a Perfect-Scalar-Inequality CLF with diagonal task weights (position gain~10, orientation gain~1). The slack $\delta_X$ allows the CLF to yield when barrier constraints are active; the adaptive slack weight $W_X$ is scheduled from the dual variables (shadow prices) of the active collision and joint-limit rows, dropping toward a base value when proximity forces are high (yielding tracking precision to preserve safety) and rising to a ceiling in free space (tight tracking). The CLF convergence rate $\gamma$ is further modulated via an exponential decay in the low-pass-filtered collision shadow price, giving the task more authority when obstacles are distant.
+
+\subsection{CBF -- Per-Arm SoftMin Collision Barrier}
+
+Collision avoidance uses a SoftMin aggregation over the $K$~closest geometry pairs (capsule--capsule, capsule--box, capsule--cylinder). The key architectural decision is a \emph{per-arm decomposition}: two independent rows~\eqref{eq:cbf} are assembled, each aggregating only pairs that geometrically involve that arm's own links or its currently-held object. A pair touching both arms (genuine inter-arm proximity) contributes to both rows.
+
+This eliminates spurious coupling: without the split, a single SoftMin row allows the QP to recruit the idle arm's joints to cheaply satisfy a barrier activated solely by the active arm near an unrelated obstacle, producing unwanted oscillation.
+
+The dynamic safety margin is likewise per-arm: $d_{\text{safe},X} = d_0 + k_v\|\dot{q}_X\|$, computed from each arm's own joint velocity norm. This removes a second coupling channel where the active arm's speed inflated the idle arm's margin threshold.
+
+\subsection{Posture Task -- Gradient Potential Field}
+
+Rather than a linear spring toward a neutral configuration, the posture reference is derived from the gradient of a repulsive potential $H(p)= (1-p)^{-2} + (1+p)^{-2}$ on the normalised joint position $p=(q-q_{\text{mid}})/\Delta q$. This produces essentially zero cost in mid-range (leaving full redundancy for CLF tracking) and a sharply growing reference velocity pushing away from mechanical limits. During precision phases (autonomous grasp execution), the posture weight is smoothly ramped down so the QP dedicates redundancy to tracking instead of centring.
+
+\subsection{Reference Governor}
+
+An intermediate layer between the raw Cartesian reference and the CLF bounds the error magnitude ($\|e\|\le E_{\max}$), velocity ($\|v_{\text{ref}}\|\le V_{\max}$), and acceleration ($\|\Delta v/\Delta t\|\le A_{\max}$) that the CLF must handle. Orientation error is clamped via axis-angle truncation. This preserves QP feasibility under discontinuous, aggressive, or far-away human commands without modifying the QP itself.
+
+\subsection{Local-Minima Escape}
+
+A state machine monitors whether the governed position error has stagnated (above a threshold for a time window while not decreasing). On detection, the category is identified from shadow prices -- obstacle-induced (high $\lambda_{\text{cbf}}$) or joint-limit-induced (high $\lambda_{\text{jl}}$). The escape action is a per-arm temporary posture-weight modification: reduced weight for obstacle minima (freeing redundancy to slip past, combined with relaxation to position-only tracking) or increased weight for joint-limit minima (pushing harder away from the saturated limit). The correction is smoothly ramped and automatically exits on error reduction or timeout.
+
+As a last resort, a background RRT-Connect planner (non-blocking, epoch-fenced, fully isolated from the real-time loop) attempts to find a collision-free joint-space path using damped-least-squares IK for goal generation.
+
+%───────────────────────────────────────────────────────────────────────────────
+\section{Bimanual Architecture and Coupling Guarantees}
+
+Each arm has its own CLF row, CBF row, slack variable, and adaptive weight schedule. An arm not currently teleoperated is CLF-held at its last end-effector pose (zero-velocity reference, doubled slack weight), ensuring it holds position yet can still yield if needed by a shared inter-arm barrier. The QP always publishes solved velocities for both arms -- no arm is ever zero-overwritten -- so collision-avoidance motion is never discarded.
+
+The head chain is modelled as a quasi-static CBF obstacle: its capsules are updated from live FK every tick but its joints are velocity-locked to zero in the QP. The guarantee degrades from exact forward-invariance to quasi-static-valid, bounded by the head's own commanded speed ($\sim$$10^{-4}$\,m per tick at 300\,Hz) -- negligible against the 15\,mm base safety margin.
+
+%───────────────────────────────────────────────────────────────────────────────
+\section{Shared Autonomy and Haptic Guidance}
+
+\subsection{Bayesian Intent Estimation}
+
+A discrete belief distribution $P(g_k\,|\,\mathbf{v}_{\text{user}})$ over five goals (two grasp types per cylinder, one placement manifold) is maintained via cost-based likelihood updates. Goal exclusion (a grasped cylinder's own goals, or placement while empty) pins probabilities to zero and removes those goals from the normalisation.
+
+\subsection{Haptic Virtual-Fixture Guidance}
+
+The guidance force rendered on the device is a velocity-field force:
+\begin{equation}
+F_{\text{guide}} = D\,\bigl(v_{\text{field}} - v_{\text{handle}}\bigr)\cdot\alpha_{\text{conf}}\cdot\alpha_{\text{prox}}
+\end{equation}
+where $v_{\text{field}} = \sum_k P(g_k)\,\pi_k$ is the belief-weighted policy blend (anchored at the reference pose, mapped into the device frame via the 180$^\circ$ Z-rotation), $\alpha_{\text{conf}}$ is an entropy-gated confidence smoothstep, and $\alpha_{\text{prox}}$ is a proximity gate that silences guidance when far from any goal (avoiding commitment to an ill-determined manifold point). The formulation is intrinsically damped -- it vanishes as the handle reaches $v_{\text{field}}$ -- preventing runaway under the absence of global viscous damping.
+
+A position-spring fixture ($F_{\text{fixture}}$) additionally pulls the handle toward the active goal pose once belief confidence exceeds a threshold, providing precise settling assistance at the pre-grasp standoff.
+
+\subsection{Passivity Guarantee}
+
+A Passivity Observer integrates the port power $\dot{E} = -F\cdot v$ exchanged at the device. When the accumulated energy becomes negative (the system is actively injecting energy), a Passivity Controller adds dissipative damping $\beta v$, saturated to safe force/torque limits, to restore passivity. Global safety clipping (10\,N / 1\,Nm) acts as a hard envelope regardless of layer superposition.
+
+%───────────────────────────────────────────────────────────────────────────────
+\section{Head Visual Servoing (Independent QP)}
+
+The head (identical 7-DOF hardware) carries an RGBD camera and runs its own QP at a separate rate. In the image-based regime (both hands in FOV), a 2.5D interaction-matrix formulation maps pixel$+$depth error to a camera twist via the image Jacobian $L_s$, with FOV barriers keeping each hand away from image edges. In the position-based regime (hands outside FOV), a cross-product look-at controller drives the optical axis toward the hands centroid.
+
+The perception pipeline (RANSAC plane segmentation, rim-extraction circle fit, Hyper algebraic fit) estimates cylinder pose and dimensions from the depth stream with sub-centimetre accuracy, intended to feed live obstacle data into the arm QP in future work.
+
+%───────────────────────────────────────────────────────────────────────────────
+\section{Grasp Lifecycle and World-Model Maintenance}
+
+The grasp state machine (per arm, independent) transitions through SHARED\_AUTONOMY $\to$ PRE\_GRASP $\to$ ALIGN $\to$ APPROACH $\to$ CLOSE $\to$ LIFT $\to$ HOLDING, with an ABORT\_RETREAT path on failure. On attachment, the grasped cylinder is re-parented as a kinematic link of the arm in the collision model (its CBF pairs now protect it as part of the arm chain). On release, it is placed at the perfect-fall position and detached back to the world frame, with a barrier ramp preventing a spike from the overlapping gripper geometry. All grasp success/failure decisions are purely geometric (FK-derived signed distance); no force sensing is available.
+
+%───────────────────────────────────────────────────────────────────────────────
+\section{Summary of Design Choices and Trade-offs}
+
+\begin{itemize}[nosep]
+\item \textbf{Per-arm CBF split over a shared row}: eliminates idle-arm coupling at the cost of losing global cross-arm margin sharing for non-inter-arm pairs -- acceptable since the inter-arm pairs still contribute to both rows.
+\item \textbf{Quasi-static head model}: avoids enlarging the QP decision vector (no head joints optimised) at the cost of degraded forward-invariance bounded by the head's speed.
+\item \textbf{Velocity-field guidance (not position-spring)}: intrinsically stable (no runaway), smooth in belief transitions, but less stiff than a fixture near the goal -- complemented by the separate $F_{\text{fixture}}$ layer.
+\item \textbf{Reference governor before the CLF}: preserves hard QP feasibility guarantees under arbitrarily aggressive teleop commands, without needing to enlarge slack bounds or soften safety margins.
+\item \textbf{No force sensing}: grasp confirmation is purely kinematic; perception is being developed to close this gap.
+\end{itemize}
+
+\end{document}
