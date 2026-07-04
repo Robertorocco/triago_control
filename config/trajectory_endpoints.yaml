@@ -42,7 +42,7 @@
 # =============================================================================
 
 # --- WHICH TEST TO RUN -------------------------------------------------------
-active_preset: "local_minima_behind"
+active_preset: "home"
 
 # --- GLOBAL BEHAVIOUR FLAGS --------------------------------------------------
 # Lambda-driven time scaling (dynamic_trajectory / DYNAMIC_TRAJECTORY flag).
@@ -191,32 +191,9 @@ presets:
   #   - duration: 1.0 s (reference slides fast → error appears instantly)
   #   - Start from 'home' pose first, then switch active_preset here and re-run.
   #
-  # Case 1: BEHIND THE ROBOT (joint limit + obstacle conflict)
-  #   The right hand is commanded to a position BEHIND the robot's own body
-  #   (negative X, i.e. behind the shoulder), with the approach axis pointing
-  #   straight UP (world +Z). This demands:
-  #     - All shoulder joints to rotate past/near their limits (the workspace
-  #       behind the torso is at the edge of the kinematic envelope)
-  #     - Simultaneous orientation change to gripper-up (90° pitch from the
-  #       usual forward-down start)
-  #   The CBF against the torso/body blocks backward motion of links 3-4-5,
-  #   while the joint-limit barriers on joints 1-2 block the shoulder rotation
-  #   → the QP is stuck: the CLF wants to go backward+reorient, every path
-  #   there is blocked by either the body or a joint limit.
-  # --------------------------------------------------------------------------
-  local_minima_behind:
-    category: out_of_workspace
-    description: "LOCAL MINIMA TEST 1: right hand behind the robot with
-                  gripper pointing UP. The CLF demands backward+reorient motion
-                  that is simultaneously blocked by the torso CBF and shoulder
-                  joint limits. Expected: robot parks with large tracking error."
-    arms: right
-    mode: absolute
-    right: [-0.1, -0.3, 1.0]
-    left:  [0.6,  0.5, 0.8]
-    rpy_right: [0.0, -1.5708, 0.0]      # gripper approach axis pointing UP (+Z world)
-    rpy_left:  [3.1416, 0.0, 0.0]       # left holds forward-down (inactive)
-
+  # (2026-07-04: "local_minima_behind" -- Case 1, BEHIND THE ROBOT -- was
+  # removed per instruction. Case 2, THROUGH THE TABLE, remains below.)
+  #
   # Case 2: THROUGH THE TABLE (obstacle conflict, no joint-limit issue)
   #   The right hand is commanded to a position INSIDE the table's volume
   #   (X=1.0, which is the table centre, at Z=0.75 which is just above the

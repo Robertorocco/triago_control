@@ -47,7 +47,16 @@ and the live joint-position slider GUI):
                                     frequency, safety margin, min distance
     fig3_task_error_adaptation     Cartesian tracking error + dynamic weights
     fig4_task_authority            Soft-task QP cost decomposition (shares)
-    fig5_reference_governor        Raw-vs-governed clamp magnitudes
+    fig5_3d_trajectory              3D commanded vs. executed gripper path
+                                    (solid = commanded reference, dashed =
+                                    executed EE pose; red = Right, blue =
+                                    Left). Saved as PDF + PNG always; ALSO
+                                    saved as a browser-navigable HTML
+                                    (free rotate/zoom/pan) if the optional
+                                    `plotly` package is installed --
+                                    `pip install plotly` to enable it, no
+                                    other change needed.
+    fig6_reference_governor        Raw-vs-governed clamp magnitudes
                                     (only emitted if cfg.ENABLE_REFERENCE_GOVERNOR)
 """
 import matplotlib
@@ -65,8 +74,19 @@ from std_msgs.msg import Float64MultiArray, Float64, String, Bool
 
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
+from mpl_toolkits.mplot3d import Axes3D  # noqa: F401 -- registers the '3d' projection
 
 import triago_control.qp_controller.config as cfg
+
+# Optional: a browser-navigable (free rotate/zoom/pan) HTML export of the 3D
+# trajectory figure, on top of the always-produced static PDF/PNG. Purely
+# additive -- if plotly isn't installed, the HTML export is silently skipped
+# and only the static PDF/PNG (from matplotlib) are written.
+try:
+    import plotly.graph_objects as go
+    _HAS_PLOTLY = True
+except ImportError:
+    _HAS_PLOTLY = False
 
 
 # =============================================================================
@@ -214,6 +234,15 @@ class OfflinePlotter(Node):
         self.err_vel_r = []
         self.err_vel_l = []
 
+        # 3D trajectory trace (commanded reference vs. executed EE pose),
+        # sampled at the SAME rate/callback as the tracking error above
+        # (/qp_debug/ee_real, gated on has_ref_right) -- see cb_real.
+        self.traj_time = []
+        self.traj_ref_r = []    # commanded [x,y,z], Right
+        self.traj_ref_l = []    # commanded [x,y,z], Left
+        self.traj_real_r = []   # executed  [x,y,z], Right
+        self.traj_real_l = []   # executed  [x,y,z], Left
+
         self.time_slack = []
         self.slack_buffer = []
         self.slack_mode = None
@@ -340,6 +369,16 @@ class OfflinePlotter(Node):
         self.err_vel_r.append(e_v_r)
         self.err_vel_l.append(e_v_l)
 
+        # 3D trajectory trace -- same tick, same anchors as the error above.
+        self.traj_time.append(self._t())
+        self.traj_ref_r.append(self.ref_right[0:3].copy())
+        self.traj_real_r.append(p_real_r.copy())
+        if self.has_ref_left:
+            self.traj_ref_l.append(self.ref_left[0:3].copy())
+        else:
+            self.traj_ref_l.append(np.full(3, np.nan))
+        self.traj_real_l.append(p_real_l.copy())
+
     def slack_callback(self, msg):
         if not self._recording_active():
             return
@@ -443,10 +482,11 @@ class OfflinePlotter(Node):
         figs.append(('fig2_qp_data', self._build_fig_qp_data()))
         figs.append(('fig3_task_error_adaptation', self._build_fig_task_error_adaptation()))
         figs.append(('fig4_task_authority', self._build_fig_task_authority()))
+        figs.append(('fig5_3d_trajectory', self._build_fig_3d_trajectory()))
         if cfg.ENABLE_REFERENCE_GOVERNOR:
             fig_gov = self._build_fig_reference_governor()
             if fig_gov is not None:
-                figs.append(('fig5_reference_governor', fig_gov))
+                figs.append(('fig6_reference_governor', fig_gov))
 
         for name, fig in figs:
             if fig is None:
@@ -457,6 +497,19 @@ class OfflinePlotter(Node):
             fig.savefig(png_path)
             plt.close(fig)
             self.get_logger().info(f"[offline_plotter]   saved {name}.pdf / {name}.png")
+
+        # Optional interactive/navigable HTML export of the 3D trajectory
+        # figure (plotly, opened in any browser -- free rotate/zoom/pan).
+        # Purely additive on top of the PDF/PNG saved above.
+        if self.traj_time:
+            if _HAS_PLOTLY:
+                html_path = os.path.join(out_dir, 'fig5_3d_trajectory.html')
+                self._save_3d_trajectory_html(html_path)
+                self.get_logger().info(f"[offline_plotter]   saved fig5_3d_trajectory.html (interactive)")
+            else:
+                self.get_logger().info(
+                    "[offline_plotter]   skipped interactive 3D HTML export "
+                    "('plotly' not installed -- pip install plotly to enable it).")
 
         trial_duration = self.time_qdot_cmd[-1] if self.time_qdot_cmd else \
             (self.time_js[-1] if self.time_js else 0.0)
@@ -689,6 +742,85 @@ class OfflinePlotter(Node):
         _draw_trigger_line(ax, self.t_off)
         fig.tight_layout(rect=(0, 0, 1, 0.93))
         return fig
+
+    def _build_fig_3d_trajectory(self):
+        """3D commanded-vs-executed gripper path for both arms.
+
+        Solid line  = the Cartesian reference commanded by the active
+                      trajectory source (trajectory_generator.py today; any
+                      future source publishing on /arm_*/cartesian_reference
+                      works identically, per the existing reference contract).
+        Dashed line = the REAL gripper pose actually achieved (/qp_debug/ee_real).
+        Red = Right hand, Blue = Left hand -- same color convention as every
+        other per-arm plot in this dashboard and in plotter.py.
+        """
+        if not self.traj_time:
+            return None
+
+        ref_r = np.array(self.traj_ref_r)
+        ref_l = np.array(self.traj_ref_l)
+        real_r = np.array(self.traj_real_r)
+        real_l = np.array(self.traj_real_l)
+
+        fig = plt.figure(figsize=(9, 8))
+        ax = fig.add_subplot(111, projection='3d')
+        fig.suptitle('Commanded vs. Executed Gripper Trajectory (3D)')
+
+        ax.plot(ref_r[:, 0], ref_r[:, 1], ref_r[:, 2], color='r', linestyle='-',
+               linewidth=1.8, label='Right -- commanded')
+        ax.plot(real_r[:, 0], real_r[:, 1], real_r[:, 2], color='r', linestyle='--',
+               linewidth=1.6, label='Right -- executed')
+
+        if not np.all(np.isnan(ref_l)):
+            ax.plot(ref_l[:, 0], ref_l[:, 1], ref_l[:, 2], color='b', linestyle='-',
+                   linewidth=1.8, label='Left -- commanded')
+        ax.plot(real_l[:, 0], real_l[:, 1], real_l[:, 2], color='b', linestyle='--',
+               linewidth=1.6, label='Left -- executed')
+
+        # Start/end markers -- helps a static print reader orient the path
+        # without needing to rotate the view (which a PDF/PNG cannot do).
+        ax.scatter(*real_r[0], color='r', marker='o', s=40, zorder=5)
+        ax.scatter(*real_r[-1], color='r', marker='X', s=55, zorder=5)
+        ax.scatter(*real_l[0], color='b', marker='o', s=40, zorder=5)
+        ax.scatter(*real_l[-1], color='b', marker='X', s=55, zorder=5)
+
+        ax.set_xlabel('X [m]')
+        ax.set_ylabel('Y [m]')
+        ax.set_zlabel('Z [m]')
+        ax.legend(loc='upper left', fontsize=8)
+        ax.set_title('Solid = commanded reference, Dashed = executed EE pose  '
+                     '($\\circ$ = start, $\\times$ = end)', fontsize=9)
+        fig.tight_layout()
+        return fig
+
+    def _save_3d_trajectory_html(self, html_path):
+        """Interactive, browser-navigable (free rotate/zoom/pan) counterpart
+        to _build_fig_3d_trajectory, written only if plotly is available."""
+        ref_r = np.array(self.traj_ref_r)
+        ref_l = np.array(self.traj_ref_l)
+        real_r = np.array(self.traj_real_r)
+        real_l = np.array(self.traj_real_l)
+
+        traces = [
+            go.Scatter3d(x=ref_r[:, 0], y=ref_r[:, 1], z=ref_r[:, 2], mode='lines',
+                        line=dict(color='red', width=5), name='Right -- commanded'),
+            go.Scatter3d(x=real_r[:, 0], y=real_r[:, 1], z=real_r[:, 2], mode='lines',
+                        line=dict(color='red', width=4, dash='dash'), name='Right -- executed'),
+        ]
+        if not np.all(np.isnan(ref_l)):
+            traces.append(go.Scatter3d(x=ref_l[:, 0], y=ref_l[:, 1], z=ref_l[:, 2], mode='lines',
+                                       line=dict(color='blue', width=5), name='Left -- commanded'))
+        traces.append(go.Scatter3d(x=real_l[:, 0], y=real_l[:, 1], z=real_l[:, 2], mode='lines',
+                                   line=dict(color='blue', width=4, dash='dash'), name='Left -- executed'))
+
+        fig = go.Figure(data=traces)
+        fig.update_layout(
+            title='Commanded vs. Executed Gripper Trajectory (3D, navigable)',
+            scene=dict(xaxis_title='X [m]', yaxis_title='Y [m]', zaxis_title='Z [m]',
+                      aspectmode='data'),
+            legend=dict(x=0.01, y=0.99),
+        )
+        fig.write_html(html_path)
 
     def _build_fig_reference_governor(self):
         if not self.time_gov:

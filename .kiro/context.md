@@ -1,7 +1,17 @@
 # AI Agent Context — triago_control
 
 > **This file is maintained by the AI agent. Do not edit manually.**
-> Last updated: 2026-07-04 (§9.11 NEW: `offline_plotter.py` -- static,
+> Last updated: 2026-07-04 (§9.11 follow-up: `offline_plotter.py` gained a
+> 3D commanded-vs-executed gripper trajectory figure -- solid=commanded
+> reference / dashed=executed EE pose, red=Right / blue=Left, matching every
+> other per-arm color convention in this codebase. Saved as PDF+PNG always;
+> ALSO as a browser-navigable HTML (free rotate/zoom/pan) if the optional
+> `plotly` package is installed -- gracefully skipped otherwise, zero hard
+> dependency added. Also: `config/trajectory_endpoints.yaml`'s
+> `local_minima_behind` preset (Case 1, BEHIND THE ROBOT) was removed per
+> instruction -- Case 2 (THROUGH THE TABLE) is untouched; `active_preset`
+> reset to `"home"`.)
+> Earlier: 2026-07-04 (§9.11 NEW: `offline_plotter.py` -- static,
 > publication-quality figures for the QP-CLF-CBF pipeline, companion to the
 > LIVE `plotter.py`. Driven by a generic, source-agnostic Bool trigger topic
 > (`cfg.OFFLINE_RECORD_TRIGGER_TOPIC`) so it can be wired to
@@ -1348,7 +1358,8 @@ both are meaningless as a static artifact):
 | `fig2_qp_data` | 7 stacked rows: slacks (R/L), CBF shadow prices, joint-limit shadow prices, loop frequency, safety margin, min. distance |
 | `fig3_task_error_adaptation` | Cartesian position/velocity tracking error + whichever dynamic-weight rows are active per `cfg.DYNAMIC_*` flags |
 | `fig4_task_authority` | Normalized soft-task cost shares (damping/posture/slack) |
-| `fig5_reference_governor` | Only emitted if `cfg.ENABLE_REFERENCE_GOVERNOR` -- raw-minus-governed clamp-magnitude norms, 4 rows |
+| `fig5_3d_trajectory` | **(2026-07-04)** 3D commanded-vs-executed gripper path, both arms. Solid line = the Cartesian reference commanded on `/arm_*/cartesian_reference` (source-agnostic -- today `trajectory_generator.py`, but works identically for any future publisher on that same contract, e.g. teleoperation); dashed line = the REAL EE pose from `/qp_debug/ee_real`. Red=Right, Blue=Left (same convention as everywhere else). Circle marker = trial start, X marker = trial end (helps orient a static, non-rotatable PDF/PNG reader). Sampled at the exact same tick/anchor as the existing Cartesian tracking-error computation (`cb_real`), so it is free -- no new subscription was needed. Saved as PDF+PNG always (`_build_fig_3d_trajectory`, `mpl_toolkits.mplot3d`); ALSO saved as a fully browser-navigable HTML (`_save_3d_trajectory_html`, free rotate/zoom/pan, `plotly.graph_objects.Scatter3d`) **only if `plotly` is installed** -- checked once at import time (`_HAS_PLOTLY`), silently skipped with a log line otherwise. `plotly` is intentionally NOT added to `package.xml`/rosdep since it is optional and purely additive: `pip install plotly` in the same Python environment enables it, no code change needed. |
+| `fig6_reference_governor` | Only emitted if `cfg.ENABLE_REFERENCE_GOVERNOR` -- raw-minus-governed clamp-magnitude norms, 4 rows |
 
 **Output location**: `cfg.OFFLINE_PLOT_ROOT_DIR` (default
 `~/exchange/ros2-ws/triago_offline_plots/`), one timestamped subfolder per
