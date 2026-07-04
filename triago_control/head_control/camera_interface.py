@@ -268,6 +268,96 @@ class CameraInterface:
         with self._lock:
             return self._depth_frame_id
 
+    def get_intrinsics_debug(self):
+        """Expose the raw intrinsics/resolution state for calibration audits.
+
+        Returns a dict (or None if camera_info hasn't arrived yet):
+            {fx, fy, cx, cy, D, info_wh, depth_wh, color_wh}
+        `info_wh` is the resolution camera_info was calibrated at; `depth_wh`
+        is the actual depth image resolution. If these differ,
+        get_point_cloud() is silently RESCALING the intrinsics (see its
+        module docstring) — a mismatch here is worth knowing about even if
+        the rescale keeps things numerically consistent.
+        """
+        with self._lock:
+            if self._K is None:
+                return None
+            depth_wh = (self._depth.shape[1], self._depth.shape[0]) if self._depth is not None else None
+            color_wh = (self._color.shape[1], self._color.shape[0]) if self._color is not None else None
+            return {
+                "fx": self._K[0], "fy": self._K[1], "cx": self._K[2], "cy": self._K[3],
+                "D": self._D, "info_wh": self._info_wh,
+                "depth_wh": depth_wh, "color_wh": color_wh,
+            }
+
+    def get_scaled_intrinsics(self):
+        """Return (fx, fy, cx, cy) rescaled to the ACTUAL depth image
+        resolution — mirrors the exact rescale logic in get_point_cloud()
+        (see its body). Kept as ONE shared implementation so a diagnostic
+        tool never risks silently drifting from what get_point_cloud()
+        really does. Returns None if camera_info/depth haven't arrived yet.
+        """
+        with self._lock:
+            if self._K is None or self._depth is None:
+                return None
+            fx, fy, cx, cy = self._K
+            H, W = self._depth.shape
+            info_wh = self._info_wh
+        if info_wh is not None and info_wh != (0, 0):
+            iw, ih = info_wh
+            if iw and ih and (iw != W or ih != H):
+                sx = W / float(iw)
+                sy = H / float(ih)
+                fx *= sx; cx *= sx
+                fy *= sy; cy *= sy
+        return fx, fy, cx, cy
+
+    def sample_pixel_patch(self, u, v, radius=3):
+        """Robust single-pixel depth/colour sample for calibration audits.
+
+        Returns (depth_m, color_rgb, n_valid) using the MEDIAN valid depth
+        in a (2*radius+1)^2 window around integer pixel (u, v) — robust to
+        isolated invalid/NaN returns without smoothing across a large area.
+        Returns None if (u, v) is out of bounds or no valid depth exists in
+        the window. `color_rgb` is None if no colour frame is available.
+
+        WHY a window and not the exact pixel: at a single exact pixel there
+        is a real chance of hitting a "no return" (NaN) sample even when the
+        surface is perfectly valid nearby (isolated depth dropouts are
+        normal on any RGB-D sensor). Radius 3 (7x7 window, default) is small
+        enough to stay a genuinely LOCAL sample (no cross-object smearing at
+        the ~2cm cylinder scale) while being robust to a handful of dropouts.
+        """
+        with self._lock:
+            if self._depth is None:
+                return None
+            depth = self._depth
+            color = self._color
+        H, W = depth.shape
+        ui, vi = int(round(u)), int(round(v))
+        u0, u1 = max(0, ui - radius), min(W, ui + radius + 1)
+        v0, v1 = max(0, vi - radius), min(H, vi + radius + 1)
+        if u0 >= u1 or v0 >= v1:
+            return None
+        patch = depth[v0:v1, u0:u1]
+        valid = np.isfinite(patch) & (patch > cfg.DEPTH_MIN) & (patch < cfg.DEPTH_MAX)
+        n_valid = int(np.count_nonzero(valid))
+        if n_valid == 0:
+            return None
+        depth_m = float(np.median(patch[valid]))
+        color_rgb = None
+        if color is not None:
+            ch, cw = color.shape[:2]
+            if (ch, cw) == (H, W):
+                cpatch = color[v0:v1, u0:u1].reshape(-1, 3)[valid.reshape(-1)]
+            else:
+                cu = int(np.clip(ui * cw / W, 0, cw - 1))
+                cv = int(np.clip(vi * ch / H, 0, ch - 1))
+                cpatch = color[cv:cv + 1, cu:cu + 1].reshape(-1, 3)
+            if len(cpatch):
+                color_rgb = cpatch.astype(np.float64).mean(axis=0)
+        return depth_m, color_rgb, n_valid
+
     @staticmethod
     def _undistort_normalized(xd, yd, D, n_iters=5):
         """Invert the Brown-Conrady (plumb_bob) distortion model.

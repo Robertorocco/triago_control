@@ -28,6 +28,7 @@ install(PROGRAMS
   scripts/qp_arm_teleop/sa_coupling_debugger.py
   scripts/head_controller/main_head.py
   scripts/head_controller/head_plotter.py
+  scripts/head_controller/calibration_audit.py
   scripts/head_controller/qp_head_visual_servo.py
   DESTINATION lib/${PROJECT_NAME}
 )

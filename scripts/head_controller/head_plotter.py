@@ -34,14 +34,18 @@ from rclpy.node import Node
 from std_msgs.msg import Float64MultiArray
 from visualization_msgs.msg import MarkerArray
 
+import triago_control.head_control.config as cfg
+
 # =============================================================================
 # GROUND TRUTH (from SDF — ONLY used here for visual comparison)
+# Sourced from head_control/config.py §13 (single source of truth, shared
+# with calibration_audit.py — do not re-hardcode these numbers here).
 # =============================================================================
-GT_RED = {"label": "red_cylinder", "center": np.array([0.800, -0.20, 0.775]),
-           "radius": 0.02, "height": 0.15}
-GT_BLUE = {"label": "blue_cylinder", "center": np.array([0.800, 0.20, 0.775]),
-            "radius": 0.02, "height": 0.15}
-GT_TABLE_TOP_Z = 0.70
+GT_RED = {"label": "red_cylinder", "center": cfg.GT_RED_CENTER,
+           "radius": cfg.GT_RED_RADIUS, "height": cfg.GT_RED_HEIGHT}
+GT_BLUE = {"label": "blue_cylinder", "center": cfg.GT_BLUE_CENTER,
+            "radius": cfg.GT_BLUE_RADIUS, "height": cfg.GT_BLUE_HEIGHT}
+GT_TABLE_TOP_Z = cfg.TABLE_TOP_Z_WORLD
 
 
 class HeadPlotterNode(Node):

@@ -309,3 +309,21 @@ ALPHA_VELOCITY_FILTER = 0.15  # ~60ms window, same as arm controller
 CONTROL_RATE_HZ = 50.0       # head velocity command rate
 PERCEPTION_RATE_HZ = 5.0     # perception pipeline rate (objects move slowly)
 CONSOLE_SUMMARY_PERIOD_S = 5.0   # low-frequency console report (no spam!)
+
+# =============================================================================
+# 13. GROUND TRUTH (SIMULATION-ONLY — DIAGNOSTIC USE ONLY)
+# =============================================================================
+# Hard-coded from the Gazebo "tutorial" world SDF. The perception algorithm
+# itself NEVER reads this section — it exists purely so diagnostic/plotting
+# tools (head_plotter.py, calibration_audit.py) can compare estimates
+# against a known answer, without duplicating the same numbers in multiple
+# scripts (this project's single-source-of-truth convention). If the world
+# SDF changes, this is the ONE place to update.
+GT_RED_CENTER = np.array([0.800, -0.20, 0.775])    # [m] base_footprint
+GT_RED_RADIUS = 0.02                               # [m]
+GT_RED_HEIGHT = 0.15                               # [m]
+GT_BLUE_CENTER = np.array([0.800, 0.20, 0.775])    # [m] base_footprint
+GT_BLUE_RADIUS = 0.02                              # [m]
+GT_BLUE_HEIGHT = 0.15                              # [m]
+# GT_TABLE_TOP_Z intentionally NOT duplicated here — use TABLE_TOP_Z_WORLD
+# (§2 above), which is the same 0.70m derived from the same SDF pose.
