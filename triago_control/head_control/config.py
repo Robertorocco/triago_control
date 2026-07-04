@@ -270,7 +270,28 @@ CYL_RADIUS_INFLATION = 0.000 # [m]
 # (perceived_centre - true_centre) for a known object and put the NEGATIVE of it
 # here to compensate. Default zero = raw, honest perception (the ~3cm then
 # stands as genuine real-world sensing uncertainty).
-PERCEPTION_XYZ_OFFSET = np.array([0.0, 0.0, 0.0])   # [m] added to every object centre
+#
+# MEASURED 2026-07-04 via calibration_audit.py (isolates calibration bias from
+# the circle-fit algorithm's own bias -- see its module docstring). Evidence
+# for a RIGID, common-mode extrinsic/intrinsic bias (not a fitting artifact):
+#   1. FK-vs-TF converged to ~0.1-0.3mm / ~0.02-0.04deg -- the extrinsic chain
+#      is internally self-consistent (not a software/TF bug).
+#   2. Table-plane height converged to +/-1mm of the known 0.700m -- the Z/depth
+#      calibration is independently excellent, so this bias is specific to XY
+#      (see point 4).
+#   3. The RAW, un-fitted point centroid (no clustering/circle-fit at all) shows
+#      the SAME ~-25 to -30mm X bias as the pipeline's fitted output -- i.e. the
+#      bias exists BEFORE the algorithm ever touches the data.
+#   4. The X bias is nearly identical in sign+magnitude for BOTH cylinders
+#      (symmetric about the table centreline) -- the signature of a rigid
+#      shift, not a per-object fit quirk. Z self-cancels (~1.5mm) because
+#      cylinder height is computed RELATIVE to the detected table plane, so a
+#      common-mode depth bias cancels out there but leaks straight through on
+#      X/Y, which have no such reference.
+# Averaged (perceived - true) over both cylinders, steady-state (after the
+# scan settled, tracker EMA converged, ~10+ audit samples):
+#   dx=-25.5mm  dy=-9.3mm  dz=-1.5mm  ->  offset = -(perceived - true)
+PERCEPTION_XYZ_OFFSET = np.array([0.0255, 0.0093, 0.0015])   # [m] added to every object centre
 
 # =============================================================================
 # 11. COLOUR CLASSIFICATION  (red vs blue from the aligned RGB)
