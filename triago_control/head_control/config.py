@@ -111,6 +111,81 @@ JOINT_LIMIT_BUFFER = 0.15    # rad safety buffer from the hard limit
 LOOKAT_ALIGNED_DEG = 4.0
 
 # =============================================================================
+# 4b. ACTIVE PERCEPTION  (adaptive standoff / next-best-view distance control)
+# =============================================================================
+# WHY (paper framing): a FIXED posture target (HEAD_POSTURE_TARGET, §4) fixes
+# the camera-to-table distance at design time. That is fragile: too far and the
+# cylinder rim is resolved by too few pixels (radius under-estimated); too close
+# and the table clips out of the field of view (partial scene, lost context).
+# The right distance depends on the scene, which we do NOT want to hard-code.
+#
+# Instead we close a control loop around two ONLINE, SCENE-AGNOSTIC signals
+# derived purely from what the camera actually observes (never from any known
+# object pose / size — see the head-perception "no hard-coded ground truth"
+# rule):
+#
+#   (1) FRAMING / CONTAINMENT.  We reproject the observed table-region cloud
+#       back into the image and measure how much of it piles up in the OUTER
+#       BORDER band of the frame, per edge. High border occupancy on an edge =>
+#       the region of interest is running off that side of the image (clipping)
+#       => the camera must BACK AWAY (or re-aim). Low occupancy on ALL edges =>
+#       the whole ROI is comfortably contained => there is framing slack to
+#       spend on resolution. This needs no object model: it only asks "does
+#       what I see reach the edge of what I can see?".
+#
+#   (2) RESOLUTION SUFFICIENCY.  For each tracked object we compute its apparent
+#       radius in PIXELS (r_px = fx * r / range) and its rim-fit RMS — both
+#       already available. Small r_px / high RMS => the object is under-resolved
+#       => if (and only if) framing has slack, MOVE CLOSER to gain detail.
+#
+# The loop maintains a desired camera STANDOFF distance d* along the viewing ray
+# to the look-at target and adjusts it every perception tick with the priority
+#       FRAMING (contain the ROI)  >  RESOLUTION (resolve detail)
+# d* is then regulated by a dedicated soft "range" task inside the look-at QP
+# (see look_at_controller.py), sitting BELOW the pointing task and ABOVE the
+# posture spring in the QP's priority hierarchy. Net effect: the head always
+# keeps the table centred, and slides along the ray to the closest distance at
+# which the whole table still fits — exactly the behaviour we would otherwise
+# have to hand-tune per scene.
+ENABLE_ACTIVE_VIEW = True
+
+# --- Standoff (range) QP task -------------------------------------------
+STANDOFF_LAMBDA = 1.0        # proportional gain: range-rate = -lambda*(r - d*)
+STANDOFF_SLACK_WEIGHT = 80.0 # QP slack weight: < LOOKAT_SLACK_WEIGHT (500) so
+                             # pointing always wins; >> posture so distance is
+                             # actively regulated, not left to the posture spring.
+
+# --- Desired-standoff update law ----------------------------------------
+# Absolute clamps on d* [m]. Lower bound keeps a margin above the RealSense
+# rated min range (DEPTH_MIN=0.35) so we never drive the table inside the
+# invalid-depth zone; upper bound keeps the objects resolvable at all.
+VIEW_D_STAR_MIN = 0.45
+VIEW_D_STAR_MAX = 1.10
+VIEW_STEP_IN = 0.030         # [m] approach increment per perception tick
+VIEW_STEP_OUT = 0.050        # [m] retreat increment per tick (faster than
+                             # approach: protecting framing is the priority)
+VIEW_STANDOFF_LPF = 0.30     # LPF coeff on d* (0..1, higher = more responsive);
+                             # guarantees a smooth, C0 setpoint for the QP task.
+
+# --- Framing / containment signal ---------------------------------------
+VIEW_BORDER_MARGIN_FRAC = 0.06   # outer border band width = frac * min(W, H)
+VIEW_BORDER_HIGH = 0.040         # per-edge occupancy above this => that edge is
+                                 # clipping the ROI => RETREAT
+VIEW_BORDER_LOW = 0.015          # occupancy below this on ALL edges => ROI fully
+                                 # contained => framing slack available
+VIEW_MIN_PROJ_POINTS = 200       # need at least this many reprojected points to
+                                 # trust the framing signal (else HOLD)
+
+# --- Resolution-sufficiency signal --------------------------------------
+VIEW_RES_RADIUS_PX_TARGET = 28.0 # desired apparent object radius [px]; below
+                                 # this an object is "under-resolved" (move
+                                 # closer if framing allows). Scale-free w.r.t.
+                                 # the true camera fx (uses the LIVE intrinsics).
+VIEW_RES_FIT_RMS_OK = 0.0020     # [m] rim-fit RMS at/below which detail is
+                                 # already good enough (don't push closer on
+                                 # fit-quality grounds).
+
+# =============================================================================
 # 5. SCAN MOTION  (gentle sweep around the look-at target to improve coverage)
 # =============================================================================
 # RE-EVALUATED 2026-07-02 (accuracy pass): the scan was ORIGINALLY motivated by

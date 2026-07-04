@@ -39,6 +39,16 @@ class LookAtController:
         self.n = len(cfg.HEAD_JOINTS)
         self.last_angle_deg = 180.0  # most recent look-at error (for telemetry)
         self.last_slack_norm = 0.0   # QP slack magnitude (>0 means joint limits bite)
+        # Active-perception standoff regulation (set externally each perception
+        # tick by ActivePerceptionPlanner). None => range task disabled, the
+        # head's distance is left to the posture spring (legacy behaviour).
+        self.standoff_target = None      # desired camera-to-target distance [m]
+        self.last_range = 0.0            # most recent camera-to-target range [m]
+        self.last_range_slack = 0.0      # slack on the range task (telemetry)
+
+    def set_standoff(self, d_star):
+        """Set the desired camera-to-target standoff distance [m] (or None)."""
+        self.standoff_target = None if d_star is None else float(d_star)
 
     # ------------------------------------------------------------------ #
     # Scan target generation                                              #
@@ -85,6 +95,7 @@ class LookAtController:
         # Angular error (for telemetry / "aligned?" check).
         cos_a = np.clip(d[2], -1.0, 1.0)        # angle between current z and d
         self.last_angle_deg = float(np.degrees(np.arccos(cos_a)))
+        self.last_range = float(norm)           # camera-to-target range [m]
 
         # --- 2. Desired angular velocity (camera frame) ----------------
         z_axis = np.array([0.0, 0.0, 1.0])
@@ -92,11 +103,30 @@ class LookAtController:
         if d[2] < -0.95:                         # target behind -> escape
             omega_des[1] = cfg.LOOKAT_LAMBDA
 
+        # --- 2b. Optional standoff (range) task ------------------------
+        # Regulate the camera-to-target distance toward standoff_target, set by
+        # the active-perception planner. Range rate along the ray is
+        #     r_dot = -d_hat . v_lin          (v_lin = camera LOCAL linear vel)
+        # (the angular term d_hat.(w x p_cam) vanishes since d_hat || p_cam), so
+        # a proportional law r_dot = -lambda*(r - d*) becomes the scalar task
+        #     (d_hat^T J_lin) dq  =  lambda*(r - d*)
+        # added as ONE soft equality row with its own slack, weighted BELOW the
+        # pointing task and ABOVE the posture spring.
+        use_range = (
+            cfg.ENABLE_ACTIVE_VIEW
+            and self.standoff_target is not None
+            and d[2] > -0.95                     # not in the behind-target escape
+        )
+        n_slack = 4 if use_range else 3
+
         # --- 3. Build the QP -------------------------------------------
-        n_vars = self.n + 3
+        n_vars = self.n + n_slack
         H = np.zeros((n_vars, n_vars))
         H[:self.n, :self.n] = np.diag(cfg.HEAD_JOINT_WEIGHTS)
-        H[self.n:, self.n:] = np.eye(3) * cfg.LOOKAT_SLACK_WEIGHT
+        slack_w = np.full(n_slack, cfg.LOOKAT_SLACK_WEIGHT)
+        if use_range:
+            slack_w[3] = cfg.STANDOFF_SLACK_WEIGHT   # 4th slack = range task
+        H[self.n:, self.n:] = np.diag(slack_w)
         # Tiny regularisation so H stays strictly positive-definite for quadprog.
         H += np.eye(n_vars) * 1e-6
 
@@ -109,12 +139,19 @@ class LookAtController:
         dq_posture = -cfg.POSTURE_GAIN * (q - cfg.HEAD_POSTURE_TARGET)
         g[:self.n] = H[:self.n, :self.n] @ dq_posture   # scale by H so it isn't drowned
 
-        # Equality: look-at task  (J_rot dq - slack = omega_des)
+        # Equality: look-at task  (J_rot dq - slack = omega_des)  [+ range row]
         J_rot = J_cam[3:, :]                     # angular rows
-        A_eq = np.zeros((3, n_vars))
-        A_eq[:, :self.n] = J_rot
-        A_eq[:, self.n:] = -np.eye(3)
-        b_eq = omega_des
+        meq = n_slack
+        A_eq = np.zeros((meq, n_vars))
+        A_eq[:3, :self.n] = J_rot
+        A_eq[:3, self.n:self.n + 3] = -np.eye(3)
+        b_eq = np.zeros(meq)
+        b_eq[:3] = omega_des
+        if use_range:
+            J_lin = J_cam[:3, :]                  # linear rows (LOCAL frame)
+            A_eq[3, :self.n] = d @ J_lin          # d_hat^T J_lin  (1x7)
+            A_eq[3, self.n + 3] = -1.0            # range slack
+            b_eq[3] = cfg.STANDOFF_LAMBDA * (norm - self.standoff_target)
 
         # Inequalities: velocity-aware joint-limit CBF + velocity caps.
         C_rows, b_vals = [], []
@@ -145,14 +182,18 @@ class LookAtController:
 
         # --- 4. Solve --------------------------------------------------
         try:
-            sol = quadprog.solve_qp(H, g, C, b, meq=3)[0]
+            sol = quadprog.solve_qp(H, g, C, b, meq=meq)[0]
             dq = sol[:self.n]
             slack = sol[self.n:]
-            self.last_slack_norm = float(np.linalg.norm(slack))
+            # Report the POINTING slack norm (first 3) as before, so the
+            # "aligned?" telemetry is unchanged; track the range slack separately.
+            self.last_slack_norm = float(np.linalg.norm(slack[:3]))
+            self.last_range_slack = float(slack[3]) if use_range else 0.0
         except ValueError:
             # Infeasible (rare, e.g. at hard limits) -> command zero, stay safe.
             dq = np.zeros(self.n)
             self.last_slack_norm = -1.0
+            self.last_range_slack = 0.0
         return dq
 
     def is_aligned(self) -> bool:

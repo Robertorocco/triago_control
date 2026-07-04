@@ -55,6 +55,7 @@ from triago_control.head_control.camera_interface import CameraInterface
 from triago_control.head_control.head_kinematics import HeadKinematics
 from triago_control.head_control.look_at_controller import LookAtController
 from triago_control.head_control.perception_pipeline import PerceptionPipeline
+from triago_control.head_control.view_planner import ActivePerceptionPlanner
 from triago_control.head_control.visualization import (
     PerceptionVisualizer,
     make_pointcloud2,
@@ -70,6 +71,7 @@ class HeadPerceptionNode(Node):
         self.camera = CameraInterface(self)        # declares topic params + subs
         self.controller = LookAtController(self.kin)
         self.pipeline = PerceptionPipeline()
+        self.planner = ActivePerceptionPlanner()   # active-perception standoff
         self.viz = PerceptionVisualizer(frame_id=cfg.BASE_FRAME)
 
         # --- Publishers ------------------------------------------------
@@ -83,6 +85,13 @@ class HeadPerceptionNode(Node):
         # slack, proc_ms]. Lets the plotter show cloud size / quality directly.
         self.pub_telemetry = self.create_publisher(
             Float64MultiArray, "/head_perception/telemetry", 10
+        )
+        # Active-perception standoff telemetry for plotting/inspection:
+        # [range, d_star, d_star_raw, max_edge_occ, occL, occR, occT, occB,
+        #  fill, mean_r_px, worst_rms, action_code]. action_code:
+        # 0=HOLD 1=APPROACH 2=RETREAT 3=INIT.
+        self.pub_view = self.create_publisher(
+            Float64MultiArray, "/head_perception/view_debug", 10
         )
 
         # --- TF2 (correct camera pose at the depth frame's timestamp) --
@@ -219,6 +228,22 @@ class HeadPerceptionNode(Node):
         )
         self.latest_result = result
 
+        # --- Active perception: adapt the camera standoff distance -----
+        # Decide (from the observed cloud framing + object resolution, NO scene
+        # ground truth) whether to move closer / farther, and hand the desired
+        # standoff to the look-at QP as a soft range task.
+        if cfg.ENABLE_ACTIVE_VIEW:
+            intr = self.camera.get_scaled_intrinsics()
+            dbg = self.camera.get_intrinsics_debug()
+            wh = dbg.get("depth_wh") if dbg else None
+            if intr is not None and wh is not None:
+                d_star = self.planner.update(
+                    result, R_cam_base, t_cam_base,
+                    self.current_target, intr, wh
+                )
+                self.controller.set_standoff(d_star)
+                self._publish_view_debug()
+
         # --- Publish PointCloud2 (cropped coloured cloud) --------------
         if result.cropped_points is not None and len(result.cropped_points) > 0:
             pc = make_pointcloud2(
@@ -244,6 +269,28 @@ class HeadPerceptionNode(Node):
             float(result.map_size),
         ]
         self.pub_telemetry.publish(tel)
+
+    def _publish_view_debug(self):
+        """Publish the active-perception standoff telemetry array."""
+        m = self.planner.metrics
+        if not m:
+            return
+        occ = m.get("edge_occ", {})
+        action_code = {"HOLD": 0.0, "APPROACH": 1.0, "RETREAT": 2.0, "INIT": 3.0}
+        msg = Float64MultiArray()
+        msg.data = [
+            float(m.get("range", 0.0)),
+            float(m.get("d_star", 0.0)),
+            float(m.get("d_star_raw", 0.0)),
+            float(m.get("max_edge", 0.0)),
+            float(occ.get("L", 0.0)), float(occ.get("R", 0.0)),
+            float(occ.get("T", 0.0)), float(occ.get("B", 0.0)),
+            float(m.get("fill", 0.0)),
+            float(m.get("mean_r_px", 0.0)),
+            float(m.get("worst_rms", 0.0)),
+            float(action_code.get(m.get("action", "HOLD"), 0.0)),
+        ]
+        self.pub_view.publish(msg)
 
     def _lookup_transform(self, frame_id, stamp):
         """Return (R 3x3, t 3) for base_footprint <- frame_id at `stamp`.
@@ -334,7 +381,79 @@ class HeadPerceptionNode(Node):
             f"map={r.map_size} | {plane_txt} | proc={r.proc_ms:.1f} ms | "
             f"head_vel={self._last_vel_norm:.3f} {'FUSING' if self._last_integrated else 'moving'}\n"
             f"       [OBJECTS] {obj_txt}\n"
-            f"       [JOINTS] {joint_info}" + diag)
+            f"       [JOINTS] {joint_info}" + diag
+            + self._active_view_panel())
+
+    # ------------------------------------------------------------------ #
+    # Active-perception debug window (shareable console panel)             #
+    # ------------------------------------------------------------------ #
+    def _active_view_panel(self) -> str:
+        """Render the active-perception state as a boxed console 'window'.
+
+        This is the panel to screenshot and share: it shows, at a glance,
+        WHETHER the head decided to move closer/farther and WHY — the framing
+        (per-edge border occupancy + contained verdict) and the object
+        resolution (apparent radius in px, rim-fit RMS) that drive the
+        decision.
+        """
+        if not cfg.ENABLE_ACTIVE_VIEW:
+            return ""
+        m = self.planner.metrics
+        if not m:
+            return ("\n       +-- ACTIVE PERCEPTION -----------------------------------------+"
+                    "\n       |  waiting for first perception frame...                       |"
+                    "\n       +--------------------------------------------------------------+")
+
+        action = m.get("action", "HOLD")
+        arrow = {"APPROACH": "vv CLOSER", "RETREAT": "^^ FARTHER",
+                 "HOLD": "== HOLD", "INIT": ".. INIT"}.get(action, action)
+        rng = m.get("range", 0.0)
+        d_star = m.get("d_star", 0.0)
+        d_raw = m.get("d_star_raw", 0.0)
+        err = rng - d_star
+        occ = m.get("edge_occ", {"L": 0, "R": 0, "T": 0, "B": 0})
+        hi = cfg.VIEW_BORDER_HIGH
+        lo = cfg.VIEW_BORDER_LOW
+
+        def emark(val):
+            if val > hi:
+                return "CLIP"
+            if val < lo:
+                return " ok "
+            return " .. "
+
+        contain = ("CONTAINED" if m.get("contained") else
+                   ("CLIPPING" if m.get("clipping") else "partial"))
+        W, H = m.get("img_wh", (0, 0))
+
+        lines = []
+        lines.append("       +== ACTIVE PERCEPTION (next-best-view standoff) ===============+")
+        lines.append(f"       | decision : {arrow:<10s}                                       |")
+        lines.append(f"       | reason   : {m.get('reason', '')[:49]:<49s} |")
+        lines.append( "       |--------------------------------------------------------------|")
+        lines.append(f"       | range r  = {rng:5.3f} m   d* = {d_star:5.3f} m (raw {d_raw:5.3f})   "
+                     f"err {err:+5.3f} |")
+        lines.append(f"       | clamp    [{cfg.VIEW_D_STAR_MIN:.2f},{cfg.VIEW_D_STAR_MAX:.2f}] m"
+                     f"   range-slack {self.controller.last_range_slack:+.3f}          |")
+        lines.append( "       |-- FRAMING (border occupancy, %; CLIP>{:.0f} ok<{:.0f}) ----------|"
+                     .format(hi * 100, lo * 100))
+        lines.append(f"       |   L {occ['L']*100:4.1f}%{emark(occ['L'])}  R {occ['R']*100:4.1f}%{emark(occ['R'])}"
+                     f"  T {occ['T']*100:4.1f}%{emark(occ['T'])}  B {occ['B']*100:4.1f}%{emark(occ['B'])}   |")
+        lines.append(f"       |   verdict: {contain:<10s}  fill {m.get('fill',0)*100:4.1f}%  "
+                     f"img {W}x{H}  n_proj {m.get('n_proj',0):>6d} |")
+        lines.append( "       |-- RESOLUTION (per object) -----------------------------------|")
+        objs = m.get("objects", [])
+        if not objs:
+            lines.append("       |   (no objects tracked yet)                                   |")
+        else:
+            tgt = cfg.VIEW_RES_RADIUS_PX_TARGET
+            for o in objs:
+                flag = "LOW " if o["r_px"] < tgt else "good"
+                lines.append(
+                    f"       |   {o['label'][:14]:<14s} r_px {o['r_px']:5.1f}({flag} tgt {tgt:.0f})  "
+                    f"rms {o['fit_rms']*1e3:4.1f}mm  cov {o['coverage']*100:3.0f}% |")
+        lines.append( "       +==============================================================+")
+        return "\n" + "\n".join(lines)
 
 
 def main():
