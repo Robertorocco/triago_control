@@ -942,11 +942,14 @@ class OfflinePlotter(Node):
         """Commanded ("raw") vs. governed reference, 4 rows x 1 col, with a
         DASHED horizontal line on every row marking the governor's configured
         limit on that quantity (cfg.GOV_V_MAX_LIN/ANG, GOV_E_MAX_POS/ORI). Per
-        arm: solid = commanded reference (what trajectory_generator/teleop
-        asked for), dashed-marker style line = governed reference (what the
-        CLF actually saw) -- Red = Right, Blue = Left, matching every other
-        per-arm convention in this dashboard. The dashed GREY limit line is
-        the governor's configured ceiling for that row: whenever a "raw"
+        arm: DASHED = commanded reference (what trajectory_generator/teleop
+        asked for), SOLID = governed reference (what the CLF actually saw)
+        -- Red = Right, Blue = Left, matching every other per-arm convention
+        in this dashboard. Commanded is dashed (rather than solid+alpha) so
+        that when the Right and Left curves overlap they don't alpha-blend
+        into an ambiguous purple smear -- the dash gaps keep pure red/blue
+        visible even in overlap regions. The dashed GREY limit line is the
+        governor's configured ceiling for that row: whenever a "commanded"
         curve pokes above it while the "governed" curve stays clipped at (or
         below) it, that is the governor visibly doing its job.
         """
@@ -973,12 +976,15 @@ class OfflinePlotter(Node):
         ]
 
         for ax, title, ylabel, raw_r, gov_r, raw_l, gov_l, limit in rows:
-            ax.plot(t, raw_r, color='r', linestyle='-', linewidth=1.3,
-                   alpha=0.55, label='Right -- commanded')
+            # Commanded ("raw") -- DASHED, so Right/Left overlap stays
+            # distinguishable instead of alpha-blending into purple.
+            ax.plot(t, raw_r, color='r', linestyle='--', linewidth=1.1,
+                   alpha=0.8, label='Right -- commanded')
+            ax.plot(t, raw_l, color='b', linestyle='--', linewidth=1.1,
+                   alpha=0.8, label='Left -- commanded')
+            # Governed (what the CLF actually saw) -- SOLID, drawn on top.
             ax.plot(t, gov_r, color='r', linestyle='-', linewidth=1.7,
                    label='Right -- governed')
-            ax.plot(t, raw_l, color='b', linestyle='-', linewidth=1.3,
-                   alpha=0.55, label='Left -- commanded')
             ax.plot(t, gov_l, color='b', linestyle='-', linewidth=1.7,
                    label='Left -- governed')
             # The governor's configured ceiling for THIS quantity -- unlabeled

@@ -1,7 +1,15 @@
 # AI Agent Context — triago_control
 
 > **This file is maintained by the AI agent. Do not edit manually.**
-> Last updated: 2026-07-04 (§9.11 follow-up #2: `offline_plotter.py`'s
+> Last updated: 2026-07-04 (§9.11 follow-up #3: `fig6_reference_governor`
+> styling fix -- the "commanded" (raw) curve is now DASHED instead of
+> solid+alpha for both arms, while "governed" stays SOLID. Rationale: with
+> both curves solid+alpha, overlapping Right/Left commanded lines
+> alpha-blended into an ambiguous purple smear; dash gaps keep pure
+> red/blue visible even where the two arms' commanded curves coincide.
+> Governed curves are unchanged (solid, drawn on top) since they're the
+> primary signal of interest. `offline_plotter.py` only.)
+> Earlier: 2026-07-04 (§9.11 follow-up #2: `offline_plotter.py`'s
 > `fig6_reference_governor` was rebuilt from a raw-minus-governed DIFFERENCE
 > plot into a raw-VS-governed ABSOLUTE plot -- 4 rows (linear velocity,
 > angular velocity, position tracking error, orientation tracking error),
