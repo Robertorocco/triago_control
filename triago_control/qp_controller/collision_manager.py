@@ -230,6 +230,22 @@ class CollisionManager:
         self._geom_id_by_obstacle_name = {}   # {obstacle name -> hppfcl geometry id}
         if world_scene is not None:
             for obs in world_scene.static_obstacles:
+                # BUGFIX (2026-07-04): `collision: false` must mean "this
+                # geometry does not exist in cmodel at all" -- exactly mirroring
+                # the OLD `if cfg.WALL_COLLIDER:` gate, which only ever created
+                # the wall's hppfcl geometry when enabled. The first version of
+                # this loop created the geometry UNCONDITIONALLY and only used
+                # `collision` to skip the pair/id bookkeeping below -- which left
+                # a real (but un-colored, since color_collision_model only paints
+                # workspace_obstacle_ids/wall_id) geometry sitting in cmodel, and
+                # since cmodel IS what Meshcat renders (displayCollisions(True)),
+                # a disabled wall still showed up there -- as a solid BLACK slab
+                # (an hppfcl GeometryObject's default meshColor when nothing ever
+                # sets one). Skipping geometry creation entirely for a disabled
+                # obstacle restores the original "doesn't exist" semantics.
+                if not obs.collision:
+                    continue
+
                 pose = pin.SE3(np.eye(3), np.array(obs.position, dtype=float))
                 if obs.shape == 'box':
                     shape = hppfcl.Box(*obs.size)
@@ -243,10 +259,6 @@ class CollisionManager:
                 geom_id = self.cmodel.addGeometryObject(
                     pin.GeometryObject(obs.name, 0, pose, shape))
                 self._geom_id_by_obstacle_name[obs.name] = geom_id
-
-                if not obs.collision:
-                    continue  # geometry exists (for viz) but never checked -- mirrors
-                              # the old WALL_COLLIDER=False behavior, generalized.
 
                 if obs.role == 'wall':
                     self.wall_id = geom_id

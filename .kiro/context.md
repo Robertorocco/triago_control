@@ -1499,6 +1499,21 @@ not yet updated keeps working unchanged):
   discussion but NOT implemented -- deferred to a future request once
   camera-driven obstacles are actually needed.
 
+**Bugfix (same day, reported by operator via Meshcat -- a solid black wall
+was visible even though the default world's `virtual_wall` has
+`collision: false`)**: the world_scene branch of `build_collision_model`
+originally created EVERY obstacle's hppfcl geometry unconditionally, and
+only used `obs.collision` to skip the pair/id bookkeeping AFTER creation --
+unlike the old `if cfg.WALL_COLLIDER:` gate, which never created the wall's
+geometry at all when disabled. Since `cmodel` is exactly what Meshcat
+renders (`displayCollisions(True)`), a "disabled" wall still existed in the
+scene -- and rendered BLACK because `color_collision_model` only colors
+`workspace_obstacle_ids`/`wall_id`, neither of which a skipped-bookkeeping
+wall was ever added to, so it kept hppfcl's uncolored default. Fixed by
+moving the `if not obs.collision: continue` check to BEFORE geometry
+creation, restoring "collision: false means this geometry does not exist"
+semantics exactly like the original flag.
+
 **Legacy/deprecated constants**: `config.py` §1 (`WALL_COLLIDER`,
 `PINHOLE_TASK` -- the latter marked `[DEAD FLAG]`) and §6
 (`TABLE_POS`/`TABLE_SIZE`/`RED_CYLINDER_POS`/`BLUE_CYLINDER_POS`/
