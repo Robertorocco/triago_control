@@ -50,8 +50,10 @@ import yaml
 
 import rclpy
 from rclpy.node import Node
-from std_msgs.msg import Float64MultiArray, Float64, String
+from std_msgs.msg import Float64MultiArray, Float64, String, Bool
 from visualization_msgs.msg import Marker
+
+import triago_control.qp_controller.config as cfg
 
 try:
     from ament_index_python.packages import get_package_share_directory
@@ -237,6 +239,18 @@ class TrajectoryGenerator(Node):
             Float64MultiArray, '/trajectory/reference_state', 10)
         self.pub_time_scale = self.create_publisher(
             Float64, '/trajectory/time_scale', 10)
+        # Generic offline-recording trigger (cfg.OFFLINE_RECORD_TRIGGER_TOPIC,
+        # std_msgs/Bool -- see config.py section 7 and offline_plotter.py).
+        # True the instant WAITING->TRACKING (motion actually starts, this is
+        # "t=0" for the paper plot); False the instant TRACKING->REGULATION
+        # (quintic motion has concluded -- offline_plotter.py itself decides
+        # how much of REGULATION to keep recording afterward, via
+        # cfg.OFFLINE_PLOT_POST_TRIGGER_S). This node knows nothing about who
+        # consumes the flag -- any future trigger source (e.g. a teleoperation
+        # "handle grasped, clutch released" signal) can drive the SAME topic
+        # without touching offline_plotter.py at all.
+        self.pub_record_trigger = self.create_publisher(
+            Bool, cfg.OFFLINE_RECORD_TRIGGER_TOPIC, 10)
 
         # --- State --------------------------------------------------------
         self.t0 = time.time()
@@ -593,10 +607,21 @@ class TrajectoryGenerator(Node):
 
     def update_phase(self, phase_char, text, r, g, b):
         if self.current_phase != phase_char:
+            previous_phase = self.current_phase
             self.current_phase = phase_char
             self.pub_phase.publish(String(data=phase_char))
             self.publish_rviz_marker(text, r, g, b)
             print(f"[PHASE] Switched to {text}", flush=True)
+
+            # Offline-recording trigger (see cfg.OFFLINE_RECORD_TRIGGER_TOPIC):
+            # rising edge on entering TRACKING ('T' -- the quintic motion is
+            # actually running, this defines t=0 for the recorded trial);
+            # falling edge on LEAVING TRACKING for any other phase (normally
+            # 'R', REGULATION -- the commanded motion has concluded).
+            if phase_char == 'T':
+                self.pub_record_trigger.publish(Bool(data=True))
+            elif previous_phase == 'T':
+                self.pub_record_trigger.publish(Bool(data=False))
 
     def publish_rviz_marker(self, text, r, g, b):
         marker = Marker()

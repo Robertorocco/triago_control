@@ -448,3 +448,34 @@ TABLE_SIZE = [0.6, 0.5, 0.7]
 
 WALL_SIZE = [1.0, 0.02, 1.0]          # Virtual wall [length_x, thickness_y, height_z]
 WALL_POS = [0.5, 0.0, 0.5]            # Virtual wall position relative to base_link
+
+# =============================================================================
+# 7. OFFLINE PLOTTER (static, publication-quality figures, 2026-07-04)
+# =============================================================================
+# See scripts/qp_arm_teleop/offline_plotter.py for the full design. Two
+# concerns live here so every current/future publisher of the recording
+# trigger agrees on the exact same values without importing each other.
+
+# Generic recording-trigger contract (std_msgs/Bool): True = "the active
+# motion source is now commanding real motion, start/continue recording";
+# False = "the commanded motion has concluded". offline_plotter.py owns ALL
+# post-trigger behaviour (see OFFLINE_PLOT_POST_TRIGGER_S below) -- the
+# publisher only ever reports the raw on/off signal and knows nothing about
+# how it is used downstream. trajectory_generator.py drives this today (True
+# on WAITING->TRACKING, False on TRACKING->REGULATION); a future
+# teleoperation-side trigger (e.g. "handle grasped, clutch released") can
+# drive the exact same topic later without any change to offline_plotter.py.
+OFFLINE_RECORD_TRIGGER_TOPIC = "/offline_plotter/record_trigger"
+
+# Root directory under which each recorded trial gets its own timestamped
+# subfolder (see offline_plotter.py's _finalize_and_save). Change if
+# ~/exchange isn't the mount point on a given machine.
+OFFLINE_PLOT_ROOT_DIR = "~/exchange/ros2-ws/triago_offline_plots"
+
+# How long (seconds) offline_plotter.py keeps recording AFTER the trigger
+# above goes False, before finalizing and saving the figures. This is what
+# captures the REGULATION/settling phase on the SAME time axis as the
+# tracking motion; a vertical dashed grey line is drawn at the exact instant
+# the trigger went False on every time-series subplot (unlabeled -- no
+# legend entry needed, per instruction).
+OFFLINE_PLOT_POST_TRIGGER_S = 10.0

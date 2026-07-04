@@ -1,7 +1,13 @@
 # AI Agent Context — triago_control
 
 > **This file is maintained by the AI agent. Do not edit manually.**
-> Last updated: 2026-07-03 (§11.9 NEW: orientation symmetry fix for the
+> Last updated: 2026-07-04 (§9.11 NEW: `offline_plotter.py` -- static,
+> publication-quality figures for the QP-CLF-CBF pipeline, companion to the
+> LIVE `plotter.py`. Driven by a generic, source-agnostic Bool trigger topic
+> (`cfg.OFFLINE_RECORD_TRIGGER_TOPIC`) so it can be wired to
+> `trajectory_generator.py` today and to a future teleoperation-side trigger
+> later with zero code changes. See §9.11.)
+> Earlier: 2026-07-03 (§11.9 NEW: orientation symmetry fix for the
 > authority gates. Operator report: orientation stayed "almost frozen" in
 > BLENDING mode even while position clearly responded to user steering, and
 > the plotted `ALPHA_MAX` line looked "deprecated" since alpha visibly
@@ -1277,6 +1283,88 @@ rad, `APPROACH_POS_TOL` 0.01→0.009 m (all in `grasp_state_machine.py`, `_grasp
 
 ---
 
+### 9.11 `offline_plotter.py` -- static publication-quality figures (2026-07-04)
+
+New node, `scripts/qp_arm_teleop/offline_plotter.py`, companion to the LIVE
+`plotter.py`. Where `plotter.py` is a scrolling 50 s-window dashboard meant
+to be watched while the robot moves, `offline_plotter.py` records exactly
+ONE trial from a clean t=0 and, once the trial ends, saves the SAME
+telemetry as a fixed set of formal, print-quality figures (PDF + PNG,
+300 dpi, serif font, formal titles/subtitles) suitable for a paper. It never
+opens a live window (`matplotlib.use('Agg')`) -- it only ever writes files.
+
+**Recording trigger -- deliberately generic/source-agnostic.** The node is
+driven entirely by one boolean topic, `cfg.OFFLINE_RECORD_TRIGGER_TOPIC`
+(default `/offline_plotter/record_trigger`, `std_msgs/Bool`): `True` starts
+(or continues) recording -- on the rising edge, t=0 is anchored to that
+EXACT instant (never node startup), guaranteeing the saved time axis always
+starts at 0; `False` means "the commanded motion has concluded" and begins a
+`cfg.OFFLINE_PLOT_POST_TRIGGER_S=10.0s` post-roll window (captures the
+REGULATION/settling phase on the SAME time axis) before finalizing. A plain,
+UNLABELED vertical dashed grey line (`_draw_trigger_line`, no legend entry,
+per instruction) is drawn on every time-series subplot at the exact instant
+of the falling edge. If the trigger goes `True` again during the post-roll
+window (motion resumed), the SAME trial is extended rather than truncated.
+
+`offline_plotter.py` has ZERO knowledge of what produces this signal.
+Today, `trajectory_generator.py` drives it (`update_phase`: `True` on
+WAITING->TRACKING -- the quintic motion actually starts; `False` on
+TRACKING->REGULATION -- the motion has concluded). Per instruction, this
+generic contract is what makes it trivial to later wire a teleoperation-side
+trigger onto the SAME topic (e.g. "the operator is holding the handle and
+the clutch is released") without touching this file at all -- only the
+publisher-side node changes.
+
+**Ctrl-C**: whatever was recorded so far (even mid-trial, even before the
+post-roll window elapses) is finalized and saved before the process exits
+(`main`'s `except KeyboardInterrupt` calls `_finalize_and_save`).
+
+**Data sources**: reuses the EXACT topics `plotter.py` already subscribes
+to (`/joint_states`, `/qp_debug/qdot_cmd`, `/qp_debug/slacks`,
+`/qp_debug/lambda_cbf`, `/qp_debug/lambda_joints`, `/qp_debug/loop_freq`,
+`/qp_debug/safety_margin`, `/qp_debug/min_distance`,
+`/qp_debug/dynamic_weights`, `/qp_debug/d_safe_dynamic`,
+`/qp_debug/task_authority`, `/qp_debug/governor`, `/arm_*/cartesian_
+reference`, `/qp_debug/ee_real`), PLUS one NEW topic:
+`/qp_debug/qdot_measured` (`main_qp_controller.py`, 14 floats R7+L7) --
+publishes `kin.current_v` at the arm indices, i.e. the SAME
+environment-resolved velocity signal the QP itself already consumes
+internally (EMA-filtered differentiated velocity in Gazebo, direct sensor
+reading on real hardware -- see `robot_kinematics.update_from_joint_state`'s
+existing branch). This ALSO fixes a live-dashboard inaccuracy: `plotter.py`'s
+"Velocity from driver" row plots the RAW, known-broken-in-sim `/joint_states`
+velocity (see §8.1) -- the new topic is the trustworthy one, used only by
+`offline_plotter.py` for now (per instruction, `plotter.py` itself was left
+unchanged in this pass). Named generically ("measured", not "filtered")
+since it means something different in sim vs. real hardware, by design.
+
+**Figures produced** (mirrors `plotter.py`'s content; the live-only CBF
+active-pairs debug view and the joint-position slider GUI are dropped --
+both are meaningless as a static artifact):
+
+| File | Content |
+|------|---------|
+| `fig1_joint_kinematics` | 3x2 grid: Position / Velocity (`qdot_measured`) / QP solution (`qdot_cmd`) -- **col 0 = Left arm, col 1 = Right arm** (the one deliberate layout change vs. `plotter.py`'s L/R row pairing), 7-color `jet` legend (J1-J7) shared across the figure, same convention as `plotter.py` |
+| `fig2_qp_data` | 7 stacked rows: slacks (R/L), CBF shadow prices, joint-limit shadow prices, loop frequency, safety margin, min. distance |
+| `fig3_task_error_adaptation` | Cartesian position/velocity tracking error + whichever dynamic-weight rows are active per `cfg.DYNAMIC_*` flags |
+| `fig4_task_authority` | Normalized soft-task cost shares (damping/posture/slack) |
+| `fig5_reference_governor` | Only emitted if `cfg.ENABLE_REFERENCE_GOVERNOR` -- raw-minus-governed clamp-magnitude norms, 4 rows |
+
+**Output location**: `cfg.OFFLINE_PLOT_ROOT_DIR` (default
+`~/exchange/ros2-ws/triago_offline_plots/`), one timestamped subfolder per
+trial (`trial_YYYYMMDD_HHMMSS/`), each containing both a `.pdf` (vector, for
+LaTeX) and a `.png` (quick preview) per figure.
+
+**New config (`config.py` §7)**: `OFFLINE_RECORD_TRIGGER_TOPIC`,
+`OFFLINE_PLOT_ROOT_DIR`, `OFFLINE_PLOT_POST_TRIGGER_S` -- single source of
+truth shared by `trajectory_generator.py` (publisher) and
+`offline_plotter.py` (subscriber) so neither hard-codes the topic name.
+
+**Registered as a `ros2 run` entry point** in `CMakeLists.txt`, alongside
+`plotter.py`: `ros2 run triago_control offline_plotter.py`.
+
+---
+
 ## 10. Adaptive Scheduling (shadow-price feedback)
 
 - **Decoupled slack weighting**: each arm's slack weight drops (toward `BASE_WEIGHT_SLACK=5`) when its shadow price grows, letting the slack absorb more tracking error near obstacles. In free space it rises (toward `MAX_WEIGHT_SLACK=50`) for tighter tracking.
@@ -1953,6 +2041,11 @@ ros2 run triago_control trajectory_generator.py --ros-args -p config_file:=/abs/
 
 # Run plotter dashboard
 ros2 run triago_control plotter.py
+
+# Run the offline (static, publication-quality) plotter -- see §9.11.
+# Leave this running; it records a trial whenever the active trigger source
+# (e.g. trajectory_generator.py) toggles /offline_plotter/record_trigger.
+ros2 run triago_control offline_plotter.py
 ```
 
 ---

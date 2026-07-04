@@ -19,6 +19,7 @@ install(PROGRAMS
   scripts/workspace_mapper.py
   scripts/qp_arm_teleop/base_controller.py
   scripts/qp_arm_teleop/plotter.py
+  scripts/qp_arm_teleop/offline_plotter.py
   scripts/qp_arm_teleop/drift_evaluator_node.py
   scripts/qp_arm_teleop/keyboard_teleop.py
   scripts/qp_arm_teleop/main_shared_autonomy.py

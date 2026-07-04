@@ -159,6 +159,15 @@ class SafetyQPController(Node):
         self.pub_dynamic_weights = self.create_publisher(Float64MultiArray, '/qp_debug/dynamic_weights', 10)
         self.pub_d_safe_dynamic = self.create_publisher(Float64MultiArray, '/qp_debug/d_safe_dynamic', 10)
         self.pub_qdot_cmd = self.create_publisher(Float64MultiArray, '/qp_debug/qdot_cmd', 10)
+        # Generic measured joint velocity (2026-07-04, for offline_plotter.py):
+        # kin.current_v is ALREADY the environment-correct signal -- EMA-filtered
+        # differentiated velocity in Gazebo (self.REAL_HARDWARE=False) or the
+        # direct sensor reading on real hardware (self.REAL_HARDWARE=True); see
+        # robot_kinematics.update_from_joint_state. No new logic is needed here,
+        # only a publisher: this was previously computed every tick but never
+        # put on a topic. Named generically ("measured", not "filtered") since
+        # the SAME topic means different things in sim vs. real hardware.
+        self.pub_qdot_measured = self.create_publisher(Float64MultiArray, '/qp_debug/qdot_measured', 10)
         self.pub_task_authority = self.create_publisher(Float64MultiArray, '/qp_debug/task_authority', 10)
         self.pub_shared_col = self.create_publisher(Float64MultiArray, '/collision_constraints', 10)
         # Per-arm frozen/active ground truth for the RViz visualizer (2026-07-01):
@@ -681,6 +690,13 @@ class SafetyQPController(Node):
                                     J_soft_r, h_soft_r, J_soft_l, h_soft_l,
                                     d_safe_dynamic_r, d_safe_dynamic_l, abs_min_distance,
                                     qdot_err_14, xdot_err_6)
+            # Generic measured joint velocity (14 floats: R7+L7), same
+            # environment-dependent signal the QP itself consumes -- see the
+            # publisher's own comment above.
+            if self.kin.idx_right and self.kin.idx_left and self.kin.current_v is not None:
+                meas_v_14 = np.concatenate(
+                    (self.kin.current_v[self.kin.idx_right], self.kin.current_v[self.kin.idx_left]))
+                self.pub_qdot_measured.publish(Float64MultiArray(data=meas_v_14.tolist()))
 
         # --- 5. Command publishing ---
         # Option B: ALWAYS send the QP-computed velocity to TSID for BOTH arms.
