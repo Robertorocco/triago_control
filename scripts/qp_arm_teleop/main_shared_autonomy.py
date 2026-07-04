@@ -180,7 +180,7 @@ class SharedControlNode(Node):
         # original hard-coded table) if the world scene is missing either role,
         # so behavior is unchanged for a world YAML that doesn't define them.
         cylinders = self._cylinders_from_world_scene(self.world_scene)
-        self.goal_set = GoalSet(cylinders=cylinders)
+        self.goal_set = GoalSet(cylinders=cylinders, platform=self.world_scene.platform)
         self.target_keys = self.goal_set.target_keys
         self.active_goal_key = 'Red_Side'
 

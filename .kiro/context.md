@@ -1,8 +1,13 @@
 # AI Agent Context — triago_control
 
 > **This file is maintained by the AI agent. Do not edit manually.**
-> Last updated: 2026-07-04 (§9.12 NEW: world-scene YAML loading, replacing
-> hard-coded obstacle constants -- see §9.12 below for the full design.)
+> Last updated: 2026-07-04 (§9.12 follow-up: added the `platform` field to
+> the world scene schema -- the yellow `placement_area` disk used by
+> shared-autonomy's Platform_Place goal. NOT an obstacle (no collision, not
+> in `static_obstacles`) -- a separate top-level `WorldScene.platform`
+> field, since the user pointed out this is purely a visualization/
+> reference-pose aid for the operator, not something the CBF should ever
+> see. See §9.12 below for the full design.)
 > Earlier: 2026-07-04 (§9.11 follow-up #3: `fig6_reference_governor`
 > styling fix -- the "commanded" (raw) curve is now DASHED instead of
 > solid+alpha for both arms, while "governed" stays SOLID. Rationale: with
@@ -1507,6 +1512,41 @@ be added to a world YAML, not to `config.py`.
 since `world_loader.py` is a second load-bearing import site). No
 `CMakeLists.txt` change needed -- `config/worlds/` installs automatically
 under the existing `install(DIRECTORY config ...)` rule.
+
+**Follow-up (same day): the `platform` field.** The provided Gazebo
+`tutorial.world` SDF revealed a FOURTH duplicated-truth object this initial
+pass had missed: `placement_area`, a static, visual-only (no `<collision>`
+block) yellow disk at `pose 1.000 0.0 0.701`, `radius 0.15`, `length 0.002`
+-- the surface shared-autonomy's `Platform_Place` goal asks the operator to
+set a grasped cylinder down on (see `goal_set.py`'s `PLATFORM_POSE`/
+`PLATFORM_RADIUS`/`PLATFORM_THICKNESS`/`PLATFORM_PLACE_MARGIN`, previously
+hard-coded and independent of everything else).
+
+Per explicit instruction, this is **NOT an obstacle** -- it has no collision
+geometry, is never added to `CollisionManager`'s `cmodel`, and the operator
+already sees the actual disk directly in Gazebo/RViz (rendered by the
+`.world` file itself), so nothing needed to be added on the RViz-marker
+side. It was therefore deliberately kept OUT of `static_obstacles` (which
+exists specifically for "things the collision model builds geometry for")
+and added as a separate top-level YAML field instead:
+```yaml
+platform:
+  pose: [1.000, 0.0, 0.701]
+  radius: 0.15
+  thickness: 0.002
+  place_margin: 0.03
+```
+New `world_loader.PlatformSpec` dataclass (`pose`, `radius`, `thickness`,
+`place_margin`) + `WorldScene.platform: Optional[PlatformSpec]`.
+`GoalSet.__init__` gained an optional `platform=None` parameter that, when
+given, overrides the class-level `PLATFORM_POSE`/`PLATFORM_RADIUS`/
+`PLATFORM_THICKNESS`/`PLATFORM_PLACE_MARGIN` defaults with the loaded
+world's values (verified numerically identical to the old hard-coded
+defaults for `bimanual_default.yaml`, i.e. behavior-unchanged); `None`
+(the default) keeps the original hard-coded constants for any caller not
+yet passing a world scene. `main_shared_autonomy.py` now passes
+`platform=self.world_scene.platform` alongside its existing `cylinders=`
+argument when constructing `GoalSet`.
 
 ---
 

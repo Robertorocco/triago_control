@@ -58,6 +58,22 @@ static_obstacles: list of:
 grasp_roles: {red: <name>, blue: <name>}   -- resolves today's grasp state machine's
                                           hard-coded "red"/"blue" concepts to whichever
                                           named obstacle plays that role in THIS world.
+platform: (optional)                -- NOT an obstacle (no collision geometry, never
+                                          added to CollisionManager's cmodel) -- purely
+                                          the reference pose for shared_autonomy's
+                                          Platform_Place goal, and a visual aid the
+                                          operator sees directly in Gazebo (e.g. the
+                                          yellow `placement_area` disk). Deliberately
+                                          a SEPARATE top-level field from
+                                          `static_obstacles`, not another entry in that
+                                          list, to keep that list's semantics ("things
+                                          the collision model builds geometry for")
+                                          unambiguous.
+    pose: [x, y, z]                  -- world center
+    radius: float                    -- [m] disk radius
+    thickness: float                 -- [m] disk thickness
+    place_margin: float (optional, default 0.03)  -- [m] keep the placed
+                                          footprint this far inside the rim
 """
 
 import os
@@ -91,12 +107,30 @@ class ObstacleSpec:
 
 
 @dataclass
+class PlatformSpec:
+    """The placement/goal disk (e.g. Gazebo's `placement_area` model).
+
+    NOT an obstacle: it has no collision geometry and is never added to
+    CollisionManager's cmodel -- it exists purely as a REFERENCE POSE for
+    shared_autonomy's Platform_Place goal (see goal_set.GoalSet.
+    get_platform_goal_pose) and as a visual aid for the human operator
+    (rendered by Gazebo itself; nothing on the RViz/Meshcat side needs to
+    draw it, since the operator already sees it directly in the sim view).
+    """
+    pose: np.ndarray                # (3,) [x, y, z] world center
+    radius: float                   # [m] disk radius
+    thickness: float                # [m] disk thickness
+    place_margin: float = 0.03      # [m] keep the placed footprint this far inside the rim
+
+
+@dataclass
 class WorldScene:
     """Parsed world scene: every static obstacle + the red/blue grasp-role mapping."""
     world_name: str
     gazebo_world_file: str
     static_obstacles: List[ObstacleSpec] = field(default_factory=list)
     grasp_roles: Dict[str, str] = field(default_factory=dict)
+    platform: Optional[PlatformSpec] = None
 
     def get_obstacle(self, name) -> Optional[ObstacleSpec]:
         for obs in self.static_obstacles:
@@ -177,9 +211,20 @@ def load_world(world_name) -> WorldScene:
             collision=bool(o.get('collision', True)),
         ))
 
+    platform = None
+    p_raw = raw.get('platform')
+    if p_raw is not None:
+        platform = PlatformSpec(
+            pose=np.array(p_raw['pose'], dtype=float),
+            radius=float(p_raw['radius']),
+            thickness=float(p_raw['thickness']),
+            place_margin=float(p_raw.get('place_margin', 0.03)),
+        )
+
     return WorldScene(
         world_name=raw.get('world_name', world_name),
         gazebo_world_file=raw.get('gazebo_world_file', ''),
         static_obstacles=obstacles,
         grasp_roles={k.lower(): v for k, v in raw.get('grasp_roles', {}).items()},
+        platform=platform,
     )

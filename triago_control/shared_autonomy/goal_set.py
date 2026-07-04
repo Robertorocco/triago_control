@@ -84,7 +84,7 @@ class GoalSet:
     PLATFORM_THICKNESS = 0.002                      # disk thickness [m]
     PLATFORM_PLACE_MARGIN = 0.03                    # keep the footprint this far inside the rim [m]
 
-    def __init__(self, cylinders=None, target_keys=None):
+    def __init__(self, cylinders=None, target_keys=None, platform=None):
         """Initializes the cylinder geometry table and the set of valid goal keys.
 
         Args:
@@ -92,7 +92,25 @@ class GoalSet:
                        Defaults to the Red/Blue table used in the original script.
             target_keys: list of valid 'Color_GraspType' goal keys. Defaults to
                        the 4 flat goals (Red_Top, Red_Side, Blue_Top, Blue_Side).
+            platform: optional world_loader.PlatformSpec (2026-07-04) --
+                       overrides the class-level PLATFORM_POSE/PLATFORM_RADIUS/
+                       PLATFORM_THICKNESS/PLATFORM_PLACE_MARGIN defaults below
+                       with the loaded world's placement disk (e.g. Gazebo's
+                       `placement_area` model -- NOT an obstacle, just a
+                       reference pose/visual aid, see world_loader.PlatformSpec's
+                       docstring). None (default) keeps the original hard-coded
+                       values, so this stays backward compatible for any caller
+                       that doesn't pass a world scene.
         """
+        if platform is not None:
+            self.PLATFORM_POSE = np.asarray(platform.pose, dtype=float)
+            self.PLATFORM_RADIUS = float(platform.radius)
+            self.PLATFORM_THICKNESS = float(platform.thickness)
+            self.PLATFORM_PLACE_MARGIN = float(platform.place_margin)
+        # else: fall through to the class-level defaults declared above
+        # (PLATFORM_POSE etc.), unchanged -- self.PLATFORM_POSE still resolves
+        # to them via normal attribute lookup.
+
         if cylinders is None:
             cylinders = {
                 'Red':  {'pos': np.array([0.800, -0.20, 0.775]), 'height': 0.15,

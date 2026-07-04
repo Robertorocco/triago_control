@@ -71,3 +71,15 @@ static_obstacles:
 grasp_roles:
   red: "red_cylinder"
   blue: "blue_cylinder"
+
+# The yellow placement disk (Gazebo model "placement_area") the grasped
+# cylinders must be set down on. NOT an obstacle -- no collision, never
+# added to the CBF's collision model. Purely the reference pose for the
+# shared-autonomy Platform_Place goal; the operator sees the disk itself
+# directly in Gazebo/RViz (rendered by the .world file), so nothing on the
+# QP/RViz-marker side needs to draw it separately.
+platform:
+  pose: [1.000, 0.0, 0.701]
+  radius: 0.15
+  thickness: 0.002
+  place_margin: 0.03
