@@ -1,7 +1,18 @@
 # AI Agent Context — triago_control
 
 > **This file is maintained by the AI agent. Do not edit manually.**
-> Last updated: 2026-07-04 (§9.11 follow-up: `offline_plotter.py` gained a
+> Last updated: 2026-07-04 (§9.11 follow-up #2: `offline_plotter.py`'s
+> `fig6_reference_governor` was rebuilt from a raw-minus-governed DIFFERENCE
+> plot into a raw-VS-governed ABSOLUTE plot -- 4 rows (linear velocity,
+> angular velocity, position tracking error, orientation tracking error),
+> each showing the commanded ("raw") and governed curve per arm PLUS a
+> dashed grey horizontal line at that row's governor-configured ceiling
+> (`cfg.GOV_V_MAX_LIN/ANG`, `GOV_E_MAX_POS/ORI`) -- directly answers "how did
+> the governor modify the trajectory", reconstructed from data ALREADY on
+> the wire (`/qp_debug/governor`'s existing diff payload + the already-
+> tracked raw reference), zero new topics/publishers needed. Only emitted
+> when `cfg.ENABLE_REFERENCE_GOVERNOR=True`.)
+> Earlier: 2026-07-04 (§9.11 follow-up: `offline_plotter.py` gained a
 > 3D commanded-vs-executed gripper trajectory figure -- solid=commanded
 > reference / dashed=executed EE pose, red=Right / blue=Left, matching every
 > other per-arm color convention in this codebase. Saved as PDF+PNG always;
@@ -1359,7 +1370,7 @@ both are meaningless as a static artifact):
 | `fig3_task_error_adaptation` | Cartesian position/velocity tracking error + whichever dynamic-weight rows are active per `cfg.DYNAMIC_*` flags |
 | `fig4_task_authority` | Normalized soft-task cost shares (damping/posture/slack) |
 | `fig5_3d_trajectory` | **(2026-07-04)** 3D commanded-vs-executed gripper path, both arms. Solid line = the Cartesian reference commanded on `/arm_*/cartesian_reference` (source-agnostic -- today `trajectory_generator.py`, but works identically for any future publisher on that same contract, e.g. teleoperation); dashed line = the REAL EE pose from `/qp_debug/ee_real`. Red=Right, Blue=Left (same convention as everywhere else). Circle marker = trial start, X marker = trial end (helps orient a static, non-rotatable PDF/PNG reader). Sampled at the exact same tick/anchor as the existing Cartesian tracking-error computation (`cb_real`), so it is free -- no new subscription was needed. Saved as PDF+PNG always (`_build_fig_3d_trajectory`, `mpl_toolkits.mplot3d`); ALSO saved as a fully browser-navigable HTML (`_save_3d_trajectory_html`, free rotate/zoom/pan, `plotly.graph_objects.Scatter3d`) **only if `plotly` is installed** -- checked once at import time (`_HAS_PLOTLY`), silently skipped with a log line otherwise. `plotly` is intentionally NOT added to `package.xml`/rosdep since it is optional and purely additive: `pip install plotly` in the same Python environment enables it, no code change needed. |
-| `fig6_reference_governor` | Only emitted if `cfg.ENABLE_REFERENCE_GOVERNOR` -- raw-minus-governed clamp-magnitude norms, 4 rows |
+| `fig6_reference_governor` | **(2026-07-04, revised)** Only emitted if `cfg.ENABLE_REFERENCE_GOVERNOR` -- 4 rows: Linear Velocity, Angular Velocity, Position Tracking Error, Orientation Tracking Error. Each row plots the COMMANDED ("raw") and GOVERNED curve per arm (Red=Right, Blue=Left; commanded=lighter/thinner, governed=solid/bold) PLUS a dashed grey horizontal line at that row's governor-configured ceiling (`cfg.GOV_V_MAX_LIN`, `GOV_V_MAX_ANG`, `GOV_E_MAX_POS`, `GOV_E_MAX_ORI`). Answers "how did the governor reshape the input trajectory" directly -- whenever the raw curve pokes above the dashed ceiling while the governed curve stays clipped at/below it, that is the governor visibly acting. Reconstructed ENTIRELY from data already on the wire: `gov_callback` (in `offline_plotter.py`) recovers `governed = raw - diff` algebraically from the EXISTING `/qp_debug/governor` diff payload (`main_qp_controller.py`'s publisher was NOT touched) combined with the already-tracked raw reference (`self.ref_right/left`) and the latest cached real EE pose/orientation from `/qp_debug/ee_real` (`cb_real` now unconditionally caches `last_real_pos_r/l`, `last_real_rpy_r/l` -- even outside a recording trial, so the very first governor sample of a new trial has a valid anchor). Orientation tracking error uses the SAME geodesic construction as `ReferenceGovernor._clamp_orientation_error` (`_geodesic_angle` static helper, `pin.log3` with a near-pi singularity guard) -- read-only, never fed back into control. Zero new ROS topics or publishers were added for this. Previous version (raw-minus-governed DIFFERENCE only) superseded -- the absolute view was requested as clearer for a reader unfamiliar with the internals. |
 
 **Output location**: `cfg.OFFLINE_PLOT_ROOT_DIR` (default
 `~/exchange/ros2-ws/triago_offline_plots/`), one timestamped subfolder per

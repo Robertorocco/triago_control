@@ -56,7 +56,15 @@ and the live joint-position slider GUI):
                                     `plotly` package is installed --
                                     `pip install plotly` to enable it, no
                                     other change needed.
-    fig6_reference_governor        Raw-vs-governed clamp magnitudes
+    fig6_reference_governor        Commanded ("raw") vs. governed reference
+                                    signal (linear/angular velocity, position/
+                                    orientation tracking error), per arm, with
+                                    a DASHED horizontal line marking the
+                                    governor's configured limit on each
+                                    quantity (cfg.GOV_V_MAX_LIN, GOV_V_MAX_ANG,
+                                    GOV_E_MAX_POS, GOV_E_MAX_ORI) -- makes it
+                                    immediately visible when/how much the
+                                    governor reshaped the input trajectory.
                                     (only emitted if cfg.ENABLE_REFERENCE_GOVERNOR)
 """
 import matplotlib
@@ -66,6 +74,7 @@ import os
 import datetime
 
 import numpy as np
+import pinocchio as pin
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
@@ -143,6 +152,18 @@ class OfflinePlotter(Node):
         self.t_off = None         # trial-relative time [s] of the falling edge
         self.post_roll_deadline = None  # ROS time [s] at which to finalize
         self.trial_index = 0
+
+        # Latest real EE pose (position + RPY), kept for the governor figure's
+        # tracking-error rows -- deliberately OUTSIDE _reset_buffers: this is
+        # "latest known robot state", not per-trial data, and must survive
+        # across trials (and be populated from the very first tick of a new
+        # trial without waiting on a fresh /qp_debug/ee_real message). See
+        # cb_real (always updates it, gated only on has_ref_right, not on
+        # whether a trial is in progress) and gov_callback (consumes it).
+        self.last_real_pos_r = None
+        self.last_real_pos_l = None
+        self.last_real_rpy_r = None
+        self.last_real_rpy_l = None
 
         self._reset_buffers()
 
@@ -268,6 +289,20 @@ class OfflinePlotter(Node):
 
         self.time_gov = []
         self.gov_buffer = []
+        # Governor detailed telemetry (2026-07-04): commanded ("raw") vs.
+        # governed ABSOLUTE magnitudes, reconstructed from the raw reference
+        # (self.ref_right/left, already tracked) and the raw-minus-governed
+        # diff already published on /qp_debug/governor -- no new topic
+        # needed (governed = raw - diff, algebraically exact). See
+        # gov_callback and _build_fig_reference_governor.
+        self.gov_lin_vel_raw_r, self.gov_lin_vel_gov_r = [], []
+        self.gov_lin_vel_raw_l, self.gov_lin_vel_gov_l = [], []
+        self.gov_ang_vel_raw_r, self.gov_ang_vel_gov_r = [], []
+        self.gov_ang_vel_raw_l, self.gov_ang_vel_gov_l = [], []
+        self.gov_pos_err_raw_r, self.gov_pos_err_gov_r = [], []
+        self.gov_pos_err_raw_l, self.gov_pos_err_gov_l = [], []
+        self.gov_ori_err_raw_r, self.gov_ori_err_gov_r = [], []
+        self.gov_ori_err_raw_l, self.gov_ori_err_gov_l = [], []
 
     def _now(self):
         return self.get_clock().now().nanoseconds / 1e9
@@ -352,11 +387,24 @@ class OfflinePlotter(Node):
             self.has_ref_left = True
 
     def cb_real(self, msg):
-        if not self._recording_active() or not self.has_ref_right:
+        if not self.has_ref_right:
             return
         real = np.array(msg.data)
         p_real_r, v_real_r = real[0:3], real[3:6]
         p_real_l, v_real_l = real[6:9], real[9:12]
+        # Real orientation (RPY), if present -- see /qp_debug/ee_real's 18-float
+        # layout: [p_r(3), v_r(3), p_l(3), v_l(3), rpy_r(3), rpy_l(3)]. Cached
+        # unconditionally (even outside a trial) so the governor figure's
+        # geodesic-orientation-error reconstruction always has the LATEST real
+        # pose available the instant a trial starts -- avoids an empty first
+        # sample. Cached regardless of _recording_active() for the same reason
+        # ref_right/ref_left already are.
+        self.last_real_pos_r, self.last_real_pos_l = p_real_r.copy(), p_real_l.copy()
+        if len(real) >= 18:
+            self.last_real_rpy_r, self.last_real_rpy_l = real[12:15].copy(), real[15:18].copy()
+
+        if not self._recording_active():
+            return
 
         e_p_r = float(np.linalg.norm(self.ref_right[0:3] - p_real_r))
         e_v_r = float(np.linalg.norm(self.ref_right[6:9] - v_real_r))
@@ -450,11 +498,79 @@ class OfflinePlotter(Node):
         self.time_task_auth.append(self._t())
         self.task_auth_buffer.append(list(msg.data[:3]))
 
+    @staticmethod
+    def _geodesic_angle(rpy, R_real):
+        """||log3(R_des . R_real^T)|| -- same construction as
+        ReferenceGovernor._clamp_orientation_error, used here purely as a
+        READ-ONLY diagnostic (never fed back into control)."""
+        if rpy is None or R_real is None:
+            return 0.0
+        R_des = pin.rpy.rpyToMatrix(float(rpy[0]), float(rpy[1]), float(rpy[2]))
+        R_error = R_des @ np.asarray(R_real).T
+        trace = np.clip(np.trace(R_error), -1.0, 3.0)
+        if trace <= -1.0 + 1e-6:
+            return float(np.pi)  # near-singularity guard, mirrors the governor's own code
+        return float(np.linalg.norm(pin.log3(R_error)))
+
     def gov_callback(self, msg):
         if not self._recording_active() or len(msg.data) < 24:
             return
         self.time_gov.append(self._t())
         self.gov_buffer.append(list(msg.data[:24]))
+
+        # --- Reconstruct RAW vs. GOVERNED absolute signals (2026-07-04) ---
+        # /qp_debug/governor already carries (raw - governed) per DOF; the raw
+        # side is exactly self.ref_right/left (already tracked from
+        # /arm_*/cartesian_reference), so governed = raw - diff -- no new
+        # topic/publisher was needed. Reconstructed HERE (not in
+        # main_qp_controller.py) to keep that node's telemetry contract
+        # unchanged; this is purely a plotting-side convenience.
+        diff = np.array(msg.data[:24], dtype=float)
+        pos_diff_r, ori_diff_r, vel_diff_r, wvel_diff_r = diff[0:3], diff[3:6], diff[6:9], diff[9:12]
+        pos_diff_l, ori_diff_l, vel_diff_l, wvel_diff_l = diff[12:15], diff[15:18], diff[18:21], diff[21:24]
+
+        raw_pos_r, raw_rpy_r = self.ref_right[0:3], self.ref_right[3:6]
+        raw_vel_r, raw_wvel_r = self.ref_right[6:9], self.ref_right[9:12]
+        raw_pos_l, raw_rpy_l = self.ref_left[0:3], self.ref_left[3:6]
+        raw_vel_l, raw_wvel_l = self.ref_left[6:9], self.ref_left[9:12]
+
+        gov_pos_r, gov_rpy_r = raw_pos_r - pos_diff_r, raw_rpy_r - ori_diff_r
+        gov_vel_r, gov_wvel_r = raw_vel_r - vel_diff_r, raw_wvel_r - wvel_diff_r
+        gov_pos_l, gov_rpy_l = raw_pos_l - pos_diff_l, raw_rpy_l - ori_diff_l
+        gov_vel_l, gov_wvel_l = raw_vel_l - vel_diff_l, raw_wvel_l - wvel_diff_l
+
+        # Velocity magnitudes -- directly comparable to GOV_V_MAX_LIN/ANG (the
+        # governor clamps the MAGNITUDE, direction preserved -- see
+        # ReferenceGovernor._clamp_velocity).
+        self.gov_lin_vel_raw_r.append(float(np.linalg.norm(raw_vel_r)))
+        self.gov_lin_vel_gov_r.append(float(np.linalg.norm(gov_vel_r)))
+        self.gov_lin_vel_raw_l.append(float(np.linalg.norm(raw_vel_l)))
+        self.gov_lin_vel_gov_l.append(float(np.linalg.norm(gov_vel_l)))
+        self.gov_ang_vel_raw_r.append(float(np.linalg.norm(raw_wvel_r)))
+        self.gov_ang_vel_gov_r.append(float(np.linalg.norm(gov_wvel_r)))
+        self.gov_ang_vel_raw_l.append(float(np.linalg.norm(raw_wvel_l)))
+        self.gov_ang_vel_gov_l.append(float(np.linalg.norm(gov_wvel_l)))
+
+        # Tracking-error magnitudes -- directly comparable to GOV_E_MAX_POS/ORI
+        # (the governor bounds the ERROR the CLF perceives, i.e. ||ref-real||,
+        # NOT the reference itself -- see ReferenceGovernor._bound_position_error
+        # / _clamp_orientation_error). Uses the latest cached real EE pose
+        # (same downsampled tick as this message -- see cb_real).
+        real_pos_r = self.last_real_pos_r if self.last_real_pos_r is not None else raw_pos_r
+        real_pos_l = self.last_real_pos_l if self.last_real_pos_l is not None else raw_pos_l
+        self.gov_pos_err_raw_r.append(float(np.linalg.norm(raw_pos_r - real_pos_r)))
+        self.gov_pos_err_gov_r.append(float(np.linalg.norm(gov_pos_r - real_pos_r)))
+        self.gov_pos_err_raw_l.append(float(np.linalg.norm(raw_pos_l - real_pos_l)))
+        self.gov_pos_err_gov_l.append(float(np.linalg.norm(gov_pos_l - real_pos_l)))
+
+        real_rpy_r = self.last_real_rpy_r
+        real_rpy_l = self.last_real_rpy_l
+        R_real_r = pin.rpy.rpyToMatrix(*real_rpy_r) if real_rpy_r is not None else None
+        R_real_l = pin.rpy.rpyToMatrix(*real_rpy_l) if real_rpy_l is not None else None
+        self.gov_ori_err_raw_r.append(self._geodesic_angle(raw_rpy_r, R_real_r))
+        self.gov_ori_err_gov_r.append(self._geodesic_angle(gov_rpy_r, R_real_r))
+        self.gov_ori_err_raw_l.append(self._geodesic_angle(raw_rpy_l, R_real_l))
+        self.gov_ori_err_gov_l.append(self._geodesic_angle(gov_rpy_l, R_real_l))
 
     # =====================================================================
     # FINALIZATION: build + save every figure, then reset for the next trial
@@ -823,28 +939,59 @@ class OfflinePlotter(Node):
         fig.write_html(html_path)
 
     def _build_fig_reference_governor(self):
+        """Commanded ("raw") vs. governed reference, 4 rows x 1 col, with a
+        DASHED horizontal line on every row marking the governor's configured
+        limit on that quantity (cfg.GOV_V_MAX_LIN/ANG, GOV_E_MAX_POS/ORI). Per
+        arm: solid = commanded reference (what trajectory_generator/teleop
+        asked for), dashed-marker style line = governed reference (what the
+        CLF actually saw) -- Red = Right, Blue = Left, matching every other
+        per-arm convention in this dashboard. The dashed GREY limit line is
+        the governor's configured ceiling for that row: whenever a "raw"
+        curve pokes above it while the "governed" curve stays clipped at (or
+        below) it, that is the governor visibly doing its job.
+        """
         if not self.time_gov:
             return None
-        fig, axs = plt.subplots(4, 1, sharex=True, figsize=(8, 10))
-        fig.suptitle('Reference Governor -- Raw Minus Governed Reference')
-        gov_slices = [
-            ('Position Clamp', '[m]', (0, 3)),
-            ('Orientation Clamp', '[rad]', (3, 6)),
-            ('Linear Velocity Clamp', '[m/s]', (6, 9)),
-            ('Angular Velocity Clamp', '[rad/s]', (9, 12)),
+
+        fig, axs = plt.subplots(4, 1, sharex=True, figsize=(8, 11))
+        fig.suptitle('Reference Governor -- Commanded vs. Governed Trajectory')
+        t = self.time_gov
+
+        rows = [
+            (axs[0], 'Linear Velocity', '[m/s]',
+             self.gov_lin_vel_raw_r, self.gov_lin_vel_gov_r,
+             self.gov_lin_vel_raw_l, self.gov_lin_vel_gov_l, cfg.GOV_V_MAX_LIN),
+            (axs[1], 'Angular Velocity', '[rad/s]',
+             self.gov_ang_vel_raw_r, self.gov_ang_vel_gov_r,
+             self.gov_ang_vel_raw_l, self.gov_ang_vel_gov_l, cfg.GOV_V_MAX_ANG),
+            (axs[2], 'Position Tracking Error', '[m]',
+             self.gov_pos_err_raw_r, self.gov_pos_err_gov_r,
+             self.gov_pos_err_raw_l, self.gov_pos_err_gov_l, cfg.GOV_E_MAX_POS),
+            (axs[3], 'Orientation Tracking Error', '[rad]',
+             self.gov_ori_err_raw_r, self.gov_ori_err_gov_r,
+             self.gov_ori_err_raw_l, self.gov_ori_err_gov_l, cfg.GOV_E_MAX_ORI),
         ]
-        arr = np.array(self.gov_buffer, dtype=float)
-        for row_i, (title, ylabel, (s, e)) in enumerate(gov_slices):
-            ax = axs[row_i]
-            norm_r = np.linalg.norm(arr[:, s:e], axis=1)
-            norm_l = np.linalg.norm(arr[:, 12 + s:12 + e], axis=1)
-            ax.plot(self.time_gov, norm_r, 'r-', label='Right')
-            ax.plot(self.time_gov, norm_l, 'b-', label='Left')
+
+        for ax, title, ylabel, raw_r, gov_r, raw_l, gov_l, limit in rows:
+            ax.plot(t, raw_r, color='r', linestyle='-', linewidth=1.3,
+                   alpha=0.55, label='Right -- commanded')
+            ax.plot(t, gov_r, color='r', linestyle='-', linewidth=1.7,
+                   label='Right -- governed')
+            ax.plot(t, raw_l, color='b', linestyle='-', linewidth=1.3,
+                   alpha=0.55, label='Left -- commanded')
+            ax.plot(t, gov_l, color='b', linestyle='-', linewidth=1.7,
+                   label='Left -- governed')
+            # The governor's configured ceiling for THIS quantity -- unlabeled
+            # in the legend text but visually distinct (grey dashed), same
+            # spirit as the trajectory-finished marker: self-explanatory once
+            # you see the governed curve hug it.
+            ax.axhline(limit, color='0.35', linestyle='--', linewidth=1.3, zorder=1)
             ax.set_title(title)
             ax.set_ylabel(ylabel)
-            ax.legend(loc='upper right')
-            ax.set_xlim(0, self.time_gov[-1])
+            ax.legend(loc='upper right', fontsize=7, ncol=2)
+            ax.set_xlim(0, t[-1])
             _draw_trigger_line(ax, self.t_off)
+
         axs[-1].set_xlabel('Time [s]')
         fig.tight_layout(rect=(0, 0, 1, 0.96))
         return fig
