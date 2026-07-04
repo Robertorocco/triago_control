@@ -1536,6 +1536,32 @@ Two-part root cause, found in two passes:
    not just the `overrideMaterial` flag) on release, closing the "stuck
    orange forever" bug too.
 
+**New diagnostic tool (same day, operator report: "the capsules are not
+perfectly aligned to the link... even if the cylinder radius is bigger than
+the link radius, the link mesh goes outside")**: `scripts/qp_arm_teleop/
+capsule_alignment_audit.py`. This is the signature of a LATERAL
+MISALIGNMENT, not an undersized radius -- `calculate_offsets` builds each
+capsule as a straight joint-to-joint segment (dominant-axis snapped), but
+the real CAD mesh's centerline is not always collinear with that line, so a
+bigger radius helps uniformly around the (possibly off-center) axis but
+cannot fix a genuine sideways offset. The audit script quantifies this
+PRECISELY instead of eyeballing it: it calls the REAL
+`CollisionManager.calculate_offsets()` (zero drift vs. what
+`main_qp_controller.py` actually builds), extracts every visual mesh
+VERTEX for each link (transformed into the same joint-relative frame the
+capsule lives in), and computes exact point-to-segment distance minus the
+capsule radius -- vertex-only checking is exact here (not approximate)
+because point-to-line distance is convex, so its max over a flat triangle
+is always attained at a vertex. Reports, per link: worst-case protrusion in
+mm, and WHERE along the capsule's own axis (t=0..1) it occurs -- a
+protrusion concentrated near one end (t near 0 or 1) points at a
+translational/kink fix near that joint; a protrusion spread evenly across
+t points at a genuinely undersized radius. Pure offline Pinocchio/hppfcl
+audit against a URDF file (defaults to the repo's own
+`triago_extracted.urdf`, or a freshly-dumped live URDF via `ros2 param get
+/robot_state_publisher robot_description`) -- no ROS/Gazebo needs to be
+running. Registered in `CMakeLists.txt` alongside the other scripts.
+
 **Bugfix #3 (same day, operator report: "now cylinder blinks... red and
 blue")**: SAME root mechanism as #2, on a DIFFERENT pair of meshes.
 `color_collision_model` painted the arm collision capsules (`right_geom_ids`/
