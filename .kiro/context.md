@@ -1536,6 +1536,29 @@ Two-part root cause, found in two passes:
    not just the `overrideMaterial` flag) on release, closing the "stuck
    orange forever" bug too.
 
+**Bugfix #3 (same day, operator report: "now cylinder blinks... red and
+blue")**: SAME root mechanism as #2, on a DIFFERENT pair of meshes.
+`color_collision_model` painted the arm collision capsules (`right_geom_ids`/
+`left_geom_ids` -- visually cylinder-like, rounded-cap tubes; also the
+ground plane and the table/red/blue workspace obstacles) at `alpha=0.8`
+(translucent). These sit directly under the ALWAYS-rendered green "ghost"
+skin mesh (`self.vmodel`, `alpha=0.3` -- the real URDF visual geometry, see
+`__init__`) -- another permanent translucent-over-translucent overlap, same
+WebGL non-deterministic-depth-sort instability as bugfix #2, this time
+showing as the right arm (red) / left arm (blue) capsules flickering.
+Fixed by making EVERY color in `color_collision_model` fully OPAQUE
+(`alpha=1.0` -- capsules, head capsules, ground, and every
+`workspace_obstacle_ids` entry including the table/red/blue cylinders,
+regardless of whether the alpha came from the world-scene YAML's `color`
+field or the hard-coded fallback) -- opaque-vs-translucent pairs sort
+deterministically, so there is no longer any translucent-vs-translucent
+pair anywhere in the collision model. `restore_object_color`'s `default`
+color (used when a grasp is released) is likewise now forced to
+`alpha=1.0` for the same reason. Net effect: every mesh in `cmodel` is now
+either fully opaque or fully invisible, never partially transparent --
+eliminating this entire class of flicker bug at its source rather than
+patching it mesh-by-mesh.
+
 **Bugfix #1 (same day, reported by operator via Meshcat -- a solid black wall
 was visible even though the default world's `virtual_wall` has
 `collision: false`)**: the world_scene branch of `build_collision_model`

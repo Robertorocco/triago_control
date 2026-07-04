@@ -147,13 +147,29 @@ class VisualizationEngine:
     def color_collision_model(self, col_manager):
         # Tint the collision capsules/obstacles: right=red, left=blue, head=yellow
         # (quasi-static CBF obstacle, 2026-07-01), ground=grey, workspace.
+        #
+        # BUGFIX (2026-07-04): every color below is now FULLY OPAQUE
+        # (alpha=1.0), not translucent (was 0.8 / 0.5). Root cause, same
+        # mechanism as the gripper-box flicker fixed earlier: these capsules
+        # (right_geom_ids/left_geom_ids -- visually cylinder-like, rounded-cap
+        # tubes) sit directly under the ALWAYS-rendered green "ghost" skin
+        # mesh (self.vmodel, alpha=0.3 -- the real URDF visual geometry,
+        # see __init__). Two overlapping TRANSLUCENT surfaces at nearly the
+        # same depth (capsule vs skin) is exactly the WebGL/three.js
+        # draw-order instability that caused the earlier gripper-box flicker
+        # -- reported here as the arm capsules "blinking red and blue"
+        # (right arm = red, left arm = blue). An OPAQUE surface against a
+        # translucent one sorts deterministically via the standard depth
+        # test (only one of the two is ambiguous, not both), so there is no
+        # flicker -- this is the SAME fix pattern as the gripper visual box
+        # (invisible/opaque, never translucent-over-translucent).
         for geom_id in col_manager.right_geom_ids:
             if geom_id < len(self.cmodel.geometryObjects):
-                self.cmodel.geometryObjects[geom_id].meshColor = np.array([1.0, 0.0, 0.0, 0.8])
+                self.cmodel.geometryObjects[geom_id].meshColor = np.array([1.0, 0.0, 0.0, 1.0])
                 self.cmodel.geometryObjects[geom_id].overrideMaterial = True
         for geom_id in col_manager.left_geom_ids:
             if geom_id < len(self.cmodel.geometryObjects):
-                self.cmodel.geometryObjects[geom_id].meshColor = np.array([0.0, 0.0, 1.0, 0.8])
+                self.cmodel.geometryObjects[geom_id].meshColor = np.array([0.0, 0.0, 1.0, 1.0])
                 self.cmodel.geometryObjects[geom_id].overrideMaterial = True
         # Head capsules: distinct yellow so they're visually identifiable as the
         # NEW quasi-static obstacle (neither arm's own color), matching the
@@ -161,10 +177,10 @@ class VisualizationEngine:
         # CollisionManager.build_collision_model's head_offsets branch).
         for geom_id in getattr(col_manager, 'head_geom_ids', []):
             if geom_id < len(self.cmodel.geometryObjects):
-                self.cmodel.geometryObjects[geom_id].meshColor = np.array([1.0, 1.0, 0.0, 0.8])
+                self.cmodel.geometryObjects[geom_id].meshColor = np.array([1.0, 1.0, 0.0, 1.0])
                 self.cmodel.geometryObjects[geom_id].overrideMaterial = True
         if hasattr(col_manager, 'ground_id') and col_manager.ground_id < len(self.cmodel.geometryObjects):
-            self.cmodel.geometryObjects[col_manager.ground_id].meshColor = np.array([0.5, 0.5, 0.5, 0.5])
+            self.cmodel.geometryObjects[col_manager.ground_id].meshColor = np.array([0.5, 0.5, 0.5, 1.0])
             self.cmodel.geometryObjects[col_manager.ground_id].overrideMaterial = True
         for obs_id in getattr(col_manager, 'workspace_obstacle_ids', []):
             if obs_id >= len(self.cmodel.geometryObjects):
@@ -185,11 +201,17 @@ class VisualizationEngine:
                     color = [float(c) for c in spec.color]  # [r, g, b, a] straight from YAML
             if color is None:
                 if "red" in name:
-                    color = [1.0, 0.0, 0.0, 0.8]
+                    color = [1.0, 0.0, 0.0, 1.0]
                 elif "blue" in name:
-                    color = [0.0, 0.0, 1.0, 0.8]
+                    color = [0.0, 0.0, 1.0, 1.0]
                 else:  # table
-                    color = [0.6, 0.4, 0.2, 0.8]
+                    color = [0.6, 0.4, 0.2, 1.0]
+            # Force full opacity regardless of source (YAML or fallback) --
+            # same anti-flicker rationale as above; a table/cylinder is far
+            # less likely to overlap the ghost skin than the arm capsules,
+            # but forcing alpha=1.0 here removes the possibility entirely and
+            # keeps every collision-model color consistently opaque.
+            color = [color[0], color[1], color[2], 1.0]
             self.cmodel.geometryObjects[obs_id].meshColor = np.array(color)
             self.cmodel.geometryObjects[obs_id].overrideMaterial = True
 
@@ -256,6 +278,10 @@ class VisualizationEngine:
                 default = np.array([float(c) for c in spec.color])
         if default is None:
             default = np.array([1.0, 0.0, 0.0, 1.0]) if color == "red" else np.array([0.0, 0.0, 1.0, 1.0])
+        # Force full opacity (anti-flicker, see color_collision_model's
+        # bugfix note) regardless of whether it came from the YAML or the
+        # hard-coded fallback above.
+        default = np.array([default[0], default[1], default[2], 1.0])
 
         with self.meshcat_lock:
             if cyl_id < len(self.cmodel.geometryObjects):
