@@ -161,26 +161,53 @@ STANDOFF_SLACK_WEIGHT = 80.0 # QP slack weight: < LOOKAT_SLACK_WEIGHT (500) so
 # invalid-depth zone; upper bound keeps the objects resolvable at all.
 VIEW_D_STAR_MIN = 0.45
 VIEW_D_STAR_MAX = 1.10
-VIEW_STEP_IN = 0.030         # [m] approach increment per perception tick
-VIEW_STEP_OUT = 0.050        # [m] retreat increment per tick (faster than
-                             # approach: protecting framing is the priority)
-VIEW_STANDOFF_LPF = 0.30     # LPF coeff on d* (0..1, higher = more responsive);
-                             # guarantees a smooth, C0 setpoint for the QP task.
+VIEW_STEP_IN = 0.012         # [m] approach increment per perception tick
+                             # (TUNED 2026-07-04: was 0.030, too fast — d* slewed
+                             # faster than the head could physically track,
+                             # causing oscillation vs. the scan waypoints.)
+VIEW_STEP_OUT = 0.020        # [m] retreat increment per tick (was 0.050; same
+                             # fix — the asymmetry retreat>approach is preserved
+                             # but both are much slower than the QP's own rate.)
+VIEW_STANDOFF_LPF = 0.15     # LPF coeff on d* (0..1, higher = more responsive);
+                             # (TUNED 2026-07-04: was 0.30 — halved to further
+                             # damp the oscillation cycle; guarantees a smooth,
+                             # C0 setpoint for the QP task.)
 
 # --- Framing / containment signal ---------------------------------------
 VIEW_BORDER_MARGIN_FRAC = 0.06   # outer border band width = frac * min(W, H)
-VIEW_BORDER_HIGH = 0.040         # per-edge occupancy above this => that edge is
+VIEW_BORDER_HIGH = 0.080         # per-edge occupancy above this => that edge is
                                  # clipping the ROI => RETREAT
-VIEW_BORDER_LOW = 0.015          # occupancy below this on ALL edges => ROI fully
+                                 # (TUNED 2026-07-04: was 0.040.  The camera
+                                 # views the table OBLIQUELY, so the far table
+                                 # edge projects near the bottom border at any
+                                 # reasonable range.  4% was chronic at 0.9m →
+                                 # the planner retreated to 1.1m even though the
+                                 # entire table+objects were visible.  8% filters
+                                 # out this expected geometric bottom-band and
+                                 # only triggers on genuine clipping.)
+VIEW_BORDER_LOW = 0.020          # occupancy below this on ALL edges => ROI fully
                                  # contained => framing slack available
 VIEW_MIN_PROJ_POINTS = 200       # need at least this many reprojected points to
                                  # trust the framing signal (else HOLD)
+VIEW_CONTAIN_HYSTERESIS = 3      # [ticks] require this many consecutive
+                                 # "contained" ticks before allowing APPROACH
+                                 # (avoids scan-induced oscillation: one waypoint
+                                 # clips -> RETREAT, next doesn't -> instant
+                                 # APPROACH — the head never settles. Hysteresis
+                                 # demands a persistent "contained" verdict
+                                 # before moving closer again.)
 
 # --- Resolution-sufficiency signal --------------------------------------
-VIEW_RES_RADIUS_PX_TARGET = 28.0 # desired apparent object radius [px]; below
+VIEW_RES_RADIUS_PX_TARGET = 12.0 # desired apparent object radius [px]; below
                                  # this an object is "under-resolved" (move
-                                 # closer if framing allows). Scale-free w.r.t.
-                                 # the true camera fx (uses the LIVE intrinsics).
+                                 # closer if framing allows).
+                                 # (TUNED 2026-07-04: was 28.  r_px=fx*r/range =
+                                 # 640*0.02/range.  28px needs range=0.46m, which
+                                 # is AT the sensor's min depth — unreachable in
+                                 # practice.  12px is achieved at ~1.07m, matches
+                                 # the natural scan-range, and is sufficient for
+                                 # the rim fit: 72 angular bins need ~12 boundary
+                                 # points to populate each bin.)
 VIEW_RES_FIT_RMS_OK = 0.0020     # [m] rim-fit RMS at/below which detail is
                                  # already good enough (don't push closer on
                                  # fit-quality grounds).

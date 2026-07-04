@@ -77,6 +77,7 @@ class ActivePerceptionPlanner:
     def __init__(self):
         self.d_star = None                  # filtered desired standoff [m]
         self._d_star_raw = None             # pre-LPF setpoint [m]
+        self._contain_ticks = 0             # consecutive "contained" ticks (hysteresis)
         self.last_action = "INIT"           # APPROACH | RETREAT | HOLD | INIT
         self.last_reason = "waiting for data"
         self.metrics = {}                   # populated every update() for debug
@@ -215,25 +216,41 @@ class ActivePerceptionPlanner:
         # --- Decision (priority: framing > resolution) ------------------
         if no_table:
             self._d_star_raw = min(self._d_star_raw + cfg.VIEW_STEP_OUT, cfg.VIEW_D_STAR_MAX)
+            self._contain_ticks = 0
             action, reason = "RETREAT", "no table detected -> widen FOV to reacquire"
         elif not framing_ok:
             action, reason = "HOLD", "too few reprojected points to judge framing"
         elif clipping:
             edges = [k for k, val in edge_occ.items() if val > cfg.VIEW_BORDER_HIGH]
             self._d_star_raw = min(self._d_star_raw + cfg.VIEW_STEP_OUT, cfg.VIEW_D_STAR_MAX)
+            self._contain_ticks = 0
             action, reason = "RETREAT", f"ROI clipping frame edge(s) {'+'.join(edges)}"
         elif contained and under_resolved:
-            self._d_star_raw = max(self._d_star_raw - cfg.VIEW_STEP_IN, cfg.VIEW_D_STAR_MIN)
-            if mean_r_px < cfg.VIEW_RES_RADIUS_PX_TARGET:
-                reason = (f"ROI contained, objects under-resolved "
-                          f"(r={mean_r_px:.0f}<{cfg.VIEW_RES_RADIUS_PX_TARGET:.0f}px) -> approach")
+            # Hysteresis: only approach after N consecutive "contained" ticks to
+            # avoid oscillation when the scan shifts between clip/contain.
+            self._contain_ticks += 1
+            if self._contain_ticks >= cfg.VIEW_CONTAIN_HYSTERESIS:
+                self._d_star_raw = max(self._d_star_raw - cfg.VIEW_STEP_IN, cfg.VIEW_D_STAR_MIN)
+                if mean_r_px < cfg.VIEW_RES_RADIUS_PX_TARGET:
+                    reason = (f"ROI contained, objects under-resolved "
+                              f"(r={mean_r_px:.0f}<{cfg.VIEW_RES_RADIUS_PX_TARGET:.0f}px) -> approach")
+                else:
+                    reason = (f"ROI contained, rim fit loose "
+                              f"(rms={worst_rms*1e3:.1f}mm) -> approach")
+                action = "APPROACH"
             else:
-                reason = (f"ROI contained, rim fit loose "
-                          f"(rms={worst_rms*1e3:.1f}mm) -> approach")
-            action = "APPROACH"
+                action = "HOLD"
+                reason = (f"contained+under-resolved but hysteresis "
+                          f"({self._contain_ticks}/{cfg.VIEW_CONTAIN_HYSTERESIS} ticks)")
         elif contained and not have_objs:
+            self._contain_ticks += 1
             action, reason = "HOLD", "ROI contained, no objects yet (holding for detection)"
         else:
+            # "partial" or contained+resolved — don't approach, don't retreat
+            if contained:
+                self._contain_ticks += 1
+            else:
+                self._contain_ticks = 0
             action, reason = "HOLD", "framing + resolution within targets"
 
         self.last_action = action
