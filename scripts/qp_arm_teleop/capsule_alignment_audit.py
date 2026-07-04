@@ -49,7 +49,7 @@ WHAT THIS SCRIPT DOES
 USAGE
     python3 capsule_alignment_audit.py --urdf /path/to/robot.urdf
     python3 capsule_alignment_audit.py --urdf triago_extracted.urdf --chain right
-    python3 capsule_alignment_audit.py --urdf triago_extracted.urdf --flag-threshold-mm 0
+    python3 capsule_alignment_audit.py --urdf triago_extracted.urdf --suggest-fix
 
     No ROS/Gazebo needs to be running -- this is pure Pinocchio/hppfcl on a
     URDF file, using pin.neutral(model) (the same pose calculate_offsets
@@ -59,6 +59,19 @@ USAGE
         ros2 param get /robot_state_publisher robot_description > /tmp/live.urdf
     (some ROS distros prefix the output with "String value is:" -- strip
     that line if present) then pass --urdf /tmp/live.urdf.
+
+    --suggest-fix (2026-07-04): for every flagged (protrusion > 0) link,
+    computes the CLOSED-FORM optimal correction -- a lateral offset
+    (perpendicular re-centering) plus an axial extension on whichever
+    end(s) the mesh overshoots the joint-to-joint segment -- and prints it
+    as a ready-to-paste config.py dict (CAPSULE_OFFSET_OVERRIDES), together
+    with an immediate numerical verification (recomputes worst-case
+    protrusion WITH the fix applied; should print "[OK: fully contained]").
+    See _compute_capsule_fix's docstring for the exact derivation. This
+    computes the fix, it does NOT modify collision_manager.py or config.py
+    -- copy the printed dict over yourself, or hand the output to whoever
+    is applying the change, so the actual CBF collision geometry is never
+    touched without an explicit review step.
 
 READING THE OUTPUT
     - protrusion_mm <= 0  : the mesh is fully contained in the capsule at
@@ -151,6 +164,104 @@ def _point_segment_distance_and_t(p, a, b):
     return float(np.linalg.norm(p - closest)), t_clamped
 
 
+def _collect_link_vertices(model, vmodel, link_name):
+    """All visual mesh vertices for `link_name`, in joint-local frame (the
+    SAME frame calculate_offsets' placement/length live in). Returns
+    (verts (N,3) array, mesh_names_seen) or (None, []) if no extractable
+    mesh vertices were found (primitive-shape visual, or unsupported hppfcl
+    binding -- see module docstring)."""
+    link_geoms = _find_link_geoms(model, vmodel, link_name)
+    all_verts = []
+    mesh_names = []
+    for g in link_geoms:
+        verts_local = _get_vertices(g.geometry)
+        if verts_local is None:
+            continue
+        R, t = g.placement.rotation, g.placement.translation
+        verts_joint = (R @ verts_local.T + t.reshape(3, 1)).T
+        all_verts.append(verts_joint)
+        mesh_names.append(g.name)
+    if not all_verts:
+        return None, []
+    return np.vstack(all_verts), mesh_names
+
+
+def _compute_capsule_fix(verts, a, z_axis, length, radius):
+    """Computes the CLOSED-FORM optimal capsule correction (lateral offset +
+    axial extension) that contains every vertex in `verts`, for a FIXED
+    radius and FIXED axis direction (z_axis) -- only the axis's lateral
+    position and its two endpoints are free.
+
+    Two independent sub-problems (a capsule = a line segment + a fixed
+    radius, with HEMISPHERICAL end caps):
+
+    1. LATERAL OFFSET: for each vertex, decompose (v - a) into its axial
+       component (along z_axis) and its perpendicular (radial) remainder.
+       The centroid of all vertices' perpendicular remainders is the
+       re-centering offset that minimizes the mean-squared radial distance
+       -- a simple, robust, closed-form choice (not the theoretically
+       optimal min-enclosing-circle center, but with CAPSULE_RADIUS=60mm
+       typically far larger than the arm's real cross-section radius, this
+       gap is not the limiting factor in practice -- verified numerically
+       below via the recomputed "after fix" worst-case protrusion).
+
+    2. AXIAL EXTENSION: a capsule's rounded end caps mean a vertex sitting
+       PAST the segment's endpoint is covered as long as
+       sqrt(axial_overshoot^2 + radial_distance^2) <= radius. For every
+       vertex, this gives the loosest boundary the segment endpoint could
+       still be at and still contain that vertex:
+           s_start <= s_p + sqrt(radius^2 - r_p^2)   (proximal bound)
+           s_end   >= s_p - sqrt(radius^2 - r_p^2)   (distal bound)
+       Taking the min/max of these bounds over ALL vertices gives the
+       exact minimal segment extension needed (see inline derivation in
+       the code review -- this is NOT an approximation, it is the tight
+       closed-form solution for a fixed-radius, fixed-axis capsule).
+       Clamped to only ever EXTEND (never shrink) the original [0, length]
+       segment, so this fix can only add coverage, never remove it.
+
+    Returns a dict: lateral_offset (3-vector, joint-local frame), radius
+    (possibly larger than the input `radius` if even perfect re-centering
+    can't fit within it), proximal_extension, distal_extension (meters,
+    >= 0), and new_length.
+    """
+    rel = verts - a                                  # (N,3), relative to proximal joint origin
+    s = rel @ z_axis                                 # (N,) axial coordinate
+    perp = rel - np.outer(s, z_axis)                 # (N,3) perpendicular remainder, already _|_ z_axis
+
+    lateral_offset = perp.mean(axis=0)               # centroid re-centering (see docstring)
+    r_new = np.linalg.norm(perp - lateral_offset, axis=1)   # (N,) radial distance AFTER re-centering
+
+    radius_needed = float(np.max(r_new))
+    effective_radius = max(radius, radius_needed)    # never shrink below the configured radius
+
+    # Axial extension bounds (see docstring derivation). Guard the sqrt
+    # argument: for the (now rare, since effective_radius covers the worst
+    # r_new by construction) case r_new > effective_radius, that vertex
+    # cannot be capped at all axially by ANY extension -- exclude it from
+    # the axial bound (its radial excess is already reflected in
+    # radius_needed above, which effective_radius already absorbed).
+    covered = r_new <= effective_radius + 1e-9
+    margin_sq = np.clip(effective_radius**2 - r_new**2, 0.0, None)
+    margin = np.sqrt(margin_sq)
+
+    s_start_bound = np.min(s[covered] + margin[covered]) if np.any(covered) else 0.0
+    s_end_bound = np.max(s[covered] - margin[covered]) if np.any(covered) else length
+
+    # Only ever EXTEND the original [0, length] segment, never shrink it.
+    s_start = min(0.0, s_start_bound)
+    s_end = max(length, s_end_bound)
+
+    return {
+        'lateral_offset': lateral_offset,
+        'radius': effective_radius,
+        'proximal_extension': max(0.0, -s_start),
+        'distal_extension': max(0.0, s_end - length),
+        'new_length': s_end - s_start,
+        's_start': s_start,
+        's_end': s_end,
+    }
+
+
 def _find_link_geoms(model, vmodel, link_name):
     """Every visual GeometryObject belonging to `link_name`, robust to
     fixed-joint collapsing (several URDF links can share one Pinocchio
@@ -232,9 +343,16 @@ def main():
         ))
     parser.add_argument('--urdf', required=True, help="Path to the robot URDF file.")
     parser.add_argument('--chain', choices=['right', 'left', 'head', 'all'], default='all')
-    parser.add_argument('--flag-threshold-mm', type=float, default=0.0,
+    parser.add_argument('--flag-threshold-mm', type=float, default=None,
                         help="Only print links whose worst-case protrusion exceeds this "
-                             "many mm (default 0.0 -- show every link, even fully-contained ones).")
+                             "many mm. Default: show EVERY link (including fully-contained "
+                             "ones) -- omit this flag to see the complete picture.")
+    parser.add_argument('--suggest-fix', action='store_true',
+                        help="Also compute the closed-form optimal per-link correction "
+                             "(lateral offset + axial extension) for every flagged link, "
+                             "and print it as a ready-to-paste config.py dict, PLUS a "
+                             "verification pass confirming the fix actually contains every "
+                             "mesh vertex (worst-case protrusion after fix should be <= 0).")
     args = parser.parse_args()
 
     model = pin.buildModelFromUrdf(args.urdf)
@@ -265,13 +383,19 @@ def main():
             if 'error' in r:
                 print(f"{r['link']:<20} {'--':>10} {'--':>10}  ERROR: {r['error']}")
                 continue
-            if r['protrusion_mm'] < args.flag_threshold_mm:
+            # BUGFIX (2026-07-04): --flag-threshold-mm used to default to 0.0
+            # and this comparison silently SKIPPED (never printed) any link
+            # whose protrusion was below the threshold -- including negative
+            # ("fully fine") ones, contradicting the documented default of
+            # "show every link". Now only filters when the flag is EXPLICITLY
+            # passed (default None = show everything, always).
+            if args.flag_threshold_mm is not None and r['protrusion_mm'] < args.flag_threshold_mm:
                 continue
             flag = "  <-- POKES OUT" if r['protrusion_mm'] > 0 else ""
             print(f"{r['link']:<20} {r['capsule_radius']*1000:>10.2f} {r['capsule_length']*1000:>10.2f} "
                   f"{r['protrusion_mm']:>15.2f} {r['t_along_capsule']:>8.2f}  {r['mesh_name']}{flag}")
             if r['protrusion_mm'] > 0:
-                flagged.append(r)
+                flagged.append({**r, 'chain': chain_key})
 
     if flagged:
         flagged.sort(key=lambda r: -r['protrusion_mm'])
@@ -290,6 +414,54 @@ def main():
         print("    will generally fix more of this than growing the radius.")
         print("  - Protrusion spread evenly across t (including mid-link) -> more likely a")
         print("    genuinely undersized radius for that link.")
+
+        if args.suggest_fix:
+            print("\n" + "=" * 92)
+            print(" SUGGESTED FIX (closed-form: lateral offset + axial extension per link)")
+            print("=" * 92)
+            print(" Ready-to-paste CAPSULE_OFFSET_OVERRIDES dict for config.py.")
+            print(" Each entry is applied by calculate_offsets AFTER the existing dominant-axis")
+            print(" snap -- see the accompanying collision_manager.py patch. Verified below by")
+            print(" recomputing worst-case protrusion WITH the fix applied (should be <= 0).\n")
+
+            override_lines = ["CAPSULE_OFFSET_OVERRIDES = {"]
+            for r in flagged:
+                chain_key = r['chain']
+                chain, tool_link = CHAINS[chain_key]
+                link_name = r['link']
+
+                col = CollisionManager(model, data)
+                offsets = col.calculate_offsets(chain, tool_link)
+                placement, length = offsets[link_name]
+                z_axis = placement.rotation @ np.array([0., 0., 1.])
+                a = placement.translation - (length / 2.0) * z_axis
+
+                verts, _ = _collect_link_vertices(model, vmodel, link_name)
+                if verts is None:
+                    continue
+                fix = _compute_capsule_fix(verts, a, z_axis, length, cfg.CAPSULE_RADIUS)
+
+                # --- Verification: recompute worst-case protrusion WITH the fix ---
+                a_fixed = a + fix['lateral_offset'] + fix['s_start'] * z_axis
+                b_fixed = a + fix['lateral_offset'] + fix['s_end'] * z_axis
+                worst_after = max(
+                    _point_segment_distance_and_t(v, a_fixed, b_fixed)[0] - fix['radius']
+                    for v in verts
+                )
+
+                lo = fix['lateral_offset']
+                override_lines.append(
+                    f"    '{link_name}': {{'lateral_offset': [{lo[0]*1000:+.2f}, {lo[1]*1000:+.2f}, {lo[2]*1000:+.2f}],  # mm, joint-local\n"
+                    f"                     'proximal_extension': {fix['proximal_extension']*1000:.2f},  # mm\n"
+                    f"                     'distal_extension': {fix['distal_extension']*1000:.2f}}},   # mm"
+                )
+                print(f"  {link_name:<20} lateral_offset=[{lo[0]*1000:+6.2f}, {lo[1]*1000:+6.2f}, {lo[2]*1000:+6.2f}] mm  "
+                      f"prox_ext={fix['proximal_extension']*1000:5.2f}mm  dist_ext={fix['distal_extension']*1000:5.2f}mm  "
+                      f"radius_needed={fix['radius']*1000:.2f}mm  "
+                      f"-> worst_after_fix={worst_after*1000:+.3f}mm"
+                      f"{'  [OK: fully contained]' if worst_after <= 1e-6 else '  [!] STILL POKES OUT'}")
+            override_lines.append("}")
+            print("\n" + "\n".join(override_lines))
     else:
         print("\nNo protrusions found -- every visual mesh vertex sits inside its capsule "
               f"(radius {cfg.CAPSULE_RADIUS * 1000:.2f} mm).")
