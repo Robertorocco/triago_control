@@ -79,15 +79,40 @@ class VisualizationEngine:
         self.pub_cyl_obs_marker = self.node.create_publisher(Marker, '/cylinder_obstacle_marker', 10)
         self.pub_fly_obs_marker = self.node.create_publisher(Marker, '/flying_obstacle_marker', 10)
 
+    # Padding added to every dimension of the visual gripper box relative to
+    # the COLLISION gripper box it mirrors (see add_gripper_visual_boxes).
+    # Both boxes share the exact same parent joint + placement (same frame,
+    # same [0,0,0.05] offset) -- if they also share the exact same SIZE, the
+    # two hppfcl.Box surfaces are perfectly coincident. Meshcat renders BOTH
+    # (displayCollisions(True) AND displayVisuals(True)), so two coincident,
+    # alpha-blended surfaces z-fight: the GPU depth test has no stable winner
+    # at identical depth, so it flips pixel-to-pixel / frame-to-frame -- the
+    # reported "blinking" / meshes "fusing". This is independent of grasp
+    # state: it happens whenever the collision box is visible (default state
+    # and the 'opaque' attach state both leave it red/blue-visible -- see
+    # paint_grasp_intent/restore_object_color), simultaneously with the
+    # always-present orange visual box. Inflating the visual box by a small,
+    # symmetric margin (same center, strictly larger half-extents on every
+    # axis) makes its surface strictly farther from the shared center than
+    # the collision box's on all 6 sides -- guaranteeing zero coincident
+    # geometry, in EVERY grasp state, without touching any color-transition
+    # logic. Visually: a barely-perceptible ~5mm orange halo around the
+    # collision box, instead of a flicker.
+    GRIPPER_VISUAL_BOX_PADDING = 0.005  # [m] per-dimension
+
     def add_gripper_visual_boxes(self, col_manager):
-        # Mirror the collision gripper boxes into the visual model (semi-transparent orange).
+        # Mirror the collision gripper boxes into the visual model (semi-transparent
+        # orange), padded slightly larger to avoid z-fighting with the collision
+        # box -- see GRIPPER_VISUAL_BOX_PADDING above.
+        pad = self.GRIPPER_VISUAL_BOX_PADDING
         for side in ('right', 'left'):
             base_link = f'gripper_{side}_base_link'
             if self.model.existFrame(base_link):
                 frame_id = self.model.getFrameId(base_link)
                 parent_joint = self.model.frames[frame_id].parent
                 placement = self.model.frames[frame_id].placement * pin.SE3(np.eye(3), np.array([0.0, 0.0, 0.05]))
-                vis_obj = pin.GeometryObject(f"gripper_{side}_visual_box", parent_joint, placement, hppfcl.Box(0.05, 0.08, 0.25))
+                vis_obj = pin.GeometryObject(f"gripper_{side}_visual_box", parent_joint, placement,
+                                             hppfcl.Box(0.05 + pad, 0.08 + pad, 0.25 + pad))
                 vis_obj.meshColor = np.array([1.0, 0.5, 0.0, 0.4])
                 self.vmodel.addGeometryObject(vis_obj)
 

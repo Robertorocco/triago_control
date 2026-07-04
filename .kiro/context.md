@@ -1499,7 +1499,28 @@ not yet updated keeps working unchanged):
   discussion but NOT implemented -- deferred to a future request once
   camera-driven obstacles are actually needed.
 
-**Bugfix (same day, reported by operator via Meshcat -- a solid black wall
+**Bugfix #2 (same day, reported by operator via Meshcat -- the gripper mesh
+"blinks"/appears to fuse): pre-existing, unrelated to the world-scene
+refactor** (last touched in commit `71bcb00`, well before this session).
+`collision_manager.py`'s gripper COLLISION box (`gripper_{side}_collision_box`,
+`hppfcl.Box(0.05, 0.08, 0.25)`, colored red/blue) and
+`visualization_engine.add_gripper_visual_boxes`'s gripper VISUAL box
+(`gripper_{side}_visual_box`, orange, alpha 0.4) shared the EXACT SAME parent
+joint, placement, AND size -- two perfectly coincident hppfcl.Box surfaces,
+both rendered simultaneously by Meshcat (`displayCollisions(True)` AND
+`displayVisuals(True)`). Two alpha-blended surfaces at identical depth have
+no stable GPU depth-test winner, so rendering flips pixel-to-pixel /
+frame-to-frame -- the reported flicker. Happens in every state where the
+collision box is visible (default + the 'opaque' attach state -- see
+`paint_grasp_intent`/`restore_object_color`), independent of grasp phase.
+Fixed by inflating ONLY the visual box (never the collision box -- CBF/
+distance-query math in `cmodel` is completely untouched) by a small
+symmetric `GRIPPER_VISUAL_BOX_PADDING = 0.005` m margin on every dimension,
+so its surface is strictly farther from the shared center than the
+collision box's on all 6 sides -- a barely-visible ~5mm orange halo instead
+of a flicker, in every grasp state, with zero color-transition-logic changes.
+
+**Bugfix #1 (same day, reported by operator via Meshcat -- a solid black wall
 was visible even though the default world's `virtual_wall` has
 `collision: false`)**: the world_scene branch of `build_collision_model`
 originally created EVERY obstacle's hppfcl geometry unconditionally, and
