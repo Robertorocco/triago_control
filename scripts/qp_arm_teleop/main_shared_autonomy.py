@@ -79,6 +79,7 @@ from triago_control.shared_autonomy.goal_set import GoalSet, create_transform
 from triago_control.shared_autonomy.belief_estimator import BeliefEstimator
 from triago_control.shared_autonomy.grasp_state_machine import GraspStateMachine, TickInput, CLEAR_MARGIN
 import triago_control.qp_controller.config as cfg
+from triago_control.qp_controller.world_loader import load_world
 
 # Gazebo IFRA_LinkAttacher plugin service (kinematic grasp in simulation)
 try:
@@ -101,6 +102,24 @@ class SharedControlNode(Node):
     def __init__(self):
         """Initializes flags, delegate objects, weighting matrices, and ROS2 infrastructure."""
         super().__init__('shared_control_node')
+
+        # --- WORLD SCENE (2026-07-04) -------------------------------------
+        # Same world_name parameter as main_qp_controller.py -- MUST be set to
+        # the SAME value on both nodes (they must agree on where the red/blue
+        # cylinders actually are). Drives GoalSet's cylinder geometry table
+        # AND the Gazebo LinkAttacher model names below (self.cylinder_model),
+        # replacing what used to be two independent hard-coded copies of the
+        # same red/blue positions (goal_set.py's own default dict, and this
+        # node's `{'red': 'red_cylinder', 'blue': 'blue_cylinder'}`). See
+        # world_loader.py for the full schema / how to author a new world.
+        #   ros2 run triago_control main_shared_autonomy.py --ros-args \
+        #        -p world_name:=bimanual_default
+        self.declare_parameter('world_name', 'bimanual_default')
+        world_name = self.get_parameter('world_name').get_parameter_value().string_value
+        self.world_scene = load_world(world_name)
+        self.get_logger().info(
+            f"\033[96m[World] Loaded scene '{self.world_scene.world_name}' for "
+            f"shared autonomy (grasp_roles={self.world_scene.grasp_roles}).\033[0m")
 
         # --- Architecture Flags ---
         self.PREDICTION = True   # Update belief and evaluate all policies vs. just the active goal policy
@@ -155,7 +174,13 @@ class SharedControlNode(Node):
         self.active_arm = 'right'
 
         # --- Goal Set Definition (delegated to GoalSet) ---
-        self.goal_set = GoalSet()
+        # Cylinder geometry table built from the loaded world scene (2026-07-04)
+        # instead of GoalSet's own internal hard-coded Red/Blue defaults -- see
+        # _cylinders_from_world_scene below. Falls back to GoalSet(None) (its
+        # original hard-coded table) if the world scene is missing either role,
+        # so behavior is unchanged for a world YAML that doesn't define them.
+        cylinders = self._cylinders_from_world_scene(self.world_scene)
+        self.goal_set = GoalSet(cylinders=cylinders)
         self.target_keys = self.goal_set.target_keys
         self.active_goal_key = 'Red_Side'
 
@@ -271,7 +296,14 @@ class SharedControlNode(Node):
             'right': self.get_parameter('grasp_link_right').value,
             'left':  self.get_parameter('grasp_link_left').value,
         }
-        self.cylinder_model = {'red': 'red_cylinder', 'blue': 'blue_cylinder'}
+        # Gazebo model names for the LinkAttacher plugin -- resolved from the
+        # SAME world scene's grasp_roles (2026-07-04) instead of a second,
+        # independent hard-coded {'red': 'red_cylinder', ...} dict. The Gazebo
+        # .world file's <model name="..."> MUST match these names exactly (see
+        # world_loader.py's module docstring on keeping the YAML and the .world
+        # file in sync by hand).
+        self.cylinder_model = dict(self.world_scene.grasp_roles) if self.world_scene.grasp_roles \
+            else {'red': 'red_cylinder', 'blue': 'blue_cylinder'}
         self.cylinder_link = 'link'
         # Track what is currently attached so we can detach/re-attach across retries.
         self.plugin_attached = {}  # {arm: (model2_name, link2_name)}
@@ -817,6 +849,37 @@ class SharedControlNode(Node):
 
             rot_mat = R.from_euler('xyz', rpy).as_matrix()
             self.current_T_EE = create_transform(pos, rot_mat)
+
+    @staticmethod
+    def _cylinders_from_world_scene(world_scene):
+        """Builds GoalSet's `cylinders` dict from a loaded WorldScene (2026-07-04).
+
+        Resolves world_scene.grasp_roles['red'/'blue'] to their ObstacleSpec and
+        maps each to GoalSet's expected {'pos', 'height', 'radius', 'cbf_name'}
+        shape (see goal_set.py's GoalSet.__init__ docstring). `pos` is taken
+        from the YAML's static pose -- exactly mirroring how GoalSet's OWN
+        hard-coded default table used to encode it, just sourced from the
+        world scene instead. `cbf_name` is the obstacle's YAML `name`, which
+        collision_manager.py's world_scene branch uses verbatim as the hppfcl
+        GeometryObject name -- so this stays the correct CBF pair lookup key
+        by construction, no matter what a new world calls its cylinders.
+
+        Returns None (GoalSet then falls back to its own original hard-coded
+        Red/Blue table) if the world scene doesn't define both roles, so an
+        incomplete/legacy world YAML still produces a working node.
+        """
+        cylinders = {}
+        for color in ('red', 'blue'):
+            spec = world_scene.obstacle_for_role(color) if world_scene is not None else None
+            if spec is None or spec.shape != 'cylinder':
+                return None
+            cylinders[color.capitalize()] = {
+                'pos': np.array(spec.position, dtype=float),
+                'height': float(spec.size[1]),   # cylinder size = [radius, length]
+                'radius': float(spec.size[0]),
+                'cbf_name': spec.name,
+            }
+        return cylinders
 
     def collision_data_callback(self, msg):
         """Extracts Cartesian collision Jacobian dynamically based on the active arm.

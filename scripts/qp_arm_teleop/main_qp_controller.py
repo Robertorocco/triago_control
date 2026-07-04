@@ -43,6 +43,7 @@ from triago_control.qp_controller.shared_autonomy_handler import SharedAutonomyH
 from triago_control.qp_controller.qp_formulator import QPFormulator
 from triago_control.qp_controller.visualization_engine import VisualizationEngine
 from triago_control.qp_controller.reference_governor import ReferenceGovernor
+from triago_control.qp_controller.world_loader import load_world
 
 
 class SafetyQPController(Node):
@@ -54,6 +55,23 @@ class SafetyQPController(Node):
         # Configurable control frequency (replaces the hard-coded 1/300 target dt)
         self._control_freq = cfg.CONTROL_FREQ_DEFAULT
         self.loop_timer = None
+
+        # --- WORLD SCENE (2026-07-04) -----------------------------------
+        # Which obstacle layout (table + red/blue cylinders + optional extra
+        # obstacles) to build into the CBF's collision model. Independent of
+        # which Gazebo world was actually launched -- see world_loader.py's
+        # module docstring: the Gazebo launch command is UNCHANGED, this
+        # parameter only tells the QP/RViz/Meshcat side which YAML to mirror
+        # it with. Override at runtime, e.g.:
+        #   ros2 run triago_control main_qp_controller.py --ros-args \
+        #        -p world_name:=bimanual_default
+        self.declare_parameter('world_name', 'bimanual_default')
+        world_name = self.get_parameter('world_name').get_parameter_value().string_value
+        self.world_scene = load_world(world_name)
+        self.get_logger().info(
+            f"\033[96m[World] Loaded scene '{self.world_scene.world_name}' "
+            f"({len(self.world_scene.static_obstacles)} static obstacles; "
+            f"matching Gazebo world file: {self.world_scene.gazebo_world_file}).\033[0m")
 
         # --- TF (kept for the start-up transform wait) ---
         self.tf_buffer = Buffer()
@@ -103,10 +121,12 @@ class SafetyQPController(Node):
             head_offsets = self.col.calculate_offsets(cfg.HEAD_CHAIN, cfg.HEAD_TOOL_LINK)
         else:
             self.get_logger().warn("[Init] Head chain not found in URDF -- skipping head CBF obstacle.")
-        self.col.build_collision_model(right_offsets, left_offsets, head_offsets)
+        self.col.build_collision_model(right_offsets, left_offsets, head_offsets,
+                                       world_scene=self.world_scene)
         self.col.define_collision_pairs()
 
-        self.viz = VisualizationEngine(self, self.kin.model, self.col.cmodel, self.urdf_path)
+        self.viz = VisualizationEngine(self, self.kin.model, self.col.cmodel, self.urdf_path,
+                                       world_scene=self.world_scene)
         self.viz.add_gripper_visual_boxes(self.col)
         self.hri = SharedAutonomyHandler(self, self.col, self.kin, self.viz)
         self.qp = QPFormulator(self.kin.model)

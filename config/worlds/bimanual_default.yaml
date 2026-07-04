@@ -1,0 +1,73 @@
+# =============================================================================
+# bimanual_default.yaml
+# -----------------------------------------------------------------------------
+# Default world scene: table + red/blue graspable cylinders. Reproduces
+# EXACTLY the values that used to be hard-coded in qp_controller/config.py
+# (TABLE_POS/TABLE_SIZE/RED_CYLINDER_POS/BLUE_CYLINDER_POS/CYLINDER_SIZE) --
+# this file is a behavior-identical refactor target, not a new scenario.
+#
+# Matches the Gazebo world launched today via:
+#   ros2 launch triago_gazebo triago_gazebo.launch.py ... world_name:=tutorial
+#
+# See triago_control/qp_controller/world_loader.py for the full schema
+# documentation and how each field is consumed.
+#
+# HOW TO MAKE A NEW WORLD
+#   1. Copy this file to config/worlds/<your_world_name>.yaml.
+#   2. Edit `static_obstacles` poses/sizes/colors to match your new Gazebo
+#      world's SDF <model><pose>/<geometry> blocks (keep the two in sync by
+#      hand -- this YAML does not read the .world file, it must mirror it).
+#   3. Keep `grasp_roles` pointing at whichever obstacle names are the
+#      graspable red/blue cylinders in the new layout (rename `name:` fields
+#      freely, just update grasp_roles to match).
+#   4. Run with:
+#        ros2 run triago_control main_qp_controller.py --ros-args \
+#             -p world_name:=<your_world_name>
+#        ros2 run triago_control main_shared_autonomy.py --ros-args \
+#             -p world_name:=<your_world_name>
+#      (the Gazebo launch command itself is unchanged -- only point its
+#       world_name:= arg at the matching .world file yourself.)
+# =============================================================================
+
+world_name: "bimanual_default"
+gazebo_world_file: "tutorial.world"   # bookkeeping pointer only; not read by this loader
+
+static_obstacles:
+  - name: "work_table"
+    role: "table"
+    shape: "box"
+    pose: [1.0, 0.0, 0.35, 0.0, 0.0, 0.0]
+    size: [0.6, 0.5, 0.7]
+    color: [0.6, 0.4, 0.2, 0.8]
+    collision: true
+
+  - name: "red_cylinder"
+    role: "graspable"
+    shape: "cylinder"
+    pose: [0.800, -0.20, 0.775, 0.0, 0.0, 0.0]
+    size: [0.02, 0.15]          # [radius, length]
+    color: [1.0, 0.0, 0.0, 1.0]
+    collision: true
+
+  - name: "blue_cylinder"
+    role: "graspable"
+    shape: "cylinder"
+    pose: [0.800, 0.20, 0.775, 0.0, 0.0, 0.0]
+    size: [0.02, 0.15]
+    color: [0.0, 0.0, 1.0, 1.0]
+    collision: true
+
+  # Virtual wall: OFF by default (mirrors the old WALL_COLLIDER=False flag).
+  # Flip collision: true to enable it -- geometry/pose match the old
+  # WALL_POS/WALL_SIZE constants exactly.
+  - name: "virtual_wall"
+    role: "wall"
+    shape: "box"
+    pose: [0.5, 0.0, 0.5, 0.0, 0.0, 0.0]
+    size: [1.0, 0.02, 1.0]
+    color: [1.0, 0.5, 0.0, 0.5]
+    collision: false
+
+grasp_roles:
+  red: "red_cylinder"
+  blue: "blue_cylinder"

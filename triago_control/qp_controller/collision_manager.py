@@ -73,6 +73,7 @@ class CollisionManager:
         self.body_geom_ids = []
         self.gripper_box_ids = {}          # {'right': id, 'left': id}
         self.workspace_obstacle_ids = []
+        self.table_id = None               # set in build_collision_model (role=="table")
         self.top_active_pairs = []         # [(name1, name2, dist)] 3 closest enabled pairs (debug)
 
         # Lazy sets (built on first use in _arm_membership) for O(1) "does this
@@ -130,8 +131,16 @@ class CollisionManager:
                 print(f"  Failed {link_name}: {e}")
         return offsets
 
-    def build_collision_model(self, right_offsets, left_offsets, head_offsets=None):
+    def build_collision_model(self, right_offsets, left_offsets, head_offsets=None,
+                              world_scene=None):
         # Assemble the full collision geometry model: arms, grippers, body, ground, obstacles.
+        #
+        # `world_scene` (triago_control.qp_controller.world_loader.WorldScene, optional):
+        # the loaded world's static obstacle layout (table + red/blue cylinders +
+        # optional wall/extra obstacles -- see world_loader.py). When omitted, falls
+        # back to the legacy cfg.TABLE_POS/RED_CYLINDER_POS/... constants (section 6
+        # below), so any external caller that never passes a world_scene keeps the
+        # exact old, unchanged behavior.
 
         # 1. ARM CAPSULES (from the calculated, joint-relative offsets)
         def add_arm_geoms(offsets_data, prefix, id_list):
@@ -208,27 +217,82 @@ class CollisionManager:
         self.ground_id = self.cmodel.addGeometryObject(
             pin.GeometryObject("ground_plane", 0, ground_pose, hppfcl.Box(20.0, 20.0, 1.0)))
 
-        # 5. VIRTUAL WALL (XZ plane) -- optional
-        if cfg.WALL_COLLIDER:
-            wall_pose = pin.SE3.Identity()
-            wall_pose.translation = np.array(cfg.WALL_POS)
-            self.wall_id = self.cmodel.addGeometryObject(
-                pin.GeometryObject("virtual_wall", 0, wall_pose, hppfcl.Box(*cfg.WALL_SIZE)))
+        # 5+6. WORLD SCENE (virtual wall + bimanual workspace: table + graspable
+        # cylinders + any future extra obstacles) -- built GENERICALLY from a
+        # `world_scene.WorldScene` (see world_loader.py). Every obstacle in
+        # `world_scene.static_obstacles` becomes exactly one hppfcl geometry, at
+        # the SAME shape/pose/size the old hard-coded constants used to encode --
+        # only the SOURCE of those numbers changed (YAML instead of config.py).
+        #
+        # Legacy fallback: if no world_scene is passed (e.g. an older caller),
+        # rebuild the exact same objects from the deprecated cfg constants so
+        # behavior is byte-for-byte unchanged for anyone not yet passing a scene.
+        self._geom_id_by_obstacle_name = {}   # {obstacle name -> hppfcl geometry id}
+        if world_scene is not None:
+            for obs in world_scene.static_obstacles:
+                pose = pin.SE3(np.eye(3), np.array(obs.position, dtype=float))
+                if obs.shape == 'box':
+                    shape = hppfcl.Box(*obs.size)
+                elif obs.shape == 'cylinder':
+                    shape = hppfcl.Cylinder(*obs.size)
+                else:
+                    print(f"[Collision] WARNING: unknown obstacle shape "
+                          f"'{obs.shape}' for '{obs.name}' -- skipped.")
+                    continue
 
-        # 6. BIMANUAL WORKSPACE (table + red/blue cylinders)
-        table_pose = pin.SE3(np.eye(3), np.array(cfg.TABLE_POS))
-        self.workspace_obstacle_ids.append(self.cmodel.addGeometryObject(
-            pin.GeometryObject("work_table", 0, table_pose, hppfcl.Box(*cfg.TABLE_SIZE))))
+                geom_id = self.cmodel.addGeometryObject(
+                    pin.GeometryObject(obs.name, 0, pose, shape))
+                self._geom_id_by_obstacle_name[obs.name] = geom_id
 
-        red_pose = pin.SE3(np.eye(3), np.array(cfg.RED_CYLINDER_POS))
-        self.red_cyl_id = self.cmodel.addGeometryObject(
-            pin.GeometryObject("red_cylinder", 0, red_pose, hppfcl.Cylinder(*cfg.CYLINDER_SIZE)))
-        self.workspace_obstacle_ids.append(self.red_cyl_id)
+                if not obs.collision:
+                    continue  # geometry exists (for viz) but never checked -- mirrors
+                              # the old WALL_COLLIDER=False behavior, generalized.
 
-        blue_pose = pin.SE3(np.eye(3), np.array(cfg.BLUE_CYLINDER_POS))
-        self.blue_cyl_id = self.cmodel.addGeometryObject(
-            pin.GeometryObject("blue_cylinder", 0, blue_pose, hppfcl.Cylinder(*cfg.CYLINDER_SIZE)))
-        self.workspace_obstacle_ids.append(self.blue_cyl_id)
+                if obs.role == 'wall':
+                    self.wall_id = geom_id
+                else:
+                    self.workspace_obstacle_ids.append(geom_id)
+                    if obs.role == 'table':
+                        # Explicit, name-based reference (NOT positional --
+                        # see detach_object, which used to assume the table
+                        # was always workspace_obstacle_ids[0]; a future world
+                        # with obstacles listed in a different order would have
+                        # silently broken that assumption).
+                        self.table_id = geom_id
+
+            # Resolve the grasp-role indirection (today's grasp state machine,
+            # shared_autonomy_handler, and visualization_engine all key on the
+            # literal attribute names `red_cyl_id`/`blue_cyl_id` -- this keeps
+            # every one of those call sites working unchanged, just pointed at
+            # whichever named obstacle plays that role in THIS world).
+            red_name = world_scene.grasp_roles.get('red')
+            blue_name = world_scene.grasp_roles.get('blue')
+            if red_name and red_name in self._geom_id_by_obstacle_name:
+                self.red_cyl_id = self._geom_id_by_obstacle_name[red_name]
+            if blue_name and blue_name in self._geom_id_by_obstacle_name:
+                self.blue_cyl_id = self._geom_id_by_obstacle_name[blue_name]
+        else:
+            # --- Legacy path (no world_scene given): unchanged from before. ---
+            if cfg.WALL_COLLIDER:
+                wall_pose = pin.SE3.Identity()
+                wall_pose.translation = np.array(cfg.WALL_POS)
+                self.wall_id = self.cmodel.addGeometryObject(
+                    pin.GeometryObject("virtual_wall", 0, wall_pose, hppfcl.Box(*cfg.WALL_SIZE)))
+
+            table_pose = pin.SE3(np.eye(3), np.array(cfg.TABLE_POS))
+            self.table_id = self.cmodel.addGeometryObject(
+                pin.GeometryObject("work_table", 0, table_pose, hppfcl.Box(*cfg.TABLE_SIZE)))
+            self.workspace_obstacle_ids.append(self.table_id)
+
+            red_pose = pin.SE3(np.eye(3), np.array(cfg.RED_CYLINDER_POS))
+            self.red_cyl_id = self.cmodel.addGeometryObject(
+                pin.GeometryObject("red_cylinder", 0, red_pose, hppfcl.Cylinder(*cfg.CYLINDER_SIZE)))
+            self.workspace_obstacle_ids.append(self.red_cyl_id)
+
+            blue_pose = pin.SE3(np.eye(3), np.array(cfg.BLUE_CYLINDER_POS))
+            self.blue_cyl_id = self.cmodel.addGeometryObject(
+                pin.GeometryObject("blue_cylinder", 0, blue_pose, hppfcl.Cylinder(*cfg.CYLINDER_SIZE)))
+            self.workspace_obstacle_ids.append(self.blue_cyl_id)
 
         # Finalize the per-arm membership sets used by _arm_membership to split
         # the SoftMin CBF into independent per-arm barriers (right_geom_ids /
@@ -426,7 +490,10 @@ class CollisionManager:
         # explodes the SoftMin. The original pre-grasp world never had this pair
         # (cylinders on the table are in workspace_obstacle_ids and only check vs
         # the arms, not vs the table). Also remove cylinder↔ground for the same reason.
-        table_id = self.workspace_obstacle_ids[0] if self.workspace_obstacle_ids else None
+        # Explicit, name/role-based reference (see build_collision_model's
+        # world_scene branch, which sets self.table_id from the obstacle whose
+        # role=="table" -- NOT assumed to be workspace_obstacle_ids[0]).
+        table_id = getattr(self, 'table_id', None)
         pairs_to_remove = []
         for k in range(len(self.cmodel.collisionPairs)):
             cp = self.cmodel.collisionPairs[k]

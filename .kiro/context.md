@@ -1,7 +1,9 @@
 # AI Agent Context — triago_control
 
 > **This file is maintained by the AI agent. Do not edit manually.**
-> Last updated: 2026-07-04 (§9.11 follow-up #3: `fig6_reference_governor`
+> Last updated: 2026-07-04 (§9.12 NEW: world-scene YAML loading, replacing
+> hard-coded obstacle constants -- see §9.12 below for the full design.)
+> Earlier: 2026-07-04 (§9.11 follow-up #3: `fig6_reference_governor`
 > styling fix -- the "commanded" (raw) curve is now DASHED instead of
 > solid+alpha for both arms, while "governed" stays SOLID. Rationale: with
 > both curves solid+alpha, overlapping Right/Left commanded lines
@@ -1392,6 +1394,119 @@ truth shared by `trajectory_generator.py` (publisher) and
 
 **Registered as a `ros2 run` entry point** in `CMakeLists.txt`, alongside
 `plotter.py`: `ros2 run triago_control offline_plotter.py`.
+
+---
+
+### 9.12 World-scene YAML loading (2026-07-04) -- replaces hard-coded obstacles
+
+**Problem**: the workspace obstacles (table + red/blue graspable cylinders +
+optional virtual wall) used to be hard-coded numeric constants in
+`config.py` §6 (`TABLE_POS`, `RED_CYLINDER_POS`, `BLUE_CYLINDER_POS`,
+`CYLINDER_SIZE`, `TABLE_SIZE`, `WALL_POS`, `WALL_SIZE`), read DIRECTLY by
+`collision_manager.py` and `visualization_engine.py`. The SAME numbers were
+ALSO independently hard-coded in THREE more places that had to be kept in
+sync by hand: `goal_set.py`'s `GoalSet.__init__` default `cylinders` dict,
+`head_control/config.py`'s `GT_RED_CENTER`/`TABLE_CENTER_WORLD`/etc
+(ground-truth for the perception pipeline's diagnostics), and this node's
+OWN `self.cylinder_model` dict for the Gazebo LinkAttacher plugin in
+`main_shared_autonomy.py`. Testing a new Gazebo world (different table pose,
+different cylinder size/count) meant hand-editing 3-4 files with no
+guarantee they'd agree -- and no way to keep multiple world variants around
+at once. There was even a dead, never-wired flag (`cfg.PINHOLE_TASK`) left
+over from an earlier, unfinished attempt at exactly this idea.
+
+**Design**: one interchange format -- a small YAML file per world scenario,
+under `config/worlds/<world_name>.yaml` -- fully describing that world's
+static obstacle layout (shape/pose/size/color/collision-on-off) plus which
+named obstacle plays the "red"/"blue" grasp role. See
+`triago_control/qp_controller/world_loader.py`'s module docstring for the
+full schema, and `config/worlds/bimanual_default.yaml` for the reference
+world (reproduces the OLD hard-coded values exactly -- verified numerically
+byte-for-byte against the previous constants, this refactor changes NO
+runtime behavior for the default world).
+
+**New module**: `world_loader.py` -- `ObstacleSpec` (one obstacle: name,
+role, shape, pose, size, color, collision) + `WorldScene` (the parsed YAML:
+a list of `ObstacleSpec` + a `grasp_roles: {red: <name>, blue: <name>}`
+dict) + `load_world(world_name)` (resolves via ament share dir first, then a
+source-tree fallback, mirroring `trajectory_generator.py`'s existing
+`config_file` resolution convention).
+
+**Wiring** (every consumer takes an OPTIONAL `world_scene` -- omitting it
+falls back to the exact old hard-coded-constants code path, so any caller
+not yet updated keeps working unchanged):
+- `collision_manager.CollisionManager.build_collision_model(..., world_scene=None)`:
+  loops `world_scene.static_obstacles` generically, creating one hppfcl Box/
+  Cylinder per entry (replaces the old table/red/blue/wall bespoke blocks).
+  Resolves `self.red_cyl_id`/`self.blue_cyl_id` (relied on everywhere --
+  grasp state machine, shared_autonomy_handler, visualization_engine) from
+  `world_scene.grasp_roles`, and `self.table_id` from the obstacle whose
+  `role=="table"` (previously `detach_object` assumed the table was always
+  `workspace_obstacle_ids[0]` -- now explicit and name/role-based, robust to
+  a future world listing obstacles in a different order).
+- `visualization_engine.VisualizationEngine(..., world_scene=None)`:
+  `publish_obstacle_marker`/`publish_wall_marker`/`color_collision_model`/
+  `restore_object_color` all iterate/color from `world_scene` generically
+  (replaces the old `"red" in name` / `"blue" in name` string-matching
+  heuristic with a direct YAML color lookup).
+- `main_qp_controller.py` / `main_shared_autonomy.py`: both declare a
+  `world_name` ROS parameter (default `'bimanual_default'`) and call
+  `load_world(world_name)` at startup, logging which scene + how many
+  obstacles were loaded. **Both nodes must be given the SAME `world_name`**
+  (they must agree on where the cylinders are) -- e.g.:
+  ```bash
+  ros2 run triago_control main_qp_controller.py --ros-args -p world_name:=bimanual_default
+  ros2 run triago_control main_shared_autonomy.py --ros-args -p world_name:=bimanual_default
+  ```
+- `main_shared_autonomy.py`'s `GoalSet` is now constructed from a new
+  `_cylinders_from_world_scene(world_scene)` static helper (maps
+  `world_scene.obstacle_for_role('red'/'blue')` to GoalSet's expected
+  `{'pos', 'height', 'radius', 'cbf_name'}` shape; falls back to `GoalSet`'s
+  own original hard-coded table if the scene doesn't define both roles) --
+  verified numerically to produce the IDENTICAL dict `GoalSet.__init__`'s
+  old hard-coded default used to build. Its `self.cylinder_model` dict (the
+  Gazebo LinkAttacher plugin's model names) is now `world_scene.grasp_roles`
+  directly, replacing a second independent hard-coded `{'red':
+  'red_cylinder', 'blue': 'blue_cylinder'}` dict.
+
+**Explicitly OUT of scope for this pass** (per instruction):
+- The Gazebo launch command is UNCHANGED
+  (`ros2 launch triago_gazebo ... world_name:=tutorial`) -- this module has
+  NO connection to Gazebo; it only describes, on the Pinocchio/hppfcl/RViz
+  side, the SAME layout the chosen `.world` file already spawns. Keeping a
+  new world's YAML in sync with its matching `.world` file's `<pose>`/
+  `<geometry>` blocks is a manual, single-file bookkeeping step (see the
+  `gazebo_world_file` field, informational only, not read by this loader).
+- `trajectory_endpoints.yaml` (open-loop test presets) is untouched -- these
+  new worlds are teleoperation-driven, not open-loop-preset-driven; some
+  presets (e.g. `local_minima_table`) assume the DEFAULT table pose and
+  would need a per-world variant if ever reused against a world that moves
+  the table -- not addressed here.
+- `head_control/config.py`'s OWN duplicated ground-truth constants
+  (`GT_RED_CENTER` etc.) are NOT yet sourced from the world scene -- still a
+  4th, separate hard-coded copy, flagged as a known follow-up, not done in
+  this pass (the head/perception subsystem was out of scope for this
+  request).
+- Camera-fed (perception-driven) obstacles: `ObstacleSpec.source` /
+  `CollisionManager.update_dynamic_obstacle(...)` (a live-pose-mutation
+  entry point generalizing the pattern already used by
+  `detach_object`/`add_attached_object_pairs`) were proposed in the planning
+  discussion but NOT implemented -- deferred to a future request once
+  camera-driven obstacles are actually needed.
+
+**Legacy/deprecated constants**: `config.py` §1 (`WALL_COLLIDER`,
+`PINHOLE_TASK` -- the latter marked `[DEAD FLAG]`) and §6
+(`TABLE_POS`/`TABLE_SIZE`/`RED_CYLINDER_POS`/`BLUE_CYLINDER_POS`/
+`CYLINDER_SIZE`/`WALL_POS`/`WALL_SIZE`) are KEPT (not deleted) purely as the
+legacy fallback path consumed when `world_scene=None`. New obstacles should
+be added to a world YAML, not to `config.py`.
+
+**New file**: `config/worlds/bimanual_default.yaml`. `package.xml` gained a
+`python3-yaml` dependency (already transitively required by
+`trajectory_generator.py`'s pre-existing `import yaml`, now made explicit
+since `world_loader.py` is a second load-bearing import site). No
+`CMakeLists.txt` change needed -- `config/worlds/` installs automatically
+under the existing `install(DIRECTORY config ...)` rule.
 
 ---
 

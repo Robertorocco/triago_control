@@ -21,9 +21,18 @@ import numpy as np
 # =============================================================================
 # 1. BOOLEAN FEATURE FLAGS
 # =============================================================================
-WALL_COLLIDER = False          # Enable the virtual collision wall (XZ plane)
+# WALL_COLLIDER: DEPRECATED (2026-07-04) -- only consulted by
+# collision_manager.py's LEGACY (world_scene=None) fallback path. To enable/
+# disable the wall in a world loaded via world_loader.py, set that world's
+# YAML `virtual_wall` obstacle's `collision:` field instead (see
+# config/worlds/bimanual_default.yaml, where it is False, matching this).
+WALL_COLLIDER = False          # Enable the virtual collision wall (XZ plane) [legacy path only]
 FLYING_OBSTACLE = False         # Enable the flying obstacle marker / collider
-PINHOLE_TASK = True             # Load the obstacle set from the PINHOLE world
+# PINHOLE_TASK: dead flag, never wired to any code path (kept only so any
+# external reference to it doesn't raise AttributeError). Superseded by the
+# `world_name` ROS parameter on main_qp_controller.py / main_shared_autonomy.py
+# -- see world_loader.py.
+PINHOLE_TASK = True             # Load the obstacle set from the PINHOLE world [DEAD FLAG]
 DEBUG = False                   # Verbose timing / kinematics console tracing
 GRASP_DEBUG = True              # Verbose grasp / CBF-bypass interaction tracing
 DISABLE_CBF = False             # Mathematically delete the collision barrier
@@ -440,6 +449,23 @@ GRIPPER_SLIDER_ROW = ['gripper_left_finger_joint', 'gripper_right_finger_joint']
 # =============================================================================
 CAPSULE_RADIUS = 0.06                 # Radius of the arm collision capsules
 
+# --- DEPRECATED (2026-07-04): world scene obstacles now live in YAML --------
+# TABLE_POS/TABLE_SIZE/RED_CYLINDER_POS/BLUE_CYLINDER_POS/CYLINDER_SIZE/
+# WALL_POS/WALL_SIZE/WALL_COLLIDER (section 1) are SUPERSEDED by
+# config/worlds/<world_name>.yaml, loaded via world_loader.load_world() and
+# passed as `world_scene` into CollisionManager.build_collision_model() /
+# VisualizationEngine(...). See world_loader.py's module docstring for the
+# full schema and how to author a new world (different table/cylinder pose or
+# size, extra obstacles for a harder task, etc.) -- and main_qp_controller.py /
+# main_shared_autonomy.py's `world_name` ROS parameter to select one at
+# runtime, e.g.:
+#   ros2 run triago_control main_qp_controller.py --ros-args -p world_name:=bimanual_default
+#
+# These constants are KEPT (not deleted) purely as the LEGACY FALLBACK path:
+# any call site that constructs CollisionManager/VisualizationEngine WITHOUT
+# passing a world_scene (world_scene=None) still reads these exact values, so
+# behavior for such a caller is byte-for-byte unchanged. Do not add new
+# obstacles here -- add them to a world YAML instead.
 CYLINDER_SIZE = [0.02, 0.15]          # [Radius, Length] of the workspace cylinders
 RED_CYLINDER_POS = [0.800, -0.20, 0.775]
 BLUE_CYLINDER_POS = [0.800, 0.20, 0.775]

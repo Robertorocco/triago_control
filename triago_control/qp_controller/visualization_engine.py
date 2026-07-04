@@ -43,11 +43,16 @@ except Exception:
 class VisualizationEngine:
     """Manages Meshcat, RViz markers and grasp-intent coloring (thread-safe)."""
 
-    def __init__(self, node, model, cmodel, urdf_path):
+    def __init__(self, node, model, cmodel, urdf_path, world_scene=None):
         self.node = node
         self.model = model
         self.cmodel = cmodel
         self.urdf_path = urdf_path
+        # Loaded world scene (world_loader.WorldScene, optional) -- drives
+        # publish_obstacle_marker/publish_wall_marker/color_collision_model
+        # generically. None falls back to the legacy cfg.TABLE_POS/etc.
+        # constants everywhere below, so an older caller keeps working as-is.
+        self.world_scene = world_scene
 
         # Build the visual ("skin") model from the URDF, tinted as a green ghost
         try:
@@ -109,16 +114,31 @@ class VisualizationEngine:
             self.cmodel.geometryObjects[col_manager.ground_id].meshColor = np.array([0.5, 0.5, 0.5, 0.5])
             self.cmodel.geometryObjects[col_manager.ground_id].overrideMaterial = True
         for obs_id in getattr(col_manager, 'workspace_obstacle_ids', []):
-            if obs_id < len(self.cmodel.geometryObjects):
-                name = self.cmodel.geometryObjects[obs_id].name
+            if obs_id >= len(self.cmodel.geometryObjects):
+                continue
+            name = self.cmodel.geometryObjects[obs_id].name
+            # World-scene-driven color (2026-07-04): read straight from the
+            # loaded YAML's `color` field for this named obstacle -- replaces
+            # the old "red"/"blue" string-matching on the geometry name, which
+            # only ever worked because those two literal names happened to be
+            # hard-coded. A world_scene obstacle can now be named/colored
+            # however the new world requires. Falls back to the legacy
+            # string-match heuristic when no world_scene is available (older
+            # caller / legacy cfg-constants path in build_collision_model).
+            color = None
+            if self.world_scene is not None:
+                spec = self.world_scene.get_obstacle(name)
+                if spec is not None:
+                    color = [float(c) for c in spec.color]  # [r, g, b, a] straight from YAML
+            if color is None:
                 if "red" in name:
                     color = [1.0, 0.0, 0.0, 0.8]
                 elif "blue" in name:
                     color = [0.0, 0.0, 1.0, 0.8]
                 else:  # table
                     color = [0.6, 0.4, 0.2, 0.8]
-                self.cmodel.geometryObjects[obs_id].meshColor = np.array(color)
-                self.cmodel.geometryObjects[obs_id].overrideMaterial = True
+            self.cmodel.geometryObjects[obs_id].meshColor = np.array(color)
+            self.cmodel.geometryObjects[obs_id].overrideMaterial = True
 
     def init_meshcat(self, q_provider, col_manager=None):
         # Initialize the Meshcat viewer and spawn the single viewer-owning thread.
@@ -176,7 +196,13 @@ class VisualizationEngine:
         if self.viz_meshcat is None:
             return
         cyl_id = col_manager.red_cyl_id if color == "red" else col_manager.blue_cyl_id
-        default = np.array([1.0, 0.0, 0.0, 1.0]) if color == "red" else np.array([0.0, 0.0, 1.0, 1.0])
+        default = None
+        if self.world_scene is not None:
+            spec = self.world_scene.obstacle_for_role(color)
+            if spec is not None:
+                default = np.array([float(c) for c in spec.color])
+        if default is None:
+            default = np.array([1.0, 0.0, 0.0, 1.0]) if color == "red" else np.array([0.0, 0.0, 1.0, 1.0])
 
         with self.meshcat_lock:
             if cyl_id < len(self.cmodel.geometryObjects):
@@ -209,42 +235,51 @@ class VisualizationEngine:
             time.sleep(0.2)
 
     def publish_obstacle_marker(self, hri=None):
-        # Publish the workspace obstacles (table + cylinders) to RViz, with grasp coloring.
-        marker_table = Marker()
-        marker_table.header.frame_id = "base_footprint"
-        marker_table.header.stamp = self.node.get_clock().now().to_msg()
-        marker_table.ns = "workspace"
-        marker_table.id = 0
-        marker_table.type = Marker.CUBE
-        marker_table.action = Marker.ADD
-        marker_table.pose.position.x, marker_table.pose.position.y, marker_table.pose.position.z = cfg.TABLE_POS
-        marker_table.pose.orientation.w = 1.0
-        marker_table.scale.x, marker_table.scale.y, marker_table.scale.z = cfg.TABLE_SIZE
-        marker_table.color.r, marker_table.color.g, marker_table.color.b, marker_table.color.a = 0.6, 0.4, 0.2, 0.8
-        self.pub_cyl_obs_marker.publish(marker_table)
+        # Publish the workspace obstacles (table + cylinders + any future extra
+        # obstacles) to RViz, with grasp coloring. Iterates `self.world_scene`
+        # generically (2026-07-04) -- replaces the old two-cylinders-hard-coded
+        # version; falls back to the legacy fixed table+red+blue triple when no
+        # world_scene was loaded, so behavior is unchanged for that path.
+        header = Marker()
+        header.header.frame_id = "base_footprint"
+        header.header.stamp = self.node.get_clock().now().to_msg()
 
         # Build the grasp-active id set so cylinders turn orange while grasped/attached
         grasp_active_ids = set()
         if hri is not None:
             grasp_active_ids = set(hri.grasp_margin_targets.keys()) | set(hri.attached_objects)
 
-        def create_cyl_marker(m_id, pos, name, default_color, cyl_id_for_name):
+        col_manager = getattr(self.node, 'col', None) if hasattr(self.node, 'col') else None
+
+        def geom_id_for_name(name):
+            if col_manager is None:
+                return None
+            by_name = getattr(col_manager, '_geom_id_by_obstacle_name', None)
+            if by_name and name in by_name:
+                return by_name[name]
+            return None
+
+        def create_marker(m_id, obs, cyl_id_for_name):
             m = Marker()
-            m.header = marker_table.header
+            m.header = header.header
             m.ns = "workspace"
             m.id = m_id
-            m.type = Marker.CYLINDER
+            m.type = Marker.CYLINDER if obs.shape == 'cylinder' else Marker.CUBE
             m.action = Marker.ADD
 
-            # Use the LIVE collision-geometry pose so the cylinder follows the
-            # gripper once it has been re-parented (grasped). Before grasp this
-            # equals the static workspace pose; after grasp it tracks the wrist.
-            attached = cyl_id_for_name in set(hri.attached_objects) if hri is not None else False
+            # Use the LIVE collision-geometry pose so a graspable obstacle
+            # follows the gripper once it has been re-parented (grasped).
+            # Before grasp this equals the static workspace pose; after grasp
+            # it tracks the wrist. Static-only obstacles (table, wall) simply
+            # never appear in hri.attached_objects, so this is always a no-op
+            # fallback to the YAML pose for them.
+            attached = (hri is not None and cyl_id_for_name is not None
+                       and cyl_id_for_name in set(hri.attached_objects))
             live_pose = None
-            if cyl_id_for_name is not None and hasattr(self.node, 'col') \
-                    and hasattr(self.node.col, 'cdata') \
-                    and cyl_id_for_name < len(self.node.col.cdata.oMg):
-                live_pose = self.node.col.cdata.oMg[cyl_id_for_name]
+            if cyl_id_for_name is not None and col_manager is not None \
+                    and hasattr(col_manager, 'cdata') \
+                    and cyl_id_for_name < len(col_manager.cdata.oMg):
+                live_pose = col_manager.cdata.oMg[cyl_id_for_name]
 
             if live_pose is not None:
                 p = live_pose.translation
@@ -253,26 +288,57 @@ class VisualizationEngine:
                 m.pose.orientation.x = float(quat.x); m.pose.orientation.y = float(quat.y)
                 m.pose.orientation.z = float(quat.z); m.pose.orientation.w = float(quat.w)
             else:
-                m.pose.position.x, m.pose.position.y, m.pose.position.z = pos
+                m.pose.position.x, m.pose.position.y, m.pose.position.z = [float(v) for v in obs.position]
                 m.pose.orientation.w = 1.0
 
-            m.scale.x, m.scale.y, m.scale.z = float(cfg.CYLINDER_SIZE[0] * 2), float(cfg.CYLINDER_SIZE[0] * 2), float(cfg.CYLINDER_SIZE[1])
+            if obs.shape == 'cylinder':
+                m.scale.x, m.scale.y, m.scale.z = float(obs.size[0] * 2), float(obs.size[0] * 2), float(obs.size[1])
+            else:
+                m.scale.x, m.scale.y, m.scale.z = [float(v) for v in obs.size]
+
             if attached:
                 # Grasped object rendered grey, at its live (gripper-following) pose
                 m.color.r, m.color.g, m.color.b, m.color.a = 0.5, 0.5, 0.5, 1.0
             elif cfg.DYNAMIC_CBF and cyl_id_for_name in grasp_active_ids:
                 m.color.r, m.color.g, m.color.b, m.color.a = 1.0, 0.5, 0.0, 1.0
             else:
-                m.color.r, m.color.g, m.color.b, m.color.a = default_color
+                m.color.r, m.color.g, m.color.b, m.color.a = [float(c) for c in obs.color]
             return m
 
-        red_id = getattr(self.node.col, 'red_cyl_id', None) if hasattr(self.node, 'col') else None
-        blue_id = getattr(self.node.col, 'blue_cyl_id', None) if hasattr(self.node, 'col') else None
-        self.pub_cyl_obs_marker.publish(create_cyl_marker(1, cfg.RED_CYLINDER_POS, "red_cylinder", (1.0, 0.0, 0.0, 1.0), red_id))
-        self.pub_cyl_obs_marker.publish(create_cyl_marker(2, cfg.BLUE_CYLINDER_POS, "blue_cylinder", (0.0, 0.0, 1.0, 1.0), blue_id))
+        if self.world_scene is not None:
+            for i, obs in enumerate(self.world_scene.static_obstacles):
+                if obs.role == 'wall':
+                    continue  # the wall keeps its own dedicated publish_wall_marker
+                if not obs.collision and obs.role != 'table':
+                    continue  # non-colliding, non-table extras: skip (nothing to show yet)
+                cyl_id = geom_id_for_name(obs.name)
+                self.pub_cyl_obs_marker.publish(create_marker(i, obs, cyl_id))
+        else:
+            # --- Legacy path (no world_scene loaded): unchanged from before. ---
+            from types import SimpleNamespace
+            legacy_table = SimpleNamespace(shape='box', position=cfg.TABLE_POS, size=cfg.TABLE_SIZE,
+                                           color=(0.6, 0.4, 0.2, 0.8), role='table')
+            legacy_red = SimpleNamespace(shape='cylinder', position=cfg.RED_CYLINDER_POS,
+                                         size=cfg.CYLINDER_SIZE, color=(1.0, 0.0, 0.0, 1.0), role='graspable')
+            legacy_blue = SimpleNamespace(shape='cylinder', position=cfg.BLUE_CYLINDER_POS,
+                                          size=cfg.CYLINDER_SIZE, color=(0.0, 0.0, 1.0, 1.0), role='graspable')
+            red_id = getattr(col_manager, 'red_cyl_id', None) if col_manager is not None else None
+            blue_id = getattr(col_manager, 'blue_cyl_id', None) if col_manager is not None else None
+            self.pub_cyl_obs_marker.publish(create_marker(0, legacy_table, None))
+            self.pub_cyl_obs_marker.publish(create_marker(1, legacy_red, red_id))
+            self.pub_cyl_obs_marker.publish(create_marker(2, legacy_blue, blue_id))
 
     def publish_wall_marker(self):
-        # Publish the virtual wall as a transparent orange cube in RViz.
+        # Publish the virtual wall as a transparent cube in RViz. Reads pose/
+        # size/color from the loaded world_scene's role=="wall" obstacle when
+        # available (2026-07-04); falls back to the legacy cfg.WALL_POS/
+        # WALL_SIZE constants otherwise, so behavior is unchanged for that path.
+        wall = self.world_scene.get_obstacle_by_role('wall') if self.world_scene is not None else None
+        if wall is not None:
+            pos, size, color = wall.position, wall.size, wall.color
+        else:
+            pos, size, color = cfg.WALL_POS, cfg.WALL_SIZE, (1.0, 0.5, 0.0, 0.5)
+
         m = Marker()
         m.header.frame_id = 'base_link'
         m.header.stamp = self.node.get_clock().now().to_msg()
@@ -280,14 +346,14 @@ class VisualizationEngine:
         m.id = 99
         m.type = Marker.CUBE
         m.action = Marker.ADD
-        m.pose.position.x = float(cfg.WALL_POS[0])
-        m.pose.position.y = float(cfg.WALL_POS[1])
-        m.pose.position.z = float(cfg.WALL_POS[2])
+        m.pose.position.x = float(pos[0])
+        m.pose.position.y = float(pos[1])
+        m.pose.position.z = float(pos[2])
         m.pose.orientation.w = 1.0
-        m.scale.x = float(cfg.WALL_SIZE[0])
-        m.scale.y = float(cfg.WALL_SIZE[1])
-        m.scale.z = float(cfg.WALL_SIZE[2])
-        m.color.r, m.color.g, m.color.b, m.color.a = 1.0, 0.5, 0.0, 0.5
+        m.scale.x = float(size[0])
+        m.scale.y = float(size[1])
+        m.scale.z = float(size[2])
+        m.color.r, m.color.g, m.color.b, m.color.a = [float(c) for c in color]
         self.pub_wall_marker.publish(m)
 
     def publish_debug(self, *args, **kwargs):
