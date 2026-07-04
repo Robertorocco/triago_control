@@ -1500,25 +1500,41 @@ not yet updated keeps working unchanged):
   camera-driven obstacles are actually needed.
 
 **Bugfix #2 (same day, reported by operator via Meshcat -- the gripper mesh
-"blinks"/appears to fuse): pre-existing, unrelated to the world-scene
+"blinks" orange/purple): pre-existing, unrelated to the world-scene
 refactor** (last touched in commit `71bcb00`, well before this session).
-`collision_manager.py`'s gripper COLLISION box (`gripper_{side}_collision_box`,
-`hppfcl.Box(0.05, 0.08, 0.25)`, colored red/blue) and
-`visualization_engine.add_gripper_visual_boxes`'s gripper VISUAL box
-(`gripper_{side}_visual_box`, orange, alpha 0.4) shared the EXACT SAME parent
-joint, placement, AND size -- two perfectly coincident hppfcl.Box surfaces,
-both rendered simultaneously by Meshcat (`displayCollisions(True)` AND
-`displayVisuals(True)`). Two alpha-blended surfaces at identical depth have
-no stable GPU depth-test winner, so rendering flips pixel-to-pixel /
-frame-to-frame -- the reported flicker. Happens in every state where the
-collision box is visible (default + the 'opaque' attach state -- see
-`paint_grasp_intent`/`restore_object_color`), independent of grasp phase.
-Fixed by inflating ONLY the visual box (never the collision box -- CBF/
-distance-query math in `cmodel` is completely untouched) by a small
-symmetric `GRIPPER_VISUAL_BOX_PADDING = 0.005` m margin on every dimension,
-so its surface is strictly farther from the shared center than the
-collision box's on all 6 sides -- a barely-visible ~5mm orange halo instead
-of a flicker, in every grasp state, with zero color-transition-logic changes.
+Two-part root cause, found in two passes:
+
+1. (Padding pass, insufficient alone) `collision_manager.py`'s gripper
+   COLLISION box and `visualization_engine.add_gripper_visual_boxes`'s
+   gripper VISUAL box shared the exact same parent joint, placement, AND
+   size -- perfectly coincident surfaces. Fixed by inflating the visual box
+   by a symmetric `GRIPPER_VISUAL_BOX_PADDING = 0.005` m margin.
+2. (Actual root cause) The visual box was set to a TRANSLUCENT orange
+   (`alpha=0.4`) UNCONDITIONALLY at creation time -- i.e. permanently
+   visible even in the DEFAULT (no grasp) state, not just as the
+   grasp-intent indicator `paint_grasp_intent` intends it to be. Sitting
+   permanently over the always-visible red/blue collision box, this created
+   a PERMANENT overlap of two semi-transparent meshes. WebGL/three.js (what
+   Meshcat draws with) does not reliably depth-sort multiple overlapping
+   TRANSPARENT objects -- unlike fully OPAQUE ones, which DO depth-sort
+   correctly -- so draw order between the two near-coincident translucent
+   meshes flipped frame-to-frame regardless of the small padding gap from
+   fix #1. Orange-over-red (right gripper) and orange-over-blue (left
+   gripper, where red+blue channels blend under the translucent overlay --
+   the reported "purple") explains both reported colors. A SECOND, related
+   bug in the same code path: `restore_object_color` (called on grasp
+   release) only cleared `overrideMaterial`, which has no effect on a
+   synthetic (non-URDF) box -- so after any grasp+release the box stayed
+   stuck fully-opaque orange for the rest of the session.
+
+   Fixed by making the visual box start fully TRANSPARENT (`alpha=0.0`,
+   invisible) instead of translucent -- `paint_grasp_intent` already sets
+   it to fully OPAQUE (`alpha=1.0`) when signaling an actual grasp, which
+   DOES depth-sort correctly against the collision box (no flicker during a
+   real grasp either) -- and `restore_object_color` now explicitly sets it
+   back to `alpha=0.0` (matched by exact name `gripper_{side}_visual_box`,
+   not just the `overrideMaterial` flag) on release, closing the "stuck
+   orange forever" bug too.
 
 **Bugfix #1 (same day, reported by operator via Meshcat -- a solid black wall
 was visible even though the default world's `virtual_wall` has

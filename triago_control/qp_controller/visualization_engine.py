@@ -101,9 +101,36 @@ class VisualizationEngine:
     GRIPPER_VISUAL_BOX_PADDING = 0.005  # [m] per-dimension
 
     def add_gripper_visual_boxes(self, col_manager):
-        # Mirror the collision gripper boxes into the visual model (semi-transparent
-        # orange), padded slightly larger to avoid z-fighting with the collision
-        # box -- see GRIPPER_VISUAL_BOX_PADDING above.
+        # Mirror the collision gripper boxes into the visual model, padded
+        # slightly larger (see GRIPPER_VISUAL_BOX_PADDING above) so its
+        # surface never exactly coincides with the collision box's.
+        #
+        # BUGFIX #2 (2026-07-04, deeper root cause than the padding alone):
+        # this box is a GRASP-INTENT INDICATOR -- paint_grasp_intent turns it
+        # opaque orange to signal "a grasp is in progress" (see that method).
+        # The original code set it to a TRANSLUCENT orange (alpha=0.4) HERE,
+        # unconditionally, at creation time -- i.e. permanently visible in
+        # the DEFAULT (no grasp) state too, not just during an actual grasp
+        # signal. Since it sits at (almost) the same place as the ALWAYS
+        # visible red/blue collision box, this created a permanent overlap
+        # of two semi-transparent meshes. WebGL/three.js (what Meshcat draws
+        # with) does not reliably depth-sort multiple overlapping
+        # TRANSPARENT objects -- draw order between two near-coincident
+        # translucent meshes can flip frame-to-frame regardless of a small
+        # padding gap -- which is what actually produced the reported
+        # "blinking" (orange over the red right gripper, purple/magenta over
+        # the blue left gripper -- red+blue channels blending under the
+        # translucent orange overlay). The padding fix alone only prevented
+        # EXACT surface coincidence; it did not stop this transparency
+        # z-fight, since fully opaque objects (alpha=1.0) DO depth-sort
+        # correctly in WebGL -- only translucent ones have this instability.
+        #
+        # Fix: start fully TRANSPARENT (alpha=0.0, i.e. invisible) instead of
+        # translucent. paint_grasp_intent already sets alpha=1.0 (fully
+        # OPAQUE) when it wants this box shown -- an opaque box depth-sorts
+        # correctly against the collision box, so no flicker during an
+        # actual grasp signal either. See restore_object_color for the
+        # matching "set back to invisible" half of this fix.
         pad = self.GRIPPER_VISUAL_BOX_PADDING
         for side in ('right', 'left'):
             base_link = f'gripper_{side}_base_link'
@@ -113,7 +140,8 @@ class VisualizationEngine:
                 placement = self.model.frames[frame_id].placement * pin.SE3(np.eye(3), np.array([0.0, 0.0, 0.05]))
                 vis_obj = pin.GeometryObject(f"gripper_{side}_visual_box", parent_joint, placement,
                                              hppfcl.Box(0.05 + pad, 0.08 + pad, 0.25 + pad))
-                vis_obj.meshColor = np.array([1.0, 0.5, 0.0, 0.4])
+                vis_obj.meshColor = np.array([1.0, 0.5, 0.0, 0.0])  # invisible until a grasp is signaled
+                vis_obj.overrideMaterial = True
                 self.vmodel.addGeometryObject(vis_obj)
 
     def color_collision_model(self, col_manager):
@@ -234,7 +262,19 @@ class VisualizationEngine:
                 self.cmodel.geometryObjects[cyl_id].meshColor = default
                 self.cmodel.geometryObjects[cyl_id].overrideMaterial = False
             for geom in self.vmodel.geometryObjects:
-                if f"gripper_{arm_side}" in geom.name:
+                if f"gripper_{arm_side}_visual_box" == geom.name:
+                    # BUGFIX (2026-07-04): the grasp-intent visual box must go
+                    # back to fully INVISIBLE (alpha=0.0), not just have its
+                    # overrideMaterial flag dropped -- overrideMaterial=False
+                    # has no effect on a synthetic (non-URDF) box, which has
+                    # no "default material" to fall back to. Without this,
+                    # the box stayed stuck fully-opaque orange forever after
+                    # the first grasp+release of a session (see
+                    # add_gripper_visual_boxes for the other half of this fix
+                    # -- it now starts invisible instead of translucent).
+                    geom.meshColor = np.array([1.0, 0.5, 0.0, 0.0])
+                    geom.overrideMaterial = True
+                elif f"gripper_{arm_side}" in geom.name:
                     geom.overrideMaterial = False
             # Restore the gripper collision box to its normal (visible) state.
             box_id = col_manager.gripper_box_ids.get(arm_side)
