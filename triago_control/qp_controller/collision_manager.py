@@ -173,8 +173,25 @@ class CollisionManager:
         new_length = length + prox_ext + dist_ext
         axial_recenter = (dist_ext - prox_ext) / 2.0
 
+        # BUGFIX (2026-07-04): `lateral_offset` is NOT in the capsule's own
+        # pre-rotation frame (where the axis is the literal [0,0,1]) -- it
+        # was computed by capsule_alignment_audit.py's _compute_capsule_fix
+        # from vertices/axis ALREADY expressed in the PARENT-JOINT-LOCAL
+        # frame (z_axis there = placement.rotation @ [0,0,1], and
+        # rel = verts - a used that same joint-local z_axis to split into
+        # axial/perpendicular parts) -- i.e. lateral_offset is ALREADY in
+        # this function's `placement_wrt_joint`-relative frame. Rotating it
+        # AGAIN by placement_wrt_joint.rotation double-rotated it, which is a
+        # no-op only when the offset happens to lie along a rotation-
+        # invariant axis of that particular link's dominant-axis snap
+        # (explaining why links 1/3/5 came out correct by coincidence while
+        # 2/4/6 did not -- confirmed by re-running the audit after the
+        # original, buggy version of this fix). Added DIRECTLY, no rotation.
+        # The axial term is different: `z_axis_local = [0,0,1]` IS in the
+        # capsule's own pre-rotation frame (hppfcl.Capsule's axis convention),
+        # so it correctly still needs rotating into the joint frame.
         new_translation = (placement_wrt_joint.translation
-                          + placement_wrt_joint.rotation @ lateral_local
+                          + lateral_local
                           + placement_wrt_joint.rotation @ (axial_recenter * z_axis_local))
         new_placement = pin.SE3(placement_wrt_joint.rotation, new_translation)
 
