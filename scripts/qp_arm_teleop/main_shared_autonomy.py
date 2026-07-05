@@ -139,7 +139,7 @@ class SharedControlNode(Node):
         # Persistent LPF state for the position-divergence gating signal (see compute_alpha).
         self.alpha_divergence_lpf = 0.0
 
-        self.POLICY_BELIEF_TEST = False   # <-- flip this to switch modes
+        self.POLICY_BELIEF_TEST = True   # <-- flip this to switch modes
         # When True:  the node injects pi_stars[test_goal_key] as the fake human
         #             velocity instead of reading from the Haption topic, and
         #             commands the robot directly via /arm_right/cartesian_reference.
