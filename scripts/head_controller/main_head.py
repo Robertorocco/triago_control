@@ -477,12 +477,15 @@ class HeadPerceptionNode(Node):
         qp_controller_node ROS params -- their config asserts ZERO
         translation between arm_head_tool_link and the camera's own link,
         while our live URDF's actual joint for that exact hop has a real
-        xyz=(-0.0406, 0, -0.003) offset. When enabled, the chain is composed
-        as three hops instead of one direct TF lookup:
-            T_base_mountparent   (TF, live)
-          @ T_mountparent_camlink (MANUAL: identity rotation, zero translation)
-          @ T_camlink_optical    (TF, live -- UNCHANGED, only the mount hop
-                                   is overridden here)
+        xyz=(-0.0406, 0, -0.003) offset. TRANSLATION ONLY is overridden --
+        the mount hop's ROTATION is kept from live TF unchanged (our URDF
+        has a real -90 deg pitch on THIS hop that the colleague's chain
+        does not; see the bugfix note in config.py section 5d for why a
+        first attempt at overriding rotation too pointed the camera ~90 deg
+        away from the table). The chain is composed as:
+            T_base_mountparent          (TF, live)
+          @ [ R_mountparent_camlink(TF, live) , MANUAL_MOUNT_T (overridden) ]
+          @ T_camlink_optical          (TF, live -- UNCHANGED)
         See config.py section 5d for the full rationale. This ONLY changes
         which transform is used to place the point cloud; it never alters
         any other part of the pipeline. Mutually exclusive with Experiment A
@@ -499,20 +502,25 @@ class HeadPerceptionNode(Node):
             if R_base_mp is None or R_base_camlink_live is None or R_base_opt_live is None:
                 return None, None
 
-            # Step 2: recover the camera_link -> optical hop in isolation
-            # (unaffected by this experiment) by inverting the live
-            # base<-camera_link pose out of the live base<-optical pose:
+            # Step 2: recover the mountparent -> camlink hop's ROTATION in
+            # isolation from the live chain (kept UNCHANGED -- only its
+            # translation is overridden below):
+            #   R_mountparent_camlink = R_base_mountparent_live^-1 @ R_base_camlink_live
+            R_mp_camlink_live = R_base_mp.T @ R_base_camlink_live
+
+            # Step 3: recover the camera_link -> optical hop in isolation
+            # (also unaffected by this experiment):
             #   T_camlink_optical = T_base_camlink_live^-1 @ T_base_optical_live
             R_camlink_optical = R_base_camlink_live.T @ R_base_opt_live
             t_camlink_optical = R_base_camlink_live.T @ (t_base_opt_live - t_base_camlink_live)
 
-            # Step 3: rebuild base<-camera_link using the OVERRIDDEN mount
-            # hop instead of the live one:
-            #   T_base_camlink_NEW = T_base_mountparent (TF) @ T_mountparent_camlink (MANUAL)
-            R_base_camlink_new = R_base_mp @ cfg.MANUAL_MOUNT_R
+            # Step 4: rebuild base<-camera_link using the LIVE rotation but
+            # the OVERRIDDEN (manual) translation for the mount hop:
+            #   T_base_camlink_NEW = T_base_mountparent (TF) @ [R_mp_camlink_live, MANUAL_MOUNT_T]
+            R_base_camlink_new = R_base_mp @ R_mp_camlink_live   # == R_base_camlink_live (rotation untouched)
             t_base_camlink_new = R_base_mp @ cfg.MANUAL_MOUNT_T + t_base_mp
 
-            # Step 4: recompose with the (unaffected) camera_link->optical hop:
+            # Step 5: recompose with the (unaffected) camera_link->optical hop:
             #   T_base_optical_NEW = T_base_camlink_NEW @ T_camlink_optical
             R = R_base_camlink_new @ R_camlink_optical
             t = R_base_camlink_new @ t_camlink_optical + t_base_camlink_new

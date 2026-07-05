@@ -361,11 +361,29 @@ MANUAL_OPTICAL_T = np.array([0.0, 0.0, 0.0])   # zero translation (colleague's v
 # `gripper_head_camera_joint` origin in the URDF/xacro is the confirmed root
 # cause and should be corrected there. If it does NOT change the bias, this
 # is ALSO ruled out and the flag should be turned back off.
+#
+# BUGFIX (2026-07-04, same day): the FIRST version of this experiment set
+# MANUAL_MOUNT_R = identity, copying the colleague's quaternion_xyzw=[0,0,0,1]
+# literally. That was wrong: their chain puts the -90 deg pointing rotation
+# on a DIFFERENT hop (their `optical_rpy`) than ours does. OUR URDF's actual
+# `arm_head_tool_link -> gripper_head_camera_link` joint has rpy=
+# "0 -1.5708 0" (a real -90 deg pitch) -- overriding that hop's ROTATION to
+# identity deleted the pointing rotation entirely, sending the camera
+# aiming ~90 deg away from the table (confirmed from the operator's log:
+# TF rpy flipped from ~-134 deg to +136 deg roll -- not a small perturbation,
+# a completely different orientation). The colleague's genuinely NEW claim
+# was about TRANSLATION only (zero, vs. our -4.06cm/0/-0.3cm) -- their
+# rotation convention doesn't transplant onto our joint layout. Fixed by
+# overriding ONLY the translation and keeping OUR OWN live rotation for
+# this hop (read via TF, exactly as it already was) -- this is now a
+# translation-ONLY test, isolating exactly the one new variable.
 ENABLE_MANUAL_MOUNT_TF = True
 MANUAL_MOUNT_PARENT_FRAME = "arm_head_tool_link"
 MANUAL_MOUNT_CAMERA_LINK = "gripper_head_camera_link"   # our chain's camera_link equivalent
-MANUAL_MOUNT_R = np.eye(3)                      # identity (colleague's quaternion_xyzw=[0,0,0,1])
 MANUAL_MOUNT_T = np.array([0.0, 0.0, 0.0])       # zero (colleague's camera_mount_translation)
+# MANUAL_MOUNT_R intentionally REMOVED -- rotation for this hop is taken
+# live from TF/URDF, unchanged (see bugfix note above). Only translation
+# is overridden.
 
 # =============================================================================
 # 6. POINT-CLOUD DEPROJECTION  (depth image -> 3D points)
