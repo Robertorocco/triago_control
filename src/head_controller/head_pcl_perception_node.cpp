@@ -142,6 +142,18 @@ constexpr double kBlueHueHigh = 0.75;
 // bias-vs-range report does, purely for comparison/reporting.
 constexpr double kGtRedX = 0.800, kGtRedY = -0.20, kGtRedZ = 0.775;
 constexpr double kGtBlueX = 0.800, kGtBlueY = 0.20, kGtBlueZ = 0.775;
+
+// Plausibility gate for a cylinder-shaped detection -- mirrors
+// head_control/config.py's CYL_MIN/MAX_RADIUS and CYL_MIN/MAX_HEIGHT
+// exactly (same established prior, applied here to reject clutter blobs --
+// e.g. the robot's own arm/torso or a merged multi-object cluster --
+// from ever becoming a tracked "object" in the first place).
+constexpr double kCylMinRadius = 0.010, kCylMaxRadius = 0.080;
+constexpr double kCylMinHeight = 0.030, kCylMaxHeight = 0.400;
+
+// Max distance to attribute an "unknown"-coloured detection to a known GT
+// candidate FOR THE READ-ONLY BIAS DIAGNOSTIC ONLY -- see recordBiasSample.
+constexpr double kDiagMatchDist = 0.10;
 }  // namespace known_prior
 
 // ------------------------------------------------------------------------
@@ -239,10 +251,14 @@ class HeadPclPerceptionNode : public rclcpp::Node {
 
     if (!diag_logged_) {
       std::ostringstream fields;
-      for (const auto &f : msg->fields) fields << f.name << " ";
+      for (const auto &f : msg->fields) {
+        fields << f.name << "(off=" << f.offset << " type=" << static_cast<int>(f.datatype)
+               << " cnt=" << f.count << ") ";
+      }
       RCLCPP_INFO(this->get_logger(),
-                  "[DIAG] first cloud: frame_id='%s' width=%u height=%u fields=[%s]",
-                  msg->header.frame_id.c_str(), msg->width, msg->height,
+                  "[DIAG] first cloud: frame_id='%s' width=%u height=%u point_step=%u "
+                  "fields=[%s]",
+                  msg->header.frame_id.c_str(), msg->width, msg->height, msg->point_step,
                   fields.str().c_str());
       diag_logged_ = true;
     }
@@ -285,6 +301,36 @@ class HeadPclPerceptionNode : public rclcpp::Node {
     pcl::PointCloud<PointT>::Ptr cloud(new pcl::PointCloud<PointT>());
     pcl::fromROSMsg(transformed_msg, *cloud);
     const int n_raw = static_cast<int>(cloud->size());
+
+    // One-shot RGB sanity dump -- decisive diagnostic for the "everything
+    // classifies as 'unknown'" symptom. If the Gazebo RealSense plugin's
+    // point cloud does not populate real per-point colour (a known
+    // limitation with simple Gazebo material scripts, not something this
+    // node can fix), every point will read back as flat grey/black here,
+    // which is EXACTLY what fails colour classification downstream.
+    if (!rgb_diag_logged_ && !cloud->empty()) {
+      double rsum = 0, gsum = 0, bsum = 0, rvar = 0;
+      const size_t ns = std::min<size_t>(cloud->size(), 2000);
+      for (size_t i = 0; i < ns; ++i) {
+        rsum += cloud->points[i].r;
+        gsum += cloud->points[i].g;
+        bsum += cloud->points[i].b;
+      }
+      const double rmean = rsum / ns, gmean = gsum / ns, bmean = bsum / ns;
+      for (size_t i = 0; i < ns; ++i) {
+        const double d = cloud->points[i].r - rmean;
+        rvar += d * d;
+      }
+      rvar /= ns;
+      RCLCPP_WARN(this->get_logger(),
+                  "[DIAG-RGB] mean(r,g,b)=(%.1f,%.1f,%.1f) over %zu points, "
+                  "r-variance=%.2f. If mean~0 and variance~0, the point cloud has NO "
+                  "real colour data (colour classification cannot work on this topic) "
+                  "-- try /gripper_head_camera_rgbd/depth/color/points from a DIFFERENT "
+                  "source, or accept 'unknown'-labelled shape-only detections.",
+                  rmean, gmean, bmean, ns, rvar);
+      rgb_diag_logged_ = true;
+    }
 
     // --- 2. (ADDED) workspace crop -- see file header. Uses the SAME
     // known table-location prior already used elsewhere in this project.
@@ -448,6 +494,22 @@ class HeadPclPerceptionNode : public rclcpp::Node {
       Eigen::Vector3f obb_position = eigenVectorsPCA * meanDiagonal + centroid_3d.head<3>();
       Eigen::Quaternionf obb_orientation(eigenVectorsPCA);
 
+      // (ADDED) plausibility gate -- reject non-cylinder-shaped clusters
+      // (e.g. a table leg/column caught by the crop's Z_MIN=0.20m, or a
+      // merged multi-object blob) BEFORE they ever become a tracked
+      // object. Mirrors head_control/config.py's CYL_MIN/MAX_RADIUS and
+      // CYL_MIN/MAX_HEIGHT exactly -- the SAME established prior already
+      // used by the Python pipeline, not a new scene-specific hack.
+      {
+        const float diam = 0.5f * (dimensions.x() + dimensions.y());
+        const float rad = 0.5f * diam;
+        const float hgt = dimensions.z();
+        if (rad < known_prior::kCylMinRadius || rad > known_prior::kCylMaxRadius ||
+            hgt < known_prior::kCylMinHeight || hgt > known_prior::kCylMaxHeight) {
+          continue;  // not plausibly one of our two known cylinders -- skip
+        }
+      }
+
       // (ADDED) colour classification -- needed for head_plotter.py, which
       // classifies markers by colour channel.
       const std::string color_name = classifyColor(*cluster);
@@ -538,7 +600,11 @@ class HeadPclPerceptionNode : public rclcpp::Node {
         if (it->color_name == "red" && it->frames_unseen == 0) red_conf = conf;
         if (it->color_name == "blue" && it->frames_unseen == 0) blue_conf = conf;
 
-        // Read-only bias-vs-GT sample (diagnostic only).
+        // Read-only bias-vs-GT sample (diagnostic only). Falls back to
+        // nearest-GT-position matching when colour classification hasn't
+        // resolved (see classifyColor / the RGB diagnostic above) -- the
+        // diagnostic's PURPOSE is comparing raw geometry against GT, so it
+        // should not go blind just because colour never resolves.
         recordBiasSample(it->color_name, it->position, cam_pos);
 
         if (!primary_target_published && it->frames_unseen == 0) {
@@ -651,13 +717,35 @@ class HeadPclPerceptionNode : public rclcpp::Node {
   // -------------------------------------------------------------------- //
   void recordBiasSample(const std::string &color_name, const Eigen::Vector3f &pos,
                          const Eigen::Vector3f &cam_pos) {
+    std::string bucket = color_name;
     double gt_x, gt_y, gt_z;
     if (color_name == "red") {
       gt_x = known_prior::kGtRedX; gt_y = known_prior::kGtRedY; gt_z = known_prior::kGtRedZ;
     } else if (color_name == "blue") {
       gt_x = known_prior::kGtBlueX; gt_y = known_prior::kGtBlueY; gt_z = known_prior::kGtBlueZ;
     } else {
-      return;
+      // (ADDED) colour-agnostic fallback: attribute this detection to
+      // whichever known GT position it is closest to, PURELY for this
+      // read-only diagnostic (never affects the published perception
+      // result/marker colour). Without this, a colour classification
+      // failure (see the RGB diagnostic) would leave the bias-vs-GT
+      // regression permanently starved of samples even though the
+      // underlying shape/position fit is perfectly usable.
+      const Eigen::Vector3f gt_red(known_prior::kGtRedX, known_prior::kGtRedY,
+                                    known_prior::kGtRedZ);
+      const Eigen::Vector3f gt_blue(known_prior::kGtBlueX, known_prior::kGtBlueY,
+                                     known_prior::kGtBlueZ);
+      const double d_red = (pos - gt_red).norm();
+      const double d_blue = (pos - gt_blue).norm();
+      const double d_best = std::min(d_red, d_blue);
+      if (d_best > known_prior::kDiagMatchDist) return;  // not close to either -- skip
+      if (d_red < d_blue) {
+        bucket = "red"; gt_x = known_prior::kGtRedX; gt_y = known_prior::kGtRedY;
+        gt_z = known_prior::kGtRedZ;
+      } else {
+        bucket = "blue"; gt_x = known_prior::kGtBlueX; gt_y = known_prior::kGtBlueY;
+        gt_z = known_prior::kGtBlueZ;
+      }
     }
     const double range = (pos - cam_pos).norm();
     const double dx = pos.x() - gt_x;
@@ -665,7 +753,7 @@ class HeadPclPerceptionNode : public rclcpp::Node {
     const double dz = pos.z() - gt_z;
 
     std::lock_guard<std::mutex> lock(state_mutex_);
-    auto &buf = bias_samples_[color_name];
+    auto &buf = bias_samples_[bucket];
     buf.push_back({range, dx, dy, dz});
     if (buf.size() > 500) buf.pop_front();
   }
@@ -839,6 +927,7 @@ class HeadPclPerceptionNode : public rclcpp::Node {
   double plane_dist_thresh_ = 0.02;
   bool enable_crop_ = true;
   bool diag_logged_ = false;
+  bool rgb_diag_logged_ = false;
 
   std::vector<TrackedObject> tracked_objects_;
   int next_marker_id_ = 10;
