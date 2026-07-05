@@ -149,6 +149,19 @@ class HeadPerceptionNode(Node):
             f"  Scan        : {'ON' if cfg.ENABLE_SCAN else 'OFF'}\n"
             "==================================================================")
 
+        if cfg.ENABLE_MANUAL_OPTICAL_TF:
+            self.get_logger().warn(
+                "\n"
+                "##################################################################\n"
+                "# EXPERIMENT ACTIVE: cfg.ENABLE_MANUAL_OPTICAL_TF = True          #\n"
+                "# The mount_link -> depth_optical_frame hop is NOT taken from the #\n"
+                "# live URDF/TF -- it is manually overridden (config.py sec 5c),  #\n"
+                "# mirroring a colleague's REP-103 static-transform workaround.   #\n"
+                "# Compare the [BIAS-VS-RANGE] intercept against a normal run to  #\n"
+                "# see whether this changes anything. Set the flag back to False #\n"
+                "# to return to the standard TF-derived pipeline.                 #\n"
+                "##################################################################")
+
     # ================================================================== #
     # Callbacks                                                           #
     # ================================================================== #
@@ -370,6 +383,33 @@ class HeadPerceptionNode(Node):
 
         Falls back to the latest available transform if the exact stamp is not
         yet buffered. Returns (None, None) if TF is unavailable.
+
+        EXPERIMENT (cfg.ENABLE_MANUAL_OPTICAL_TF, off by default): if the depth
+        frame is the known optical frame and this flag is set, the LAST HOP
+        (mount_link -> depth_optical_frame) is NOT taken from the live
+        URDF/TF at all -- it is instead composed manually from
+        cfg.MANUAL_OPTICAL_R/T (the generic REP-103 convention), mirroring a
+        colleague's independent workaround for the same class of bug on a
+        different robot config. See config.py section 5c for the full
+        rationale. This ONLY changes which transform is used to place the
+        point cloud; it never alters any other part of the pipeline.
+        """
+        if cfg.ENABLE_MANUAL_OPTICAL_TF:
+            R_bm, t_bm = self._lookup_transform_raw(cfg.MANUAL_OPTICAL_MOUNT_LINK, stamp)
+            if R_bm is None:
+                return None, None
+            # Compose base<-mount (TF, live) with mount<-optical (manual, fixed):
+            # T_base_optical = T_base_mount @ T_mount_optical
+            R = R_bm @ cfg.MANUAL_OPTICAL_R
+            t = R_bm @ cfg.MANUAL_OPTICAL_T + t_bm
+            return R, t
+        return self._lookup_transform_raw(frame_id, stamp)
+
+    def _lookup_transform_raw(self, frame_id, stamp):
+        """Plain TF lookup for base_footprint <- frame_id at `stamp` (no
+        override logic -- this is the original, unconditional behaviour,
+        factored out so the manual-optical-TF experiment can reuse it for
+        the mount-link hop).
         """
         for query in (Time.from_msg(stamp), Time()):  # try exact time, then latest
             try:

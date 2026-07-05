@@ -265,6 +265,55 @@ VOXEL_MAP_QUERY_W = 1.0      # min weight for a voxel to be used in detection
 INTEGRATE_VEL_THRESH = 0.04  # [rad/s] only fuse when head settled (if enabled)
 
 # =============================================================================
+# 5c. MANUAL OPTICAL-FRAME TF OVERRIDE  (EXPERIMENT, OFF by default)
+# =============================================================================
+# CONTEXT (2026-07-04): the head-camera XY position bias was proven, via a
+# bias-vs-range regression on RAW (pre-tracker) detections, to be a CONSTANT
+# translational offset (~2.5cm X, ~1.2cm Y for BOTH cylinders, near-zero
+# slope vs. range) -- ruling out intrinsics and rotational/angular error.
+# TF and Pinocchio FK agree with each other (both read the same live URDF),
+# so a bug in the URDF's mount_link -> depth_optical_frame JOINT (rather than
+# anywhere upstream in the head kinematic chain) would be INVISIBLE to the
+# existing TF-vs-FK cross-check -- both would agree while both being
+# consistently wrong.
+#
+# A colleague's independent PCL/C++ tabletop-perception node (different robot
+# config, same class of problem) works around exactly this by NOT trusting
+# whatever robot_state_publisher/URDF provides for that one joint -- it
+# hardcodes a static_transform_publisher for camera_link -> depth_optical_
+# frame instead. Their transform, decomposed numerically, is EXACTLY the
+# generic REP-103 camera_link -> optical_frame convention (X-fwd/Y-left/Z-up
+# -> X-right/Y-down/Z-fwd), zero translation -- not a scene-specific
+# calibration number.
+#
+# This flag reproduces that SAME workaround structurally in our pipeline, as
+# a toggleable A/B EXPERIMENT (not a silent default): when enabled, the
+# camera pose used for perception is computed as
+#     T_base_optical = T_base_mount  (TF, live)  @  T_mount_optical (MANUAL, fixed)
+# instead of the normal path (TF lookup of base<-depth_optical_frame
+# directly, which trusts the URDF's own joint for that last hop). If this
+# changes/fixes the bias-vs-range regression's intercept, the URDF's fixed
+# joint for MANUAL_OPTICAL_MOUNT_LINK -> depth optical frame is the
+# confirmed root cause and should be corrected there (not permanently
+# patched here). If it does NOT change the bias, this is definitively ruled
+# out and the flag should be turned back off.
+ENABLE_MANUAL_OPTICAL_TF = True
+# The rigid mount link that is the DIRECT TF parent of the depth optical
+# frame (confirmed via `ros2 run tf2_tools view_frames`:
+# "gripper_head_camera_rgbd_depth_optical_frame: parent: 'gripper_head_camera_link'").
+MANUAL_OPTICAL_MOUNT_LINK = "gripper_head_camera_link"
+# REP-103 camera_link -> optical_frame rotation (verified numerically to
+# exactly match the colleague's static_transform_publisher args
+# `0 0 0 -1.5708 0 -1.5708` decomposed as extrinsic yaw-pitch-roll):
+#   X-forward/Y-left/Z-up  ->  X-right/Y-down/Z-forward
+MANUAL_OPTICAL_R = np.array([
+    [0.0,  0.0, 1.0],
+    [-1.0, 0.0, 0.0],
+    [0.0, -1.0, 0.0],
+])
+MANUAL_OPTICAL_T = np.array([0.0, 0.0, 0.0])   # zero translation (colleague's value)
+
+# =============================================================================
 # 6. POINT-CLOUD DEPROJECTION  (depth image -> 3D points)
 # =============================================================================
 # We subsample the depth image on a pixel grid to keep the cloud small enough
