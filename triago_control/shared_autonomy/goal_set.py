@@ -84,14 +84,37 @@ class GoalSet:
     PLATFORM_THICKNESS = 0.002                      # disk thickness [m]
     PLATFORM_PLACE_MARGIN = 0.03                    # keep the footprint this far inside the rim [m]
 
+    # Grasp types every cylinder exposes when its own entry doesn't say
+    # otherwise (see the `grasp_types` field below) -- matches the original
+    # hard-coded Red/Blue behavior exactly.
+    _DEFAULT_GRASP_TYPES = ('Top', 'Side')
+
     def __init__(self, cylinders=None, target_keys=None, platform=None):
         """Initializes the cylinder geometry table and the set of valid goal keys.
 
         Args:
-            cylinders: dict of {color: {'pos', 'height', 'radius', 'cbf_name'}}.
+            cylinders: dict of {color: {'pos', 'height', 'radius', 'cbf_name',
+                       'grasp_types' (optional)}}. `grasp_types` is a list of
+                       grasp-type suffixes this entry offers (any of 'Top',
+                       'Side', 'Front' -- see get_dynamic_goal_pose); defaults
+                       to _DEFAULT_GRASP_TYPES = ('Top', 'Side') when omitted,
+                       matching the original behavior byte-for-byte. A pure
+                       reach/hover target (no physical object, e.g. a
+                       movement-tutorial world) sets grasp_types=['Front'] --
+                       see goal_set.py's module docstring and
+                       grasp_state_machine.GraspStateMachine._is_graspable,
+                       which categorically blocks grasp-EXECUTION (PRE_GRASP
+                       onward) for any non-Top/Side goal key regardless of
+                       what is listed here; this dict only controls which
+                       goal KEYS exist / are offered to the belief estimator.
                        Defaults to the Red/Blue table used in the original script.
             target_keys: list of valid 'Color_GraspType' goal keys. Defaults to
-                       the 4 flat goals (Red_Top, Red_Side, Blue_Top, Blue_Side).
+                       one key per (cylinder, grasp_type) pair in `cylinders`
+                       (each entry's own 'grasp_types', see above) plus
+                       PLATFORM_KEY -- e.g. the original 2-cylinder default
+                       table with no 'grasp_types' override still produces
+                       exactly ['Red_Top', 'Red_Side', 'Blue_Top', 'Blue_Side',
+                       'Platform_Place'], unchanged from before this feature.
             platform: optional world_loader.PlatformSpec (2026-07-04) --
                        overrides the class-level PLATFORM_POSE/PLATFORM_RADIUS/
                        PLATFORM_THICKNESS/PLATFORM_PLACE_MARGIN defaults below
@@ -121,8 +144,11 @@ class GoalSet:
         self.cylinders = cylinders
 
         if target_keys is None:
-            target_keys = ['Red_Top', 'Red_Side', 'Blue_Top', 'Blue_Side',
-                           self.PLATFORM_KEY]
+            target_keys = []
+            for color, spec in self.cylinders.items():
+                for grasp_type in spec.get('grasp_types', self._DEFAULT_GRASP_TYPES):
+                    target_keys.append(f'{color}_{grasp_type}')
+            target_keys.append(self.PLATFORM_KEY)
         self.target_keys = target_keys
 
         # Sticky orientation memory, per goal key: None until the first time
@@ -486,6 +512,39 @@ class GoalSet:
                 p_cyl[1] - X_t[1] * standoff,
                 z_target
             ])
+
+        elif grasp_type == 'Front':
+            # Pure REACH/HOVER target -- no physical object, no grasp execution
+            # (see GraspStateMachine._is_graspable, which categorically blocks
+            # PRE_GRASP entry for any non-Top/Side goal key). Used for
+            # movement-tutorial worlds: a fixed pose in space with a FIXED
+            # approach axis, rather than a manifold that adapts to the anchor
+            # (unlike Side, whose azimuth tracks the user's current position).
+            #
+            # Position: exactly the cylinder-table entry's 'pos' -- no
+            # standoff/surface-offset math, since there is no surface. Reuses
+            # the SAME p_cyl var everything else in this method already
+            # resolved, so a Front goal's target is simply wherever this
+            # cylinder's 'pos' says (see the world YAML's static_obstacles
+            # entry for that color/role).
+            p_target = np.array(p_cyl, dtype=float)
+
+            # Orientation: approach axis (gripper +X) RIGIDLY locked to world
+            # +X, regardless of anchor position -- unlike Side's live radial
+            # tracking. The remaining 2 DOF (rotation about world X) use the
+            # SAME sticky-orientation-with-hysteresis mechanism as Top/Side
+            # (two 180-degree-apart candidates, differing only by a roll about
+            # the approach axis -- i.e. which way "up" faces for the fingers)
+            # so switching between Front goals doesn't cause gratuitous wrist
+            # flips, exactly mirroring the existing convention.
+            X_t = np.array([1.0, 0.0, 0.0])
+            Z_a = np.array([0.0, 0.0, 1.0])   # candidate A: fingers "up"
+            Y_a = np.cross(Z_a, X_t)
+            R_front_a = np.column_stack((X_t, Y_a, Z_a))
+            R_front_b = np.column_stack((X_t, -Y_a, -Z_a))   # candidate B: 180 deg roll
+
+            R_target = self._pick_orientation(goal_key, R_front_a, R_front_b, R_anchor,
+                                               update_memory=update_memory, hysteresis=hyst)
 
         else:
             raise ValueError(f"Unknown grasp_type '{grasp_type}' in goal_key '{goal_key}'")

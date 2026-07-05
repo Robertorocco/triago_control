@@ -1706,6 +1706,73 @@ defaulted, no explicit `-p world_name:=...` needed unless overriding).
 
 ---
 
+### 9.14 New grasp type `Front` + `movement_tutorial` world (pure reach/hover goals)
+
+New world for the user-study set: `config/worlds/movement_tutorial.yaml` /
+`.world`. Table only (no graspable cylinders) -- an onboarding scenario
+teaching the user to command the hands and move around before any real
+pick-and-place task. Publishes two shared-autonomy goals, both PURE
+REACH/HOVER targets with no physical object behind them: `red_target` 20cm
+right of table center + 50cm above the table top, `blue_target` mirrored on
+the left. Approach axis for both is RIGIDLY LOCKED to world +X, unlike the
+existing `Side` grasp type whose approach direction adapts live to the
+user's position.
+
+**New `GoalSet` grasp type, `'Front'`** (`goal_set.py`'s
+`get_dynamic_goal_pose`): position = exactly the cylinder-table entry's
+`pos` (no standoff/surface offset, since there's no surface); orientation =
+approach axis fixed to world +X with the same sticky, hysteresis-protected
+180-degree-roll choice (fingers "up" vs "down") used by `Top`/`Side`, so
+switching goals doesn't cause gratuitous wrist flips.
+
+**`GoalSet.__init__` generalized**: `target_keys` (when not passed
+explicitly) is now DERIVED from each cylinder entry's own optional
+`grasp_types` list (defaults to `('Top', 'Side')` when a cylinder omits the
+field) instead of being a single hard-coded 4-key list -- verified
+numerically that the ORIGINAL default (no `grasp_types` anywhere) still
+produces the byte-identical `['Red_Top', 'Red_Side', 'Blue_Top',
+'Blue_Side', 'Platform_Place']`. `main_shared_autonomy.py`'s
+`_cylinders_from_world_scene` sets `grasp_types=['Front']` for any cylinder
+whose YAML obstacle has `role: "reachable"` (a NEW role value, not a new
+schema field -- `world_loader.ObstacleSpec` itself is unchanged). For
+`movement_tutorial.yaml` this yields `target_keys = ['Red_Front',
+'Blue_Front', 'Platform_Place']` -- and since `Platform_Place` stays
+permanently excluded (nothing is ever grasped, so `grasped_color` never
+becomes non-`None`), belief mass only ever distributes over the two real
+`Front` goals -- exactly the "2 goals only" requirement, achieved via YAML
++ this one additive `GoalSet` generalization, no other code path touched.
+
+**Safety-critical gate added to `GraspStateMachine`** (`grasp_state_machine.
+py`): a new `_is_graspable(inp)` check, gating PRE_GRASP entry, requires
+`active_goal_key` to end in `_Top` or `_Side`. This was NECESSARY, not just
+tidy: several downstream call sites
+(`shared_autonomy_handler.attach_object_visually`'s
+`self.col.red_cyl_id if color == "red" else self.col.blue_cyl_id`, and
+`GraspStateMachine`'s own `self.cylinders[color]['radius']`/`['cbf_name']`
+lookups in `_grasp_align`/`_grasp_approach`/`_grasp_close`) are UNGUARDED
+and assume a real, colliding cylinder exists -- `red_cyl_id`/`blue_cyl_id`
+are never even SET on `CollisionManager` for a `collision: false` obstacle
+(confirmed by reading `collision_manager.py`'s grasp-role resolution: it
+only populates them from `_geom_id_by_obstacle_name`, which only contains
+colliding obstacles). Blocking `PRE_GRASP` entry for any non-Top/Side goal
+key makes the ENTIRE grasp-execution chain (GRASP_ALIGN/APPROACH/CLOSE/
+LIFT/HOLDING and every ORANGE_/ATTACH_ `gripper_cmd` they trigger)
+categorically unreachable for a `Front` goal -- it stays in
+`SHARED_AUTONOMY` (belief-blended reach/hover, exactly the intended
+tutorial behavior) forever, with zero risk of hitting one of those
+unguarded lookups.
+
+Verified numerically (pure-numpy, no ROS/pinocchio/scipy needed) before
+pushing: (1) `target_keys` derivation reproduces the exact original
+5-element list for `no_obstacle`'s default cylinders, and produces the
+correct 2-Front-goal list for `movement_tutorial`'s; (2) `_is_graspable`
+correctly gates `_Top`/`_Side` in and `_Front`/`Platform_Place` out; (3) the
+`Front` orientation math is a valid proper rotation whose approach-axis
+column is exactly world +X regardless of input, and its two sticky
+candidates differ by exactly a 180-degree roll about that fixed axis.
+
+---
+
 ## 10. Adaptive Scheduling (shadow-price feedback)
 
 - **Decoupled slack weighting**: each arm's slack weight drops (toward `BASE_WEIGHT_SLACK=5`) when its shadow price grows, letting the slack absorb more tracking error near obstacles. In free space it rises (toward `MAX_WEIGHT_SLACK=50`) for tighter tracking.

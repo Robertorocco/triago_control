@@ -867,18 +867,32 @@ class SharedControlNode(Node):
         Returns None (GoalSet then falls back to its own original hard-coded
         Red/Blue table) if the world scene doesn't define both roles, so an
         incomplete/legacy world YAML still produces a working node.
+
+        `grasp_types` (2026-07-04): derived from the obstacle's YAML `role`
+        field, NOT a new schema field -- keeps world_loader.ObstacleSpec
+        unchanged. `role: "reachable"` -> `['Front']` (pure reach/hover
+        target, no physical object; see goal_set.GoalSet.get_dynamic_goal_pose's
+        'Front' branch and grasp_state_machine.GraspStateMachine._is_graspable,
+        which blocks grasp EXECUTION for any non-Top/Side goal regardless of
+        this). Any other role (e.g. the original `"graspable"`) omits
+        `grasp_types` entirely, so GoalSet.__init__ falls back to its own
+        `_DEFAULT_GRASP_TYPES = ('Top', 'Side')` -- byte-identical to before
+        this feature existed.
         """
         cylinders = {}
         for color in ('red', 'blue'):
             spec = world_scene.obstacle_for_role(color) if world_scene is not None else None
             if spec is None or spec.shape != 'cylinder':
                 return None
-            cylinders[color.capitalize()] = {
+            entry = {
                 'pos': np.array(spec.position, dtype=float),
                 'height': float(spec.size[1]),   # cylinder size = [radius, length]
                 'radius': float(spec.size[0]),
                 'cbf_name': spec.name,
             }
+            if spec.role == 'reachable':
+                entry['grasp_types'] = ['Front']
+            cylinders[color.capitalize()] = entry
         return cylinders
 
     def collision_data_callback(self, msg):

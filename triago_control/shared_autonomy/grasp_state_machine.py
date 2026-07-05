@@ -200,6 +200,24 @@ class GraspStateMachine:
         threshold = self.BELIEF_STAY if self._state == "PRE_GRASP" else self.BELIEF_ENTER
         return inp.prediction_enabled and inp.b_max > threshold
 
+    _GRASPABLE_TYPES = ('Top', 'Side')
+
+    def _is_graspable(self, inp: TickInput) -> bool:
+        """True only for goal keys of a real grasp type ('Color_Top'/'Color_Side').
+
+        Pure-reach goal types (e.g. 'Color_Front', see goal_set.py) have no
+        physical cylinder behind them -- no CBF pair name, no grasp_contact
+        signal, nothing for GRASP_APPROACH/GRASP_CLOSE to close on or ATTACH.
+        Blocking PRE_GRASP entry here means the ENTIRE grasp-execution chain
+        (GRASP_ALIGN/APPROACH/CLOSE/LIFT/HOLDING, and every ORANGE_/ATTACH_
+        gripper_cmd + shared_autonomy_handler.attach_object_visually call they
+        trigger) is categorically unreachable for such goals -- they stay in
+        SHARED_AUTONOMY (belief-blended reach/hover) forever, which is exactly
+        the intended behavior for a movement-only tutorial target.
+        """
+        parts = inp.active_goal_key.split('_')
+        return len(parts) == 2 and parts[1] in self._GRASPABLE_TYPES
+
     def step(self, inp: TickInput) -> TickOutput:
         """Evaluates the active goal's transition guard, then dispatches to the handler.
 
@@ -218,7 +236,7 @@ class GraspStateMachine:
             # produced by the outer loop's policy (pi_max), which _holding passes
             # straight through. Only an explicit release (trigger) leaves HOLDING.
             out = self._handlers[self._state](inp)
-        elif self._belief_ok(inp) and self._is_aligned(inp):
+        elif self._is_graspable(inp) and self._belief_ok(inp) and self._is_aligned(inp):
             out = self._pre_grasp(inp)
         else:
             out = self._shared_autonomy(inp)

@@ -1,0 +1,82 @@
+# =============================================================================
+# movement_tutorial.yaml
+# -----------------------------------------------------------------------------
+# World 0 of the user-study set: onboarding/movement tutorial. Table only (no
+# graspable cylinders) -- teaches the user how to command the hands and move
+# around before any real pick-and-place task. Two PURE REACH/HOVER targets
+# (no physical object) are published for shared autonomy to guide toward:
+#   - red_target  : 20cm right of table center,  50cm above the table top
+#   - blue_target : 20cm left of table center,   50cm above the table top
+# Approach axis for BOTH targets is rigidly locked to world +X (see goal_set.
+# GoalSet.get_dynamic_goal_pose's 'Front' branch) -- unlike the grasp Side/Top
+# types, this does NOT adapt to the user's current position.
+#
+# Table (center [1.0, 0.0, 0.35], half-extents [0.3, 0.25, 0.35] -> top
+# surface at z=0.70):
+#   red_target  x = table center x = 1.0
+#               y = table right edge (y=-0.25) - 0.20 = -0.45
+#               z = table top (0.70) + 0.50 = 1.20
+#   blue_target mirrors on y = +0.45
+#
+# Matches the Gazebo world launched via:
+#   ros2 launch triago_gazebo triago_gazebo.launch.py ... world_name:=movement_tutorial
+#
+# See triago_control/qp_controller/world_loader.py for the full schema.
+# =============================================================================
+
+world_name: "movement_tutorial"
+gazebo_world_file: "movement_tutorial.world"
+
+static_obstacles:
+  - name: "work_table"
+    role: "table"
+    shape: "box"
+    pose: [1.0, 0.0, 0.35, 0.0, 0.0, 0.0]
+    size: [0.6, 0.5, 0.7]
+    color: [0.6, 0.4, 0.2, 0.8]
+    collision: true
+
+  # Pure reach/hover targets -- NOT graspable obstacles. collision: false (no
+  # hppfcl geometry created, invisible in RViz/Meshcat collision markers --
+  # see collision_manager.py's world_scene branch and visualization_engine.py's
+  # publish_obstacle_marker, both of which skip non-colliding, non-table
+  # entries). The ghost-gripper goal-pose markers (belief-colored, separate
+  # from this obstacle-marker path) are what actually renders these visually
+  # in RViz -- driven directly by GoalSet.get_dynamic_goal_pose, no obstacle
+  # geometry needed. role: "reachable" (not "graspable") tells
+  # main_shared_autonomy.py's _cylinders_from_world_scene to give this
+  # cylinder grasp_types=['Front'] instead of the default ('Top', 'Side') --
+  # see that method's docstring.
+  - name: "red_target"
+    role: "reachable"
+    shape: "cylinder"
+    pose: [1.0, -0.45, 1.20, 0.0, 0.0, 0.0]
+    size: [0.02, 0.15]          # nominal only -- never read by any Front-goal code path
+    color: [1.0, 0.0, 0.0, 1.0]
+    collision: false
+
+  - name: "blue_target"
+    role: "reachable"
+    shape: "cylinder"
+    pose: [1.0, 0.45, 1.20, 0.0, 0.0, 0.0]
+    size: [0.02, 0.15]
+    color: [0.0, 0.0, 1.0, 1.0]
+    collision: false
+
+  - name: "virtual_wall"
+    role: "wall"
+    shape: "box"
+    pose: [0.5, 0.0, 0.5, 0.0, 0.0, 0.0]
+    size: [1.0, 0.02, 1.0]
+    color: [1.0, 0.5, 0.0, 0.5]
+    collision: false
+
+grasp_roles:
+  red: "red_target"
+  blue: "blue_target"
+
+# No platform in this world -- nothing is ever grasped, so there is nothing to
+# place. GoalSet still auto-appends PLATFORM_KEY to target_keys (see
+# goal_set.py's __init__), but it stays permanently excluded from the belief
+# distribution (grasped_color never becomes non-None with Front-only goals),
+# so only the two Front goals ever carry belief mass in practice.
