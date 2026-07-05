@@ -129,7 +129,22 @@ class HeadPerceptionNode(Node):
         # angular/rotational error or an intrinsics (cx/cy) error (bias grows
         # proportionally with distance). This is diagnostic-only console
         # output; it never alters the actual perception result.
-        self._bias_samples = {"red": [], "blue": []}   # color -> list[(range, dx, dy)]
+        #
+        # ADDED 2026-07-04: each sample also tags (t, waypoint_idx). A PURELY
+        # CUMULATIVE (since-startup) fit was found to visually "drift toward
+        # zero" over a run -- this is an artefact of averaging over an
+        # increasingly-representative MIXTURE of scan-waypoint poses as more
+        # scan cycles complete, NOT genuine real-time convergence of the
+        # perception system (confirmed independently: the unrelated C++ PCL
+        # cross-check node, on a different topic/algorithm, shows the SAME
+        # cumulative-drift shape). The report below now ALSO fits a SLIDING
+        # WINDOW (last BIAS_WINDOW_S seconds -- ~1 scan cycle) so "current"
+        # bias is never confused with a historical running average, and
+        # reports the mean bias PER WAYPOINT to test whether the true error
+        # is pose-dependent (pointing at a specific joint) vs. a genuinely
+        # uniform constant.
+        self._bias_samples = {"red": [], "blue": []}   # color -> list[(t, range, dx, dy, wp_idx)]
+        self.BIAS_WINDOW_S = 25.0
 
         # --- Timers ----------------------------------------------------
         self.create_timer(1.0 / cfg.CONTROL_RATE_HZ, self._control_tick)
@@ -299,8 +314,9 @@ class HeadPerceptionNode(Node):
         self.pub_telemetry.publish(tel)
 
     def _collect_bias_samples(self, result, t_cam_base):
-        """Accumulate (range, dx, dy) samples from RAW (pre-tracker) detections
-        vs. the known GT centers, for the bias-vs-range regression diagnostic.
+        """Accumulate (t, range, dx, dy, waypoint_idx) samples from RAW
+        (pre-tracker) detections vs. the known GT centers, for the
+        bias-vs-range regression diagnostic.
 
         READ-ONLY: this compares against cfg.GT_RED_CENTER/GT_BLUE_CENTER
         purely for console reporting. It does not feed back into
@@ -309,48 +325,90 @@ class HeadPerceptionNode(Node):
         Uses raw_detections (this frame's fresh fit) rather than the
         EMA-tracked `objects`, since the tracker's smoothing autocorrelates
         consecutive samples and would mask a genuine range-dependent trend.
+
+        waypoint_idx identifies WHICH scan waypoint the head was at for this
+        sample (derived the same way LookAtController.scan_target does), so
+        the report can test whether the bias is pose-dependent rather than a
+        single uniform constant.
         """
         gt = {"red": cfg.GT_RED_CENTER, "blue": cfg.GT_BLUE_CENTER}
+        t_now = time.time() - self.start_time
+        if cfg.ENABLE_SCAN:
+            wp_idx = int(t_now / cfg.SCAN_DWELL_S) % len(cfg.SCAN_WAYPOINTS)
+        else:
+            wp_idx = 0
         for det in result.raw_detections:
             if det.color_name not in gt:
                 continue
             rng = float(np.linalg.norm(det.center - t_cam_base))
             dx = float(det.center[0] - gt[det.color_name][0])
             dy = float(det.center[1] - gt[det.color_name][1])
-            self._bias_samples[det.color_name].append((rng, dx, dy))
-            # Cap memory: keep only the most recent 500 samples per color.
-            if len(self._bias_samples[det.color_name]) > 500:
+            self._bias_samples[det.color_name].append((t_now, rng, dx, dy, wp_idx))
+            # Cap memory: keep only the most recent 1000 samples per color
+            # (enough for several scan cycles' worth of windowed analysis).
+            if len(self._bias_samples[det.color_name]) > 1000:
                 self._bias_samples[det.color_name].pop(0)
 
+    @staticmethod
+    def _fit_line(x, y):
+        """Least-squares line fit y = intercept + slope*x. Falls back to the
+        mean (slope=0) if x has no spread or too few points."""
+        if len(x) < 2:
+            return (float(y[0]) if len(y) else 0.0), 0.0
+        A = np.column_stack([np.ones_like(x), x])
+        try:
+            sol, *_ = np.linalg.lstsq(A, y, rcond=None)
+            return float(sol[0]), float(sol[1])
+        except np.linalg.LinAlgError:
+            return float(np.mean(y)), 0.0
+
     def _bias_regression_report(self) -> str:
-        """Fit bias = intercept + slope*range per axis/color and render a
-        console block distinguishing a constant (translational) error from a
-        range-scaling (rotational/intrinsics) error. READ-ONLY diagnostic.
+        """Report the bias-vs-GT diagnostic THREE ways, READ-ONLY:
+
+        1. SLIDING WINDOW (last BIAS_WINDOW_S seconds, ~1 scan cycle): the
+           CURRENT bias, immune to the cumulative-average drift artefact a
+           pure since-startup fit shows while the scan is still cycling
+           through waypoints (see _collect_bias_samples's docstring).
+        2. bias-vs-RANGE fit within that window: CONST intercept/near-zero
+           slope => translational error; nonzero slope => rotational/
+           intrinsics error.
+        3. PER-WAYPOINT mean bias (all data, since a single waypoint's own
+           samples are lower-variance than the whole window): reveals
+           whether the error depends on which head pose the scan is at.
         """
-        lines = ["       +== BIAS-VS-RANGE DIAGNOSTIC (raw detections vs GT, read-only) =+"]
+        lines = ["       +== BIAS-VS-GT DIAGNOSTIC (raw detections, read-only) =========+"]
         any_data = False
+        now = time.time() - self.start_time
         for color in ("red", "blue"):
             samples = self._bias_samples[color]
             if len(samples) < 5:
                 lines.append(f"       |   {color:<5s}: not enough samples yet ({len(samples)})            |")
                 continue
             any_data = True
-            arr = np.array(samples)   # (N, 3): range, dx, dy
-            rng_arr = arr[:, 0]
-            for axis_name, col in (("dx", 1), ("dy", 2)):
-                y = arr[:, col]
-                # Least-squares line fit: y = a + b*rng
-                A = np.column_stack([np.ones_like(rng_arr), rng_arr])
-                try:
-                    sol, *_ = np.linalg.lstsq(A, y, rcond=None)
-                    intercept, slope = sol
-                except np.linalg.LinAlgError:
-                    intercept, slope = float(y.mean()), 0.0
-                verdict = ("CONST" if abs(slope) < 0.01 else
-                           ("SCALES w/ range" if abs(slope) > 0.02 else "mixed"))
-                lines.append(
-                    f"       |   {color:<5s} {axis_name}: {intercept*100:+6.2f}cm "
-                    f"+ {slope*100:+6.2f}cm/m * range  [{verdict:<16s}] n={len(samples):<4d}|")
+            arr = np.array(samples)   # (N, 5): t, range, dx, dy, wp_idx
+            window = arr[arr[:, 0] > now - self.BIAS_WINDOW_S]
+            if len(window) < 3:
+                window = arr[-10:]
+            ix, sx = self._fit_line(window[:, 1], window[:, 2])
+            iy, sy = self._fit_line(window[:, 1], window[:, 3])
+            verdict = lambda s: "CONST" if abs(s) < 0.01 else "SCALES"
+            lines.append(
+                f"       |   {color:<5s} [last {self.BIAS_WINDOW_S:.0f}s, n={len(window):<4d}] "
+                f"dx={ix*100:+6.2f}cm(slope{sx*100:+5.1f}[{verdict(sx)}]) "
+                f"dy={iy*100:+6.2f}cm(slope{sy*100:+5.1f}[{verdict(sy)}]) |")
+
+            # Per-waypoint mean (ALL data, not windowed) -- tests pose-dependence.
+            wp_line = "       |     per-waypoint dx/dy (cm): "
+            n_wp = len(cfg.SCAN_WAYPOINTS) if cfg.ENABLE_SCAN else 1
+            parts = []
+            for wp in range(n_wp):
+                wp_rows = arr[arr[:, 4] == wp]
+                if len(wp_rows) == 0:
+                    parts.append(f"wp{wp}:--/--")
+                else:
+                    parts.append(f"wp{wp}:{wp_rows[:,2].mean()*100:+.1f}/{wp_rows[:,3].mean()*100:+.1f}")
+            wp_line += " ".join(parts)
+            lines.append(f"{wp_line:<67s}|")
         if not any_data:
             lines.append("       |   (waiting for raw detections...)                            |")
         lines.append("       +================================================================+")
