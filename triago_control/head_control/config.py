@@ -297,7 +297,11 @@ INTEGRATE_VEL_THRESH = 0.04  # [rad/s] only fuse when head settled (if enabled)
 # confirmed root cause and should be corrected there (not permanently
 # patched here). If it does NOT change the bias, this is definitively ruled
 # out and the flag should be turned back off.
-ENABLE_MANUAL_OPTICAL_TF = True
+ENABLE_MANUAL_OPTICAL_TF = False   # RESULT: no measurable change vs. the
+# standard pipeline (bias stayed ~-2.2cm X / -1.2cm Y either way) -- this
+# hop is DEFINITIVELY RULED OUT. Turned off in favour of §5d below, which
+# tests a different, still-open hypothesis. Kept in the code (not deleted)
+# as a documented negative result / in case it's ever useful again.
 # The rigid mount link that is the DIRECT TF parent of the depth optical
 # frame (confirmed via `ros2 run tf2_tools view_frames`:
 # "gripper_head_camera_rgbd_depth_optical_frame: parent: 'gripper_head_camera_link'").
@@ -312,6 +316,56 @@ MANUAL_OPTICAL_R = np.array([
     [0.0, -1.0, 0.0],
 ])
 MANUAL_OPTICAL_T = np.array([0.0, 0.0, 0.0])   # zero translation (colleague's value)
+
+# =============================================================================
+# 5d. MANUAL MOUNT-TRANSLATION TF OVERRIDE  (EXPERIMENT, ON by default)
+# =============================================================================
+# CONTEXT (2026-07-04, from a colleague's qp_controller_node ROS params for
+# their OWN camera-extrinsics pipeline on a related robot config):
+#
+#     camera_mount_parent_frame: arm_head_tool_link
+#     camera_mount_translation: [0.0, 0.0, 0.0]      <-- ZERO
+#     camera_mount_quaternion_xyzw: [0.0, 0.0, 0.0, 1.0]   <-- IDENTITY
+#     camera_link_name: camera_head_camera_rgbd_link
+#     optical_translation: [0.0, 0.0, 0.0]
+#     optical_rpy: [-1.570, 0.0, -1.570]
+#
+# Verified numerically: their `optical_rpy` decomposes to EXACTLY the same
+# rotation matrix already tested (and RULED OUT, see §5c/ENABLE_MANUAL_
+# OPTICAL_TF above) -- so the rotation is NOT new information. What IS new:
+# their config asserts ZERO translation between `arm_head_tool_link` and the
+# camera's own link, whereas OUR live URDF's actual joint for that exact hop
+# (`gripper_head_camera_joint`, parent=arm_head_tool_link,
+# child=gripper_head_camera_link) has origin `xyz="-0.0406 0 -0.003"` -- a
+# real 4.06cm/0.3cm offset, not zero. Our previous experiment (§5c) never
+# tested this: it anchored at TF's LIVE pose of gripper_head_camera_link,
+# which already has this -4.06cm baked in, then only replaced the FINAL hop
+# (camera_link -> optical) with a rotation-only override starting FROM that
+# already-offset point. This is a genuinely different, still-open
+# hypothesis: what if the true physical mount offset is zero, not -4.06cm?
+#
+# When enabled, the camera pose used for perception is composed as:
+#     T_base_camera_link = T_base_mountparent (TF, live)
+#                           @ T_mountparent_cameralink (MANUAL: identity, zero -- per the colleague's config)
+#     T_base_optical      = T_base_camera_link @ T_cameralink_optical (TF, live -- UNCHANGED,
+#                                                                       the camera_link->optical
+#                                                                       rotation is not in question)
+# i.e. ONLY the arm_head_tool_link -> camera_link translation is overridden;
+# everything else (pointing direction, the optical frame's own rotation
+# convention) still comes from the live URDF/TF, unchanged.
+#
+# Mutually exclusive with ENABLE_MANUAL_OPTICAL_TF by construction (only one
+# experiment is meant to be active at a time, to keep results unambiguous --
+# main_head.py will warn loudly and prioritise this one if both are ever set
+# True together). If this changes/fixes the bias-vs-GT diagnostic, the
+# `gripper_head_camera_joint` origin in the URDF/xacro is the confirmed root
+# cause and should be corrected there. If it does NOT change the bias, this
+# is ALSO ruled out and the flag should be turned back off.
+ENABLE_MANUAL_MOUNT_TF = True
+MANUAL_MOUNT_PARENT_FRAME = "arm_head_tool_link"
+MANUAL_MOUNT_CAMERA_LINK = "gripper_head_camera_link"   # our chain's camera_link equivalent
+MANUAL_MOUNT_R = np.eye(3)                      # identity (colleague's quaternion_xyzw=[0,0,0,1])
+MANUAL_MOUNT_T = np.array([0.0, 0.0, 0.0])       # zero (colleague's camera_mount_translation)
 
 # =============================================================================
 # 6. POINT-CLOUD DEPROJECTION  (depth image -> 3D points)

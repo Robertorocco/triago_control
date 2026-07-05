@@ -164,6 +164,12 @@ class HeadPerceptionNode(Node):
             f"  Scan        : {'ON' if cfg.ENABLE_SCAN else 'OFF'}\n"
             "==================================================================")
 
+        if cfg.ENABLE_MANUAL_OPTICAL_TF and cfg.ENABLE_MANUAL_MOUNT_TF:
+            self.get_logger().error(
+                "Both ENABLE_MANUAL_OPTICAL_TF and ENABLE_MANUAL_MOUNT_TF are True -- "
+                "these are separate experiments meant to be tested one at a time. "
+                "Prioritising ENABLE_MANUAL_MOUNT_TF (the newer, still-open hypothesis); "
+                "set ENABLE_MANUAL_OPTICAL_TF=False in config.py to silence this.")
         if cfg.ENABLE_MANUAL_OPTICAL_TF:
             self.get_logger().warn(
                 "\n"
@@ -172,9 +178,24 @@ class HeadPerceptionNode(Node):
                 "# The mount_link -> depth_optical_frame hop is NOT taken from the #\n"
                 "# live URDF/TF -- it is manually overridden (config.py sec 5c),  #\n"
                 "# mirroring a colleague's REP-103 static-transform workaround.   #\n"
+                "# RESULT (already tested): no measurable change to the bias.     #\n"
                 "# Compare the [BIAS-VS-RANGE] intercept against a normal run to  #\n"
                 "# see whether this changes anything. Set the flag back to False #\n"
                 "# to return to the standard TF-derived pipeline.                 #\n"
+                "##################################################################")
+        if cfg.ENABLE_MANUAL_MOUNT_TF:
+            self.get_logger().warn(
+                "\n"
+                "##################################################################\n"
+                "# EXPERIMENT ACTIVE: cfg.ENABLE_MANUAL_MOUNT_TF = True            #\n"
+                "# The arm_head_tool_link -> camera_link translation is NOT taken  #\n"
+                "# from the live URDF/TF (which has xyz=-0.0406,0,-0.003) -- it is #\n"
+                "# overridden to ZERO/identity, per a colleague's qp_controller_   #\n"
+                "# node params (config.py sec 5d). The camera_link -> optical      #\n"
+                "# rotation hop is UNCHANGED (still live TF).                      #\n"
+                "# Compare the [BIAS-VS-GT] panel against a normal run to see      #\n"
+                "# whether this changes anything. Set the flag back to False to   #\n"
+                "# return to the standard TF-derived pipeline.                     #\n"
                 "##################################################################")
 
     # ================================================================== #
@@ -442,16 +463,60 @@ class HeadPerceptionNode(Node):
         Falls back to the latest available transform if the exact stamp is not
         yet buffered. Returns (None, None) if TF is unavailable.
 
-        EXPERIMENT (cfg.ENABLE_MANUAL_OPTICAL_TF, off by default): if the depth
-        frame is the known optical frame and this flag is set, the LAST HOP
-        (mount_link -> depth_optical_frame) is NOT taken from the live
-        URDF/TF at all -- it is instead composed manually from
-        cfg.MANUAL_OPTICAL_R/T (the generic REP-103 convention), mirroring a
-        colleague's independent workaround for the same class of bug on a
-        different robot config. See config.py section 5c for the full
-        rationale. This ONLY changes which transform is used to place the
-        point cloud; it never alters any other part of the pipeline.
+        EXPERIMENT A (cfg.ENABLE_MANUAL_OPTICAL_TF, OFF -- already tested,
+        RULED OUT): if set, the LAST HOP (mount_link -> depth_optical_frame)
+        is NOT taken from the live URDF/TF at all -- it is instead composed
+        manually from cfg.MANUAL_OPTICAL_R/T (the generic REP-103
+        convention), mirroring a colleague's independent workaround for the
+        same class of bug on a different robot config. See config.py
+        section 5c. RESULT: no measurable change to the bias -- this hop is
+        confirmed NOT the source.
+
+        EXPERIMENT B (cfg.ENABLE_MANUAL_MOUNT_TF, ON by default): tests a
+        DIFFERENT, still-open hypothesis, sourced from a colleague's
+        qp_controller_node ROS params -- their config asserts ZERO
+        translation between arm_head_tool_link and the camera's own link,
+        while our live URDF's actual joint for that exact hop has a real
+        xyz=(-0.0406, 0, -0.003) offset. When enabled, the chain is composed
+        as three hops instead of one direct TF lookup:
+            T_base_mountparent   (TF, live)
+          @ T_mountparent_camlink (MANUAL: identity rotation, zero translation)
+          @ T_camlink_optical    (TF, live -- UNCHANGED, only the mount hop
+                                   is overridden here)
+        See config.py section 5d for the full rationale. This ONLY changes
+        which transform is used to place the point cloud; it never alters
+        any other part of the pipeline. Mutually exclusive with Experiment A
+        (this one takes priority if both flags are ever left True).
         """
+        if cfg.ENABLE_MANUAL_MOUNT_TF:
+            # Step 1: live TF poses we need (base<-mount_parent, base<-
+            # camera_link, base<-optical) -- all from the UNMODIFIED chain.
+            R_base_mp, t_base_mp = self._lookup_transform_raw(
+                cfg.MANUAL_MOUNT_PARENT_FRAME, stamp)
+            R_base_camlink_live, t_base_camlink_live = self._lookup_transform_raw(
+                cfg.MANUAL_MOUNT_CAMERA_LINK, stamp)
+            R_base_opt_live, t_base_opt_live = self._lookup_transform_raw(frame_id, stamp)
+            if R_base_mp is None or R_base_camlink_live is None or R_base_opt_live is None:
+                return None, None
+
+            # Step 2: recover the camera_link -> optical hop in isolation
+            # (unaffected by this experiment) by inverting the live
+            # base<-camera_link pose out of the live base<-optical pose:
+            #   T_camlink_optical = T_base_camlink_live^-1 @ T_base_optical_live
+            R_camlink_optical = R_base_camlink_live.T @ R_base_opt_live
+            t_camlink_optical = R_base_camlink_live.T @ (t_base_opt_live - t_base_camlink_live)
+
+            # Step 3: rebuild base<-camera_link using the OVERRIDDEN mount
+            # hop instead of the live one:
+            #   T_base_camlink_NEW = T_base_mountparent (TF) @ T_mountparent_camlink (MANUAL)
+            R_base_camlink_new = R_base_mp @ cfg.MANUAL_MOUNT_R
+            t_base_camlink_new = R_base_mp @ cfg.MANUAL_MOUNT_T + t_base_mp
+
+            # Step 4: recompose with the (unaffected) camera_link->optical hop:
+            #   T_base_optical_NEW = T_base_camlink_NEW @ T_camlink_optical
+            R = R_base_camlink_new @ R_camlink_optical
+            t = R_base_camlink_new @ t_camlink_optical + t_base_camlink_new
+            return R, t
         if cfg.ENABLE_MANUAL_OPTICAL_TF:
             R_bm, t_bm = self._lookup_transform_raw(cfg.MANUAL_OPTICAL_MOUNT_LINK, stamp)
             if R_bm is None:
