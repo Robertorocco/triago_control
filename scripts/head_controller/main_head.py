@@ -117,6 +117,20 @@ class HeadPerceptionNode(Node):
         self._last_vel_norm = 0.0
         self._last_integrated = False
 
+        # --- Bias-vs-range diagnostic (READ-ONLY audit, per project rule:
+        # ground-truth constants are only ever used here for COMPARISON, never
+        # fed back into the perception output). Accumulates raw, PRE-TRACKER
+        # per-frame detections vs. GT_RED_CENTER/GT_BLUE_CENTER together with
+        # the camera-to-object range at that instant, so we can fit
+        #     bias = intercept + slope * range
+        # A nonzero INTERCEPT with near-zero SLOPE indicates a constant
+        # translational error (e.g. a fixed offset in the extrinsic chain,
+        # independent of viewing distance). A nonzero SLOPE indicates an
+        # angular/rotational error or an intrinsics (cx/cy) error (bias grows
+        # proportionally with distance). This is diagnostic-only console
+        # output; it never alters the actual perception result.
+        self._bias_samples = {"red": [], "blue": []}   # color -> list[(range, dx, dy)]
+
         # --- Timers ----------------------------------------------------
         self.create_timer(1.0 / cfg.CONTROL_RATE_HZ, self._control_tick)
         self.create_timer(1.0 / cfg.PERCEPTION_RATE_HZ, self._perception_tick)
@@ -227,6 +241,7 @@ class HeadPerceptionNode(Node):
             allow_integrate=allow_integrate, allow_track_update=allow_integrate
         )
         self.latest_result = result
+        self._collect_bias_samples(result, t_cam_base)
 
         # --- Active perception: adapt the camera standoff distance -----
         # Decide (from the observed cloud framing + object resolution, NO scene
@@ -269,6 +284,64 @@ class HeadPerceptionNode(Node):
             float(result.map_size),
         ]
         self.pub_telemetry.publish(tel)
+
+    def _collect_bias_samples(self, result, t_cam_base):
+        """Accumulate (range, dx, dy) samples from RAW (pre-tracker) detections
+        vs. the known GT centers, for the bias-vs-range regression diagnostic.
+
+        READ-ONLY: this compares against cfg.GT_RED_CENTER/GT_BLUE_CENTER
+        purely for console reporting. It does not feed back into
+        `result.objects`, `result.raw_detections`, or any published topic that
+        drives control/collision — see the module rule on ground-truth usage.
+        Uses raw_detections (this frame's fresh fit) rather than the
+        EMA-tracked `objects`, since the tracker's smoothing autocorrelates
+        consecutive samples and would mask a genuine range-dependent trend.
+        """
+        gt = {"red": cfg.GT_RED_CENTER, "blue": cfg.GT_BLUE_CENTER}
+        for det in result.raw_detections:
+            if det.color_name not in gt:
+                continue
+            rng = float(np.linalg.norm(det.center - t_cam_base))
+            dx = float(det.center[0] - gt[det.color_name][0])
+            dy = float(det.center[1] - gt[det.color_name][1])
+            self._bias_samples[det.color_name].append((rng, dx, dy))
+            # Cap memory: keep only the most recent 500 samples per color.
+            if len(self._bias_samples[det.color_name]) > 500:
+                self._bias_samples[det.color_name].pop(0)
+
+    def _bias_regression_report(self) -> str:
+        """Fit bias = intercept + slope*range per axis/color and render a
+        console block distinguishing a constant (translational) error from a
+        range-scaling (rotational/intrinsics) error. READ-ONLY diagnostic.
+        """
+        lines = ["       +== BIAS-VS-RANGE DIAGNOSTIC (raw detections vs GT, read-only) =+"]
+        any_data = False
+        for color in ("red", "blue"):
+            samples = self._bias_samples[color]
+            if len(samples) < 5:
+                lines.append(f"       |   {color:<5s}: not enough samples yet ({len(samples)})            |")
+                continue
+            any_data = True
+            arr = np.array(samples)   # (N, 3): range, dx, dy
+            rng_arr = arr[:, 0]
+            for axis_name, col in (("dx", 1), ("dy", 2)):
+                y = arr[:, col]
+                # Least-squares line fit: y = a + b*rng
+                A = np.column_stack([np.ones_like(rng_arr), rng_arr])
+                try:
+                    sol, *_ = np.linalg.lstsq(A, y, rcond=None)
+                    intercept, slope = sol
+                except np.linalg.LinAlgError:
+                    intercept, slope = float(y.mean()), 0.0
+                verdict = ("CONST" if abs(slope) < 0.01 else
+                           ("SCALES w/ range" if abs(slope) > 0.02 else "mixed"))
+                lines.append(
+                    f"       |   {color:<5s} {axis_name}: {intercept*100:+6.2f}cm "
+                    f"+ {slope*100:+6.2f}cm/m * range  [{verdict:<16s}] n={len(samples):<4d}|")
+        if not any_data:
+            lines.append("       |   (waiting for raw detections...)                            |")
+        lines.append("       +================================================================+")
+        return "\n" + "\n".join(lines)
 
     def _publish_view_debug(self):
         """Publish the active-perception standoff telemetry array."""
@@ -393,7 +466,8 @@ class HeadPerceptionNode(Node):
             f"head_vel={self._last_vel_norm:.3f} {'FUSING' if self._last_integrated else 'moving'}\n"
             f"       [OBJECTS] {obj_txt}\n"
             f"       [JOINTS] {joint_info}" + diag
-            + self._active_view_panel())
+            + self._active_view_panel()
+            + self._bias_regression_report())
 
     # ------------------------------------------------------------------ #
     # Active-perception debug window (shareable console panel)             #

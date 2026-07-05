@@ -31,6 +31,12 @@ from triago_control.head_control.object_tracker import ObjectTracker
 class PerceptionResult:
     plane: object = None                    # PlaneModel or None
     objects: list = field(default_factory=list)     # list[DetectedObject]
+    raw_detections: list = field(default_factory=list)  # list[DetectedObject], PRE-TRACKER
+                                             # (this frame's fresh, unfiltered fit —
+                                             # needed for any bias-vs-range diagnostic,
+                                             # since the EMA-tracked `objects` above is
+                                             # autocorrelated across frames and would
+                                             # hide/smear a range-dependent trend)
     cropped_points: np.ndarray = None       # (N,3) base frame  (for viz)
     cropped_colors: np.ndarray = None       # (N,3) uint8
     above_points: np.ndarray = None         # (M,3) above-plane points (for viz)
@@ -154,6 +160,7 @@ class PerceptionPipeline:
 
         # 4. Cluster + fit + classify.
         detections = self.detector.detect(above_pts, above_cols, plane)
+        res.raw_detections = detections    # pre-tracker, this frame only (diagnostics)
 
         # 5. Object-level temporal fusion (grow-only dims + persistence). Only
         # fuse when the head is settled so motion never corrupts the estimate.
