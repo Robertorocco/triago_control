@@ -13,10 +13,14 @@
 #
 # Table (center [1.0, 0.0, 0.35], half-extents [0.3, 0.25, 0.35] -> top
 # surface at z=0.70):
-#   red_target  x = table center x = 1.0
+#   red_target  x = table center x (1.0) - 0.20 (closer to robot) = 0.80
 #               y = table right edge (y=-0.25) - 0.20 = -0.45
-#               z = table top (0.70) + 0.50 = 1.20
+#               z = table top (0.70) + 0.50 (original) - 0.20 (closer to
+#                   table) = 1.00
 #   blue_target mirrors on y = +0.45
+# Moved 20cm closer to the robot (x) and 20cm closer to the table (z),
+# symmetrically for both, after the original z=1.20/x=1.0 pose was reported
+# as physically unreachable.
 #
 # Matches the Gazebo world launched via:
 #   ros2 launch triago_gazebo triago_gazebo.launch.py ... world_name:=movement_tutorial
@@ -50,7 +54,7 @@ static_obstacles:
   - name: "red_target"
     role: "reachable"
     shape: "cylinder"
-    pose: [1.0, -0.45, 1.20, 0.0, 0.0, 0.0]
+    pose: [0.80, -0.45, 1.00, 0.0, 0.0, 0.0]
     size: [0.02, 0.15]          # nominal only -- never read by any Front-goal code path
     color: [1.0, 0.0, 0.0, 1.0]
     collision: false
@@ -58,7 +62,7 @@ static_obstacles:
   - name: "blue_target"
     role: "reachable"
     shape: "cylinder"
-    pose: [1.0, 0.45, 1.20, 0.0, 0.0, 0.0]
+    pose: [0.80, 0.45, 1.00, 0.0, 0.0, 0.0]
     size: [0.02, 0.15]
     color: [0.0, 0.0, 1.0, 1.0]
     collision: false

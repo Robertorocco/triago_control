@@ -79,14 +79,16 @@
          config/worlds/movement_tutorial.yaml's red_target/blue_target
          entries, which are also collision:false.
 
-         Poses (base_footprint / world, robot at origin):
-           red_target:  20cm right of table center, 50cm above the table
-                        top. x=1.0, y=-0.45, z=1.20
+         Poses (base_footprint / world, robot at origin). Moved 20cm closer
+         to the robot (x) and 20cm closer to the table (z) from the
+         original x=1.0/z=1.20, after that pose was reported physically
+         unreachable:
+           red_target:  x=0.80, y=-0.45, z=1.00
            blue_target: mirrored on y=+0.45
     ================================================================ -->
     <model name="red_target">
       <static>true</static>
-      <pose>1.000 -0.45 1.20 0 0 0</pose>
+      <pose>0.80 -0.45 1.00 0 0 0</pose>
       <link name="link">
         <visual name="vis">
           <geometry><sphere><radius>0.03</radius></sphere></geometry>
@@ -97,7 +99,7 @@
 
     <model name="blue_target">
       <static>true</static>
-      <pose>1.000 0.45 1.20 0 0 0</pose>
+      <pose>0.80 0.45 1.00 0 0 0</pose>
       <link name="link">
         <visual name="vis">
           <geometry><sphere><radius>0.03</radius></sphere></geometry>
