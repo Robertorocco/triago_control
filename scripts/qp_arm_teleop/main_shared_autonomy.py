@@ -1433,11 +1433,28 @@ class SharedControlNode(Node):
             # distance into the future so the QP's CLF always has a moving,
             # reachable carrot to track (sending current pose stalls tracking;
             # sending the final goal causes a jerk).
-            # NOTE: 0.02s is conservative. Larger values (e.g. 0.1) cause the
-            # reference to fling far when the twist reverses (CBF repulsion), which
-            # made the green gripper fly away from the goal. 0.02s = 2mm lead at
-            # 0.1 m/s — just enough for the CLF to track smoothly.
-            dt_virtual = 0.02
+            # NOTE: 0.02s is conservative for GRASP EXECUTION / BLENDING TELEOP
+            # (unchanged, tuned/tested against those modes). Larger values (e.g.
+            # 0.1) cause the reference to fling far when the twist reverses (CBF
+            # repulsion), which made the green gripper fly away from the goal.
+            # 0.02s = 2mm lead at 0.1 m/s -- just enough for the CLF to track
+            # smoothly in THOSE modes.
+            #
+            # POLICY_BELIEF_TEST is DIFFERENT: T_virtual_ref re-anchors from
+            # self.current_T_EE (the live, still-settling EE pose) every 100Hz
+            # tick. At 0.02s the lead distance (~2mm at typical policy speed) is
+            # small enough that ordinary EE tracking lag/settling wobble (a few
+            # mm, normal for any closed-loop tracker) becomes a LARGE relative
+            # fraction of the carrot's own motion each tick -- producing a
+            # genuinely jittery reference (observed: high-frequency oscillation
+            # in position error + slack, reported independent of
+            # ENABLE_REFERENCE_GOVERNOR). A larger lead distance in test mode
+            # dilutes that same absolute wobble to a smaller fraction of the
+            # carrot's motion, fixing it at the root instead of only patching
+            # a downstream amplifier. Kept mode-gated (grasp_exec/BLENDING keep
+            # the original tuned value) since this is a test-mode-specific fix,
+            # not a general retune.
+            dt_virtual = 0.10 if self.POLICY_BELIEF_TEST else 0.02
             T_virtual_ref = self.integrate_twist(self.current_T_EE, target_twist, dt_virtual)
 
             p_ref = T_virtual_ref[:3, 3]
