@@ -1,19 +1,32 @@
 # =============================================================================
-# bimanual_default.yaml
+# no_obstacle.yaml
 # -----------------------------------------------------------------------------
-# Default world scene: table + red/blue graspable cylinders. Reproduces
-# EXACTLY the values that used to be hard-coded in qp_controller/config.py
-# (TABLE_POS/TABLE_SIZE/RED_CYLINDER_POS/BLUE_CYLINDER_POS/CYLINDER_SIZE) --
-# this file is a behavior-identical refactor target, not a new scenario.
+# World 1 of the user-study world set: free-space table + red/blue graspable
+# cylinders, NO extra obstacles. This is the baseline/easiest scenario -- the
+# user's raw teleoperation capability under each feedback condition, with
+# nothing forcing a particular grasp approach or path.
+#
+# RENAMED 2026-07-04 (was bimanual_default.yaml / world_name "bimanual_default").
+# Values are otherwise UNCHANGED -- this is a pure rename, not a new scenario;
+# still reproduces exactly what used to be hard-coded in qp_controller/
+# config.py (TABLE_POS/TABLE_SIZE/RED_CYLINDER_POS/BLUE_CYLINDER_POS/
+# CYLINDER_SIZE).
+#
+# NAMING CONVENTION (established with this rename, follow it for every future
+# world in the study set): the YAML filename ALWAYS matches the Gazebo
+# .world filename (minus extension). This file <-> no_obstacle.world.
+# world_name: below matches both.
 #
 # Matches the Gazebo world launched today via:
-#   ros2 launch triago_gazebo triago_gazebo.launch.py ... world_name:=tutorial
+#   ros2 launch triago_gazebo triago_gazebo.launch.py ... world_name:=no_obstacle
 #
 # See triago_control/qp_controller/world_loader.py for the full schema
 # documentation and how each field is consumed.
 #
 # HOW TO MAKE A NEW WORLD
-#   1. Copy this file to config/worlds/<your_world_name>.yaml.
+#   1. Copy this file to config/worlds/<your_world_name>.yaml, where
+#      <your_world_name> MATCHES your new <your_world_name>.world file
+#      (see naming convention above).
 #   2. Edit `static_obstacles` poses/sizes/colors to match your new Gazebo
 #      world's SDF <model><pose>/<geometry> blocks (keep the two in sync by
 #      hand -- this YAML does not read the .world file, it must mirror it).
@@ -25,12 +38,12 @@
 #             -p world_name:=<your_world_name>
 #        ros2 run triago_control main_shared_autonomy.py --ros-args \
 #             -p world_name:=<your_world_name>
-#      (the Gazebo launch command itself is unchanged -- only point its
-#       world_name:= arg at the matching .world file yourself.)
+#      (the Gazebo launch command itself is unchanged in STRUCTURE -- only
+#       point its world_name:= arg at the matching .world file yourself.)
 # =============================================================================
 
-world_name: "bimanual_default"
-gazebo_world_file: "tutorial.world"   # bookkeeping pointer only; not read by this loader
+world_name: "no_obstacle"
+gazebo_world_file: "no_obstacle.world"   # bookkeeping pointer only; not read by this loader
 
 static_obstacles:
   - name: "work_table"

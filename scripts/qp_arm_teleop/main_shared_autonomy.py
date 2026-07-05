@@ -113,8 +113,8 @@ class SharedControlNode(Node):
         # node's `{'red': 'red_cylinder', 'blue': 'blue_cylinder'}`). See
         # world_loader.py for the full schema / how to author a new world.
         #   ros2 run triago_control main_shared_autonomy.py --ros-args \
-        #        -p world_name:=bimanual_default
-        self.declare_parameter('world_name', 'bimanual_default')
+        #        -p world_name:=no_obstacle
+        self.declare_parameter('world_name', 'no_obstacle')
         world_name = self.get_parameter('world_name').get_parameter_value().string_value
         self.world_scene = load_world(world_name)
         self.get_logger().info(

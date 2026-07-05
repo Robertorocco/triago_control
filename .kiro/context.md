@@ -1425,8 +1425,9 @@ under `config/worlds/<world_name>.yaml` -- fully describing that world's
 static obstacle layout (shape/pose/size/color/collision-on-off) plus which
 named obstacle plays the "red"/"blue" grasp role. See
 `triago_control/qp_controller/world_loader.py`'s module docstring for the
-full schema, and `config/worlds/bimanual_default.yaml` for the reference
-world (reproduces the OLD hard-coded values exactly -- verified numerically
+full schema, and `config/worlds/no_obstacle.yaml` (renamed 2026-07-04 from
+`bimanual_default.yaml` -- see §9.13 below) for the reference world
+(reproduces the OLD hard-coded values exactly -- verified numerically
 byte-for-byte against the previous constants, this refactor changes NO
 runtime behavior for the default world).
 
@@ -1455,13 +1456,13 @@ not yet updated keeps working unchanged):
   (replaces the old `"red" in name` / `"blue" in name` string-matching
   heuristic with a direct YAML color lookup).
 - `main_qp_controller.py` / `main_shared_autonomy.py`: both declare a
-  `world_name` ROS parameter (default `'bimanual_default'`) and call
+  `world_name` ROS parameter (default `'no_obstacle'`, see §9.13) and call
   `load_world(world_name)` at startup, logging which scene + how many
   obstacles were loaded. **Both nodes must be given the SAME `world_name`**
   (they must agree on where the cylinders are) -- e.g.:
   ```bash
-  ros2 run triago_control main_qp_controller.py --ros-args -p world_name:=bimanual_default
-  ros2 run triago_control main_shared_autonomy.py --ros-args -p world_name:=bimanual_default
+  ros2 run triago_control main_qp_controller.py --ros-args -p world_name:=no_obstacle
+  ros2 run triago_control main_shared_autonomy.py --ros-args -p world_name:=no_obstacle
   ```
 - `main_shared_autonomy.py`'s `GoalSet` is now constructed from a new
   `_cylinders_from_world_scene(world_scene)` static helper (maps
@@ -1607,7 +1608,8 @@ semantics exactly like the original flag.
 legacy fallback path consumed when `world_scene=None`. New obstacles should
 be added to a world YAML, not to `config.py`.
 
-**New file**: `config/worlds/bimanual_default.yaml`. `package.xml` gained a
+**New file**: `config/worlds/no_obstacle.yaml` (renamed 2026-07-04, see
+§9.13). `package.xml` gained a
 `python3-yaml` dependency (already transitively required by
 `trajectory_generator.py`'s pre-existing `import yaml`, now made explicit
 since `world_loader.py` is a second load-bearing import site). No
@@ -1648,6 +1650,59 @@ defaults for `bimanual_default.yaml`, i.e. behavior-unchanged); `None`
 yet passing a world scene. `main_shared_autonomy.py` now passes
 `platform=self.world_scene.platform` alongside its existing `cylinders=`
 argument when constructing `GoalSet`.
+
+---
+
+### 9.13 World rename: `bimanual_default` -> `no_obstacle` (2026-07-04)
+
+**Context**: kicking off a multi-world user-study plan (novice teleoperation
+under 3 assistive-feedback conditions, across ~5 world scenarios of
+increasing difficulty). `bimanual_default` is World 1 -- the free-space
+baseline, no extra obstacles -- and is being renamed to `no_obstacle` to
+read clearly as "the easy/control scenario" once World 2-5 (`forced_side_
+grasp`, `narrow_corridor`, `ambiguous_targets`, `cluttered_bimanual`, ...)
+exist alongside it. Pure rename -- NO obstacle poses/sizes/colors changed;
+still byte-for-byte the same scene as the original hard-coded
+TABLE_POS/RED_CYLINDER_POS/BLUE_CYLINDER_POS/CYLINDER_SIZE constants.
+
+**Naming convention established for every future world in the study set**:
+the YAML filename ALWAYS matches the Gazebo `.world` filename (minus
+extension) -- e.g. `no_obstacle.yaml` <-> `no_obstacle.world`. This removes
+any ambiguity once several worlds exist side by side.
+
+**Changed** (YAML-side, this repo):
+- `config/worlds/bimanual_default.yaml` deleted, replaced by
+  `config/worlds/no_obstacle.yaml` (`world_name: "no_obstacle"`,
+  `gazebo_world_file: "no_obstacle.world"`).
+- `main_qp_controller.py` / `main_shared_autonomy.py`: `world_name` ROS
+  parameter default changed `'bimanual_default'` -> `'no_obstacle'`.
+- `world_loader.py`, `config.py`, `README.md`: every docstring/comment
+  example updated to reference `no_obstacle` instead of `bimanual_default`/
+  `tutorial`.
+
+**NOT changed by this repo** (lives in the `triago_gazebo` package, not
+shared with the assistant -- see the corresponding operator-side
+instructions given alongside this commit):
+- The actual Gazebo `.world` SDF file itself must be renamed
+  `tutorial.world` -> `no_obstacle.world` on disk (`<world name="...">`
+  INSIDE the SDF does not need to change -- Gazebo's `world_name:=` launch
+  argument matches the FILE name, not the SDF's internal `<world name=...>`
+  attribute, which is free to stay `bimanual_manipulation_world` or
+  whatever it already is).
+- Any `triago_gazebo` launch file default value / world-file search path
+  that hard-codes `tutorial` needs updating to `no_obstacle` too, if such a
+  default exists (operator-side, package not in this repo).
+
+**Launch command changes from**:
+```bash
+ros2 launch triago_gazebo triago_gazebo.launch.py ... world_name:=tutorial
+```
+**to**:
+```bash
+ros2 launch triago_gazebo triago_gazebo.launch.py ... world_name:=no_obstacle
+```
+with the two ROS-side nodes' `world_name` parameter following suit (now
+defaulted, no explicit `-p world_name:=...` needed unless overriding).
 
 ---
 

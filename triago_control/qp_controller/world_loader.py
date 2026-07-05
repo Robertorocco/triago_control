@@ -27,8 +27,10 @@ no duplicated numbers.
 
 WHAT THIS DOES NOT CHANGE
 -----------------------------------------------------------------------------
-* The Gazebo launch command is UNCHANGED (`ros2 launch triago_gazebo ...
-  world_name:=tutorial`). This module has NO connection to Gazebo -- it only
+* The Gazebo launch command is UNCHANGED IN STRUCTURE (`ros2 launch
+  triago_gazebo ... world_name:=<name>`, only the `<name>` argument itself
+  changes per world -- see config/worlds/no_obstacle.yaml's header for the
+  full rename history). This module has NO connection to Gazebo -- it only
   describes, on the Pinocchio/hppfcl/RViz side, the SAME obstacle layout that
   the chosen Gazebo .world file already spawns. Keeping the two in sync when
   authoring a NEW world is a manual (but now single-file, single-place)
@@ -39,7 +41,7 @@ WHAT THIS DOES NOT CHANGE
 * `trajectory_endpoints.yaml` (test presets) is untouched, per instruction --
   these worlds are teleoperation-driven, not open-loop-preset-driven.
 
-SCHEMA (see config/worlds/bimanual_default.yaml for a full worked example)
+SCHEMA (see config/worlds/no_obstacle.yaml for a full worked example)
 -----------------------------------------------------------------------------
 world_name: str                     -- must match the YAML's own file, informational
 gazebo_world_file: str               -- bookkeeping pointer to the matching .world file
@@ -192,8 +194,8 @@ def _find_world_yaml(world_name):
 def load_world(world_name) -> WorldScene:
     """Load and parse a world scene YAML by name (no '.yaml' extension, no path).
 
-    Example: load_world('bimanual_default') reads
-             config/worlds/bimanual_default.yaml
+    Example: load_world('no_obstacle') reads
+             config/worlds/no_obstacle.yaml
     """
     path = _find_world_yaml(world_name)
     with open(path, 'r') as f:

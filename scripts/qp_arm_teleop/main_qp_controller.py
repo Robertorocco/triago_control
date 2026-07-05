@@ -64,8 +64,8 @@ class SafetyQPController(Node):
         # parameter only tells the QP/RViz/Meshcat side which YAML to mirror
         # it with. Override at runtime, e.g.:
         #   ros2 run triago_control main_qp_controller.py --ros-args \
-        #        -p world_name:=bimanual_default
-        self.declare_parameter('world_name', 'bimanual_default')
+        #        -p world_name:=no_obstacle
+        self.declare_parameter('world_name', 'no_obstacle')
         world_name = self.get_parameter('world_name').get_parameter_value().string_value
         self.world_scene = load_world(world_name)
         self.get_logger().info(

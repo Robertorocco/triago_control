@@ -25,7 +25,7 @@ import numpy as np
 # collision_manager.py's LEGACY (world_scene=None) fallback path. To enable/
 # disable the wall in a world loaded via world_loader.py, set that world's
 # YAML `virtual_wall` obstacle's `collision:` field instead (see
-# config/worlds/bimanual_default.yaml, where it is False, matching this).
+# config/worlds/no_obstacle.yaml, where it is False, matching this).
 WALL_COLLIDER = False          # Enable the virtual collision wall (XZ plane) [legacy path only]
 FLYING_OBSTACLE = False         # Enable the flying obstacle marker / collider
 # PINHOLE_TASK: dead flag, never wired to any code path (kept only so any
@@ -568,7 +568,7 @@ del _n, _fix, _side, _CAPSULE_FIX
 # size, extra obstacles for a harder task, etc.) -- and main_qp_controller.py /
 # main_shared_autonomy.py's `world_name` ROS parameter to select one at
 # runtime, e.g.:
-#   ros2 run triago_control main_qp_controller.py --ros-args -p world_name:=bimanual_default
+#   ros2 run triago_control main_qp_controller.py --ros-args -p world_name:=no_obstacle
 #
 # These constants are KEPT (not deleted) purely as the LEGACY FALLBACK path:
 # any call site that constructs CollisionManager/VisualizationEngine WITHOUT

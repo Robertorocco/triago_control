@@ -122,15 +122,18 @@ Each command runs in its own terminal (workspace sourced). Robot/control side fi
 **Robot / control side:**
 
 ```bash
-# 1. World: TRIAGo + table + cylinders + yellow placement zone ("tutorial")
+# 1. World: TRIAGo + table + cylinders + yellow placement zone ("no_obstacle")
 ros2 launch triago_gazebo triago_gazebo.launch.py \
     end_effector_right:=pal-pro-gripper end_effector_left:=pal-pro-gripper \
-    world_name:=tutorial
+    world_name:=no_obstacle
 
 # 2. Load default controllers (joint-space velocity controllers, etc.)
 ros2 launch triago_controller_configuration tsid_default_controllers.launch.py use_sim_time:=True
 
 # 3. QP CLF-CBF safety controller
+#    (world_name defaults to "no_obstacle", matching step 1 above -- override
+#    both this AND step 4 with -p world_name:=<name> together if you launch a
+#    different Gazebo world; see triago_control/qp_controller/world_loader.py)
 ros2 run triago_control main_qp_controller.py
 
 # 4. Shared autonomy + belief evaluation
