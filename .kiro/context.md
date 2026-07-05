@@ -1,7 +1,16 @@
 # AI Agent Context — triago_control
 
 > **This file is maintained by the AI agent. Do not edit manually.**
-> Last updated: 2026-07-04 (§9.12 follow-up: added the `platform` field to
+> Last updated: 2026-07-05 (§5.11 NEW: ported a colleague's C++ PCL
+> `tabletop_perception_node` architecture — Z-locked 2D-PCA oriented-bounding-
+> box fit + position-matched grow-only-dimension memory tracker — into
+> `head_control/obb_detector.py` + `obb_tracker.py` as a SECOND, INDEPENDENT
+> estimator run alongside `main_head.py`'s existing rim-extraction/Hyper-fit
+> cylinder pipeline. OFF by default (`cfg.ENABLE_OBB_ESTIMATOR=False`); does
+> NOT alter the primary cylinder pipeline's output in any way. Explicitly
+> NOT a fix for the reported ~2cm cylinder pose/radius error — see §5.11 for
+> why, and for this estimator's own, different bias profile.)
+> Earlier: 2026-07-04 (§9.12 follow-up: added the `platform` field to
 > the world scene schema -- the yellow `placement_area` disk used by
 > shared-autonomy's Platform_Place goal. NOT an obstacle (no collision, not
 > in `static_obstacles`) -- a separate top-level `WorldScene.platform`
@@ -697,6 +706,153 @@ estimator is actually trustworthy.
 - **Collision CBF not wired**: the hppfcl collision model is built but distance constraints are not yet formulated as QP inequalities.
 - **No shared config file**: gains are hard-coded in-script (unlike the arm QP which uses `config.py`). Will be refactored as the module matures.
 - **Loop rate**: currently event-driven (`spin_once` + `solve_and_publish` per iteration). Future: dedicated timer at a fixed frequency.
+
+### 5.11 OBB / memory-tracking estimator port (2026-07-05)
+
+**Request**: the operator provided a colleague's ROS2/C++ PCL-based
+`tabletop_perception_node` (source, launch file, and a `qp_controller_node`
+YAML config — the SAME colleague whose extrinsics numbers are already being
+A/B-tested in §5.10's `ENABLE_MANUAL_MOUNT_TF`/`ENABLE_MANUAL_OPTICAL_TF`
+experiments) and asked to reproduce that node's ARCHITECTURE inside this
+project's Python `head_control` pipeline, as a path toward reducing the
+reported ~2cm cylinder pose error.
+
+**What the C++ node actually does, precisely** (read before assuming this is
+a cylinder-specific fix — it is not): it makes **no shape assumption about
+the object at all**. Per Euclidean cluster (above a RANSAC table plane) it
+computes a **Z-locked 2D-PCA oriented bounding box**: flatten the cluster to
+`z=0`, eigendecompose the 2x2 in-plane covariance (ascending eigenvalue
+order, `Eigen::SelfAdjointEigenSolver` convention), build a 3x3 rotation with
+the world `+Z` axis pinned and the middle axis re-derived via
+`col(1) = col(2) x col(0)`, project the full 3D cluster into that rotated
+frame, and take its axis-aligned bounding box there. Fusion across frames is
+**position-matched** (nearest track within 15cm) with **REPLACED**
+position/orientation and **grow-only** (elementwise-max) dimensions, plus a
+`frames_unseen`-based persistence/deletion timeout (~10 frames). The most
+recently-matched non-"obstacle" track (classified by whether its centre sits
+below the segmented table height) is published as a single `target_pose`.
+
+**Ported as an ADDITIONAL, independently-toggleable estimator, not a
+replacement** — three reasons, all confirmed against this project's own
+standing conventions before implementing:
+1. `main_head.py`'s existing pipeline (rim extraction + Hyper circle fit +
+   top-slice-median height, §5.10) was itself a carefully root-caused and
+   numerically-verified fix for a SPECIFIC, already-diagnosed bias (the old
+   Kasa-on-a-filled-disk under-estimate). Silently replacing it with a
+   generically-fit OBB would discard that verified work without evidence the
+   replacement is actually better for THIS scenario (upright cylinders with a
+   known axis) — the two make fundamentally different assumptions.
+2. **This does not fix, and is not expected to fix, the 2cm error the
+   operator is trying to reduce.** The ~2cm bias was independently diagnosed
+   in `main_head.py`/`config.py` §5c/§5d as most likely an EXTRINSIC/mount-
+   translation calibration issue (`ENABLE_MANUAL_MOUNT_TF`, still an open,
+   untested-confirmed hypothesis) — a problem in WHERE the camera pose is
+   computed from, upstream of any per-cluster shape fit. Swapping the shape
+   estimator changes nothing about that upstream transform chain. Ported
+   here because it was explicitly requested, not because it is expected to
+   resolve the open extrinsics investigation — that investigation is still
+   the live lead for the actual 2cm number (see §5.10's still-open
+   `ENABLE_MANUAL_MOUNT_TF` experiment).
+3. Per this project's standing rule (see the top-level project rules on the
+   perception pipeline): nothing here reads `GT_RED_CENTER`/`GT_BLUE_CENTER`
+   or any other ground-truth constant — the OBB fit and its tracker are
+   fully generic, exactly like the primary pipeline.
+
+**New files** (`head_control/`):
+- `obb_detector.py` — `fit_oriented_box(cluster_pts, cluster_cols)` +
+  `OrientedBox` dataclass (position, rotation-as-3x3, dimensions). Faithfully
+  reproduces the C++ node's per-cluster math step for step, INCLUDING its
+  specific (non-obvious) axis-construction order (`col(1) = col(2) x col(0)`,
+  not simply "the second eigenvector") — this was deliberately preserved
+  rather than "corrected", since the goal is a faithful architectural port
+  for direct comparison. Also provides `rotation_matrix_to_quaternion`
+  (Shepperd's method) for the one place a quaternion is actually needed
+  (the `PoseStamped`/`Marker` outputs) — mirrors the C++ node's own
+  `Eigen::Quaternionf obb_orientation(eigenVectorsPCA)` conversion point.
+- `obb_tracker.py` — `ObbTracker` + `OBBTrack`, reproducing the C++ node's
+  matching/fusion/persistence loop: nearest-position match within
+  `cfg.OBB_MATCH_DIST` (ported verbatim, 0.15m), REPLACE position/orientation
+  on match, GROW-ONLY (elementwise max) dimensions, age + prune at
+  `cfg.OBB_MAX_UNSEEN_FRAMES` (ported verbatim, 10 frames — at this
+  project's own `PERCEPTION_RATE_HZ=5.0` this is coincidentally also ~2s,
+  matching the C++ node's own "2s @ 5Hz" comment), obstacle/target
+  classification by `position.z` vs. the detected table height, and a single
+  "primary target" selection per tick (first non-obstacle track with
+  `frames_unseen == 0`) — mirrors the C++ node's `primary_target_published`
+  single-publish-per-tick gate.
+
+**Deliberately reused, not re-implemented**: the RANSAC table plane
+(`table_segmenter.TableSegmenter`, already equivalent to the C++ node's
+`pcl::SACSegmentation<PLANE>`) and the voxel-downsample + Euclidean
+clustering (`object_detector.ObjectDetector._voxel_downsample` /
+`_euclidean_cluster`, already equivalent to `pcl::VoxelGrid` +
+`pcl::EuclideanClusterExtraction`) are called directly from
+`perception_pipeline.py` rather than duplicated a second time — this
+project's own single-source-of-truth-per-algorithm convention (§14 in
+`coding conventions`) applies here even though the new estimator's SHAPE FIT
+and FUSION POLICY are intentionally new/independent code.
+
+**Wiring** (`perception_pipeline.py`, `visualization.py`, `main_head.py`):
+- `PerceptionPipeline.process()` gained an OBB branch, gated entirely on
+  `cfg.ENABLE_OBB_ESTIMATOR` (constructor only builds `self.obb_tracker` if
+  the flag is set) — when off, `PerceptionResult.obb_tracks`/
+  `obb_primary_target` stay at their dataclass defaults (`[]`/`None`) and
+  every other field/behaviour is untouched.
+- `PerceptionVisualizer.build_obb()` — a NEW, separate marker-builder method
+  (own namespaces `obb_boxes`/`obb_boxes_label`, own targeted-DELETE
+  bookkeeping — never `DELETEALL`, matching this file's existing convention)
+  so the OBB markers can be independently shown/hidden in RViz without
+  touching the primary cylinder markers' IDs. Colour convention ported from
+  the C++ node: orange = obstacle-classified, red = target-classified.
+- `main_head.py`: two new publishers, `/head_perception/obb_bounding_boxes`
+  (`MarkerArray`) and `/head_perception/obb_target_pose` (`PoseStamped`) —
+  named under this project's own `/head_perception` topic namespace rather
+  than reusing the C++ node's literal `perception/*` names, consistent with
+  every other topic in this file. Created unconditionally (cheap, no
+  subscribers = no runtime cost) but only ever carry real data when
+  `cfg.ENABLE_OBB_ESTIMATOR=True`; a startup banner (matching the existing
+  §5c/§5d experiment-banner style) announces when the flag is active.
+
+**New config** (`head_control/config.py` §14): `ENABLE_OBB_ESTIMATOR`
+(default `False`), `OBB_MATCH_DIST=0.15`, `OBB_MAX_UNSEEN_FRAMES=10`,
+`OBB_TARGET_PADDING`/`OBB_OBSTACLE_PADDING=0.005` (all ported verbatim from
+the C++ node's own constants) — plus a docstring covering the honest,
+different bias profile of this estimator (see below).
+
+**Honest caveats — this estimator's OWN bias profile is different from, not
+better than, the primary pipeline's** (documented in `config.py` §14, worth
+repeating here since it directly bears on the operator's stated goal):
+1. A generic axis-aligned-in-PCA-frame box has no notion of "radius" — its
+   dimensions are a raw **max-minus-min** extent of whatever was visible.
+   Like the OLD `z_max`-based height estimate this project already found and
+   fixed (§5.10), a max-minus-min statistic is **systematically biased
+   LARGE** under sensor noise — the OPPOSITE direction from the OLD
+   disk-interior circle-fit bug (biased small). This is a NEW, different
+   bias, not a fix for the old one and not obviously smaller than it.
+2. PCA in-plane orientation is ill-defined for a near-circular footprint
+   (eigenvalues nearly equal) — the fitted axes can rotate frame-to-frame
+   with no physical meaning for an upright cylinder. Combined with
+   grow-only-in-local-axes dimension fusion, an orientation flip between
+   frames can inflate a box dimension by taking `max()` across two frames
+   whose "local axes" don't actually correspond to the same physical
+   direction. This is an inherent property of the ported architecture,
+   reproduced faithfully here, not patched — patching it would no longer be
+   a faithful port of what was asked for.
+3. **Recommended next step, if the operator wants to actually close the
+   reported 2cm gap**: continue the still-open extrinsic-calibration lead in
+   §5.10/§5c/§5d (`ENABLE_MANUAL_MOUNT_TF`) — ideally by obtaining the real
+   URDF/xacro origin for the `gripper_head_camera_joint` from the
+   `triago_control` repo (not present in this `vision_head` repo) to check
+   whether `-0.0406, 0, -0.003` is itself correct, rather than continuing to
+   A/B against an unrelated robot's number. This OBB port, by design, does
+   not touch that transform chain at all.
+
+**Not done in this pass** (explicitly out of scope, consistent with "port
+the architecture", not "redesign it"): no attempt was made to fuse the two
+estimators' outputs, to cross-validate one against the other numerically, or
+to adapt the OBB tracker's fusion policy to this project's own EMA
+convention (`object_tracker.ObjectTracker`) — see point 2 above for why that
+would no longer be a faithful port.
 
 ---
 
@@ -1706,73 +1862,6 @@ defaulted, no explicit `-p world_name:=...` needed unless overriding).
 
 ---
 
-### 9.14 New grasp type `Front` + `movement_tutorial` world (pure reach/hover goals)
-
-New world for the user-study set: `config/worlds/movement_tutorial.yaml` /
-`.world`. Table only (no graspable cylinders) -- an onboarding scenario
-teaching the user to command the hands and move around before any real
-pick-and-place task. Publishes two shared-autonomy goals, both PURE
-REACH/HOVER targets with no physical object behind them: `red_target` 20cm
-right of table center + 50cm above the table top, `blue_target` mirrored on
-the left. Approach axis for both is RIGIDLY LOCKED to world +X, unlike the
-existing `Side` grasp type whose approach direction adapts live to the
-user's position.
-
-**New `GoalSet` grasp type, `'Front'`** (`goal_set.py`'s
-`get_dynamic_goal_pose`): position = exactly the cylinder-table entry's
-`pos` (no standoff/surface offset, since there's no surface); orientation =
-approach axis fixed to world +X with the same sticky, hysteresis-protected
-180-degree-roll choice (fingers "up" vs "down") used by `Top`/`Side`, so
-switching goals doesn't cause gratuitous wrist flips.
-
-**`GoalSet.__init__` generalized**: `target_keys` (when not passed
-explicitly) is now DERIVED from each cylinder entry's own optional
-`grasp_types` list (defaults to `('Top', 'Side')` when a cylinder omits the
-field) instead of being a single hard-coded 4-key list -- verified
-numerically that the ORIGINAL default (no `grasp_types` anywhere) still
-produces the byte-identical `['Red_Top', 'Red_Side', 'Blue_Top',
-'Blue_Side', 'Platform_Place']`. `main_shared_autonomy.py`'s
-`_cylinders_from_world_scene` sets `grasp_types=['Front']` for any cylinder
-whose YAML obstacle has `role: "reachable"` (a NEW role value, not a new
-schema field -- `world_loader.ObstacleSpec` itself is unchanged). For
-`movement_tutorial.yaml` this yields `target_keys = ['Red_Front',
-'Blue_Front', 'Platform_Place']` -- and since `Platform_Place` stays
-permanently excluded (nothing is ever grasped, so `grasped_color` never
-becomes non-`None`), belief mass only ever distributes over the two real
-`Front` goals -- exactly the "2 goals only" requirement, achieved via YAML
-+ this one additive `GoalSet` generalization, no other code path touched.
-
-**Safety-critical gate added to `GraspStateMachine`** (`grasp_state_machine.
-py`): a new `_is_graspable(inp)` check, gating PRE_GRASP entry, requires
-`active_goal_key` to end in `_Top` or `_Side`. This was NECESSARY, not just
-tidy: several downstream call sites
-(`shared_autonomy_handler.attach_object_visually`'s
-`self.col.red_cyl_id if color == "red" else self.col.blue_cyl_id`, and
-`GraspStateMachine`'s own `self.cylinders[color]['radius']`/`['cbf_name']`
-lookups in `_grasp_align`/`_grasp_approach`/`_grasp_close`) are UNGUARDED
-and assume a real, colliding cylinder exists -- `red_cyl_id`/`blue_cyl_id`
-are never even SET on `CollisionManager` for a `collision: false` obstacle
-(confirmed by reading `collision_manager.py`'s grasp-role resolution: it
-only populates them from `_geom_id_by_obstacle_name`, which only contains
-colliding obstacles). Blocking `PRE_GRASP` entry for any non-Top/Side goal
-key makes the ENTIRE grasp-execution chain (GRASP_ALIGN/APPROACH/CLOSE/
-LIFT/HOLDING and every ORANGE_/ATTACH_ `gripper_cmd` they trigger)
-categorically unreachable for a `Front` goal -- it stays in
-`SHARED_AUTONOMY` (belief-blended reach/hover, exactly the intended
-tutorial behavior) forever, with zero risk of hitting one of those
-unguarded lookups.
-
-Verified numerically (pure-numpy, no ROS/pinocchio/scipy needed) before
-pushing: (1) `target_keys` derivation reproduces the exact original
-5-element list for `no_obstacle`'s default cylinders, and produces the
-correct 2-Front-goal list for `movement_tutorial`'s; (2) `_is_graspable`
-correctly gates `_Top`/`_Side` in and `_Front`/`Platform_Place` out; (3) the
-`Front` orientation math is a valid proper rotation whose approach-axis
-column is exactly world +X regardless of input, and its two sticky
-candidates differ by exactly a 180-degree roll about that fixed axis.
-
----
-
 ## 10. Adaptive Scheduling (shadow-price feedback)
 
 - **Decoupled slack weighting**: each arm's slack weight drops (toward `BASE_WEIGHT_SLACK=5`) when its shadow price grows, letting the slack absorb more tracking error near obstacles. In free space it rises (toward `MAX_WEIGHT_SLACK=50`) for tighter tracking.
@@ -2406,6 +2495,7 @@ deadband), not yet validated hands-on.
 | Head control (visual servoing) | 🔧 Active dev | `qp_head_visual_servo.py`: QP-based hand-tracking, independent loop. Starting point — no image processing yet. |
 | Head cylinder perception (`main_head.py`) | ✅ Improved (2026-07-02, §5.10) | Rim-extraction + Hyper circle fit (removed a ~-4 to -5mm disk-interior bias in the radius fit), top-slice-median height (removed a `z_max` high-bias), 3mm voxel leaf (was 10mm — too coarse vs. a 2cm cylinder radius), closer/verified-reachable `HEAD_POSTURE_TARGET`, distortion-correctness gap closed in `camera_interface.py`, tracker fusion switched grow-only→EMA. Verified numerically (not on real hardware) to land single-view/scanned radius+height error at roughly -1 to -4mm, comfortably under the 1cm target. `feature/head-sweep-compute-track` reviewed, not merged (incompatible kwargs, re-enables the already-disabled point-level VoxelMap) — see §5.10 for salvageable ideas. |
 | Arm-vs-head collision avoidance | ✅ Working | Head chain modeled as a quasi-static CBF obstacle in the ARM QP (§9.7): live FK-driven capsules (yellow in Meshcat), zero head joints added to the decision vector. `arm_right_1`/`arm_left_1` excluded from head pairs per instruction. Head's OWN separate controller/collision model (`qp_head_visual_servo.py`) is unchanged. |
+| OBB / memory-tracking estimator (`obb_detector.py`/`obb_tracker.py`) | 🔧 New (2026-07-05, §5.11), OFF by default | Faithful port of a colleague's C++ PCL `tabletop_perception_node` (Z-locked 2D-PCA oriented bounding box + position-matched grow-only tracker), run alongside — never instead of — the primary cylinder pipeline. `cfg.ENABLE_OBB_ESTIMATOR=False`. Explicitly NOT expected to fix the ~2cm bias (that lead is still the open extrinsics investigation in §5.10); has its own, different (max-minus-min, biased-large) error profile. Untested on real hardware/Gazebo in this session. |
 | Mobile base integration | 🔧 Partial | `base_controller.py` exists but not QP-certified |
 | Meshcat visualization | ✅ Working | Thread-safe, auto-reloads on grasp coloring |
 | Digital twin mode | ✅ Working | `SIMULATE_IDEAL_KINEMATICS` flag in config |

@@ -140,9 +140,19 @@ class HeadPlotterNode(Node):
                     d["err"].append(pos_err * 100)  # cm
                     d["t"].append(t)
 
-                # Table top plane (ns="table_top", CUBE, scale.z ~ 0.005)
+                # Table top plane (ns="table_top", CUBE, scale.z ~ 0.005).
+                # BUGFIX: store (t, z) together, not z alone -- this series
+                # does NOT grow one-to-one with every incoming message (it's
+                # skipped whenever no table_top marker is present, e.g. a
+                # momentary "NO TABLE"), so it must carry its own timestamp
+                # rather than being zipped against t_data by POSITION. The
+                # old code did `t_list[:len(plane_list)]`, which pairs each
+                # z-value with the FIRST N timestamps ever seen -- as soon as
+                # a single tick is skipped, every later z-value is paired
+                # with the wrong (stale) time, producing exactly the kind of
+                # visual "jump" this was reported as.
                 if m.ns == "table_top" and m.type == 1:  # CUBE=1
-                    self.plane_z.append(m.pose.position.z)
+                    self.plane_z.append((t, m.pose.position.z))
 
             self.t_data.append(t)
 
@@ -309,7 +319,8 @@ def main():
             line_rad_b.set_data(bt, b_rad)
             line_hgt_r.set_data(rt, r_hgt)
             line_hgt_b.set_data(bt, b_hgt)
-            line_plane.set_data(t_list[:len(plane_list)], plane_list)
+            if plane_list:
+                line_plane.set_data([p[0] for p in plane_list], [p[1] for p in plane_list])
             if cloud_list:
                 line_cloud.set_data([p[0] for p in cloud_list], [p[1] for p in cloud_list])
             if conf_r_list:

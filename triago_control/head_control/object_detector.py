@@ -178,10 +178,21 @@ class ObjectDetector:
         rough_center = xy.mean(axis=0)
         rim_xy = ObjectDetector._extract_rim(xy, rough_center)
 
-        center_xy, radius, fit_ok = ObjectDetector._fit_circle_hyper(rim_xy)
+        # Angular-isolation weights: give sparse-side rim points more weight
+        # to counteract partial-arc bias. Each rim point gets a weight
+        # inversely proportional to the local angular density of its neighbours
+        # (bins that are surrounded by many other occupied bins get LESS weight;
+        # isolated bins on the occluded far side get MORE). This is the correct
+        # first-principles fix for the partial-view center bias — no scene
+        # knowledge is used, only the angular distribution of the rim itself.
+        weights = ObjectDetector._angular_isolation_weights(rim_xy, rough_center)
+
+        center_xy, radius, fit_ok = ObjectDetector._fit_circle_kasa_weighted(rim_xy, weights)
         if not fit_ok:
-            # Fall back to Kasa on the rim (handles the rare degenerate/
-            # ill-conditioned Hyper case, e.g. a near-collinear rim).
+            # Fall back to unweighted Hyper fit.
+            center_xy, radius, fit_ok = ObjectDetector._fit_circle_hyper(rim_xy)
+        if not fit_ok:
+            # Fall back to unweighted Kasa on the rim.
             center_xy, radius, fit_ok = ObjectDetector._fit_circle_kasa(rim_xy)
         if not fit_ok:
             # Last-resort fallback: percentile radius about the raw centroid
@@ -303,6 +314,86 @@ class ObjectDetector:
                 near = in_bin[[int(np.argmin(np.abs(rad_bin - thresh)))]]
             rim_pts.append(xy[near].mean(axis=0))
         return np.array(rim_pts) if rim_pts else xy
+
+    @staticmethod
+    def _angular_isolation_weights(rim_xy, center_guess):
+        """Compute per-rim-point weights that UP-WEIGHT angular isolates.
+
+        WHY: from an oblique single viewpoint the camera sees a partial arc
+        (say 120-180 deg). The camera-FACING side has many consecutive occupied
+        angular bins (dense arc), while the self-occluded FAR side contributes
+        fewer, more isolated bins. A standard (unweighted) circle fit treats
+        every rim point equally → the dense side dominates → the fitted center
+        is pulled TOWARD the camera. Angular-isolation weighting corrects this
+        by giving each rim point a weight INVERSELY proportional to the local
+        angular density around it, so sparse-side points carry proportionally
+        more influence in the least-squares fit. This is the standard
+        "arc-length weighting" trick for partial-arc circle fitting (see e.g.
+        Forbes, "Least-squares best fit of circles and circular arcs", 1989),
+        adapted here to the discrete-bin rim extraction output.
+
+        METHOD: for each rim point i (one per occupied angular bin), count the
+        number of OTHER occupied bins within ±K bins of it (a local density
+        estimate). Weight_i = 1 / (1 + local_count). Points surrounded by many
+        occupied neighbours → low weight; isolated points → high weight.
+        Normalized so weights sum to n (preserves the scale of the fit).
+        """
+        n = len(rim_xy)
+        if n < 3:
+            return np.ones(n)
+        rel = rim_xy - center_guess
+        ang = np.arctan2(rel[:, 1], rel[:, 0])  # [-pi, pi]
+        # Sort by angle for the neighborhood count.
+        order = np.argsort(ang)
+        ang_sorted = ang[order]
+        # For each point, count how many others are within a ±K_BINS window
+        # in angular distance (wrap-aware). K_BINS ~ 1/6 of the circle.
+        K_ANG = np.pi / 3.0   # ±60 deg window for density estimation
+        counts = np.zeros(n)
+        for i in range(n):
+            diffs = np.abs(ang_sorted - ang_sorted[i])
+            diffs = np.minimum(diffs, 2.0 * np.pi - diffs)  # wrap
+            counts[i] = float(np.count_nonzero(diffs < K_ANG)) - 1.0  # exclude self
+        # Un-sort back to original rim order.
+        w = np.zeros(n)
+        w[order] = 1.0 / (1.0 + counts)
+        # Normalize so sum(w) = n (preserves least-squares scale).
+        w *= n / w.sum()
+        return w
+
+    @staticmethod
+    def _fit_circle_kasa_weighted(xy, weights):
+        """Weighted algebraic (Kasa) circle fit.
+
+        Same formulation as _fit_circle_kasa but with per-point weights in the
+        least-squares system: minimizes sum_i w_i * ((x_i-a)^2+(y_i-b)^2-R^2)^2.
+        This becomes the weighted normal equation  (A^T W A) sol = A^T W b.
+
+        The weighting corrects for partial-arc density asymmetry: sparse-side
+        rim points (far side) carry more weight, pulling the fitted center back
+        toward the true geometric center even when most points come from the
+        camera-facing arc.
+
+        Returns (center_xy, radius, ok).
+        """
+        if len(xy) < 5:
+            return None, 0.0, False
+        x = xy[:, 0]
+        y = xy[:, 1]
+        A = np.column_stack((2.0 * x, 2.0 * y, np.ones_like(x)))
+        b = x * x + y * y
+        W = np.diag(weights)
+        try:
+            AtWA = A.T @ W @ A
+            AtWb = A.T @ W @ b
+            sol = np.linalg.solve(AtWA, AtWb)
+        except np.linalg.LinAlgError:
+            return None, 0.0, False
+        a, c_, c = sol
+        val = c + a * a + c_ * c_
+        if val <= 0.0 or not np.isfinite(val):
+            return None, 0.0, False
+        return np.array([a, c_]), float(np.sqrt(val)), True
 
     @staticmethod
     def _fit_circle_kasa(xy):

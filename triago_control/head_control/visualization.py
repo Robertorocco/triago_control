@@ -23,6 +23,7 @@ from geometry_msgs.msg import Point
 from std_msgs.msg import ColorRGBA
 
 import triago_control.head_control.config as cfg
+from triago_control.head_control.obb_detector import rotation_matrix_to_quaternion
 
 
 # ---------------------------------------------------------------------- #
@@ -72,6 +73,10 @@ class PerceptionVisualizer:
         # DELETE only the now-unused IDs. This avoids the DELETEALL-every-frame
         # pattern that makes markers blink in RViz.
         self._prev_obj_count = 0
+        # OBB estimator (config.py §14): track which OBB marker IDs are live so
+        # we can targeted-DELETE ones whose track disappeared, same pattern as
+        # the cylinder objects above (never DELETEALL).
+        self._prev_obb_ids = set()
 
     def _base_marker(self, ns, mid, mtype, stamp):
         m = Marker()
@@ -161,6 +166,75 @@ class PerceptionVisualizer:
                 d.action = Marker.DELETE
                 arr.markers.append(d)
         self._prev_obj_count = n_now
+
+        return arr
+
+    # ------------------------------------------------------------------ #
+    # OBB / memory-tracking estimator markers (config.py §14, EXPERIMENT)   #
+    # ------------------------------------------------------------------ #
+    def build_obb(self, result, stamp):
+        """Return a MarkerArray for the OBB estimator's tracks (or an empty
+        array if `cfg.ENABLE_OBB_ESTIMATOR` is off / no tracks exist yet).
+
+        Published on its OWN topic/array (see main_head.py) — kept separate
+        from `build()`'s cylinder markers/IDs so the two estimators can be
+        toggled and viewed independently without ID collisions, mirroring
+        the C++ node's own dedicated `perception/bounding_boxes` topic.
+        Colour convention ported from the C++ node: orange = obstacle
+        (`is_obstacle`), red = target/graspable (non-obstacle).
+        """
+        arr = MarkerArray()
+        live_ids = set()
+        # NOTE: a track's ns is fixed to "obb_boxes"/"obb_boxes_label"
+        # regardless of its (possibly frame-to-frame changing) is_obstacle
+        # classification — only colour/padding depend on that. Keying the ns
+        # itself on a mutable classification would leave a stale marker
+        # behind in the OLD ns whenever a track flips obstacle<->target while
+        # still alive (only disappearance is targeted-DELETEd below).
+
+        for t in result.obb_tracks:
+            ns = "obb_boxes"
+            color = (ColorRGBA(r=1.0, g=0.5, b=0.0, a=0.5) if t.is_obstacle
+                     else ColorRGBA(r=1.0, g=0.0, b=0.0, a=0.5))
+            padding = cfg.OBB_OBSTACLE_PADDING if t.is_obstacle else cfg.OBB_TARGET_PADDING
+
+            box = self._base_marker(ns, t.id, Marker.CUBE, stamp)
+            box.pose.position.x = float(t.position[0])
+            box.pose.position.y = float(t.position[1])
+            box.pose.position.z = float(t.position[2])
+            q = rotation_matrix_to_quaternion(t.rotation)
+            box.pose.orientation.x = float(q[0])
+            box.pose.orientation.y = float(q[1])
+            box.pose.orientation.z = float(q[2])
+            box.pose.orientation.w = float(q[3])
+            box.scale.x = max(float(t.dimensions[0] + 2.0 * padding), 0.01)
+            box.scale.y = max(float(t.dimensions[1] + 2.0 * padding), 0.01)
+            box.scale.z = max(float(t.dimensions[2] + 2.0 * padding), 0.01)
+            box.color = color
+            arr.markers.append(box)
+            live_ids.add((ns, t.id))
+
+            txt = self._base_marker("obb_boxes_label", t.id, Marker.TEXT_VIEW_FACING, stamp)
+            txt.pose.position.x = float(t.position[0])
+            txt.pose.position.y = float(t.position[1])
+            txt.pose.position.z = float(t.position[2] + t.dimensions[2] / 2.0 + 0.05)
+            txt.scale.z = 0.04
+            txt.color = ColorRGBA(r=1.0, g=1.0, b=1.0, a=1.0)
+            txt.text = (f"obb_{t.id} {'[obstacle]' if t.is_obstacle else '[target]'}\n"
+                        f"dims={np.round(t.dimensions*100, 1)}cm unseen={t.frames_unseen}")
+            arr.markers.append(txt)
+            live_ids.add(("obb_boxes_label", t.id))
+
+        # Targeted DELETE of any (ns, id) that was live last frame but not now.
+        for ns, mid in self._prev_obb_ids - live_ids:
+            d = Marker()
+            d.header.frame_id = self.frame_id
+            d.header.stamp = stamp
+            d.ns = ns
+            d.id = mid
+            d.action = Marker.DELETE
+            arr.markers.append(d)
+        self._prev_obb_ids = live_ids
 
         return arr
 

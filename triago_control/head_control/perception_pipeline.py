@@ -25,19 +25,35 @@ from triago_control.head_control.table_segmenter import TableSegmenter
 from triago_control.head_control.object_detector import ObjectDetector, DetectedObject
 from triago_control.head_control.voxel_map import VoxelMap
 from triago_control.head_control.object_tracker import ObjectTracker
+from triago_control.head_control.obb_detector import fit_oriented_box
+from triago_control.head_control.obb_tracker import ObbTracker
 
 
 @dataclass
 class PerceptionResult:
     plane: object = None                    # PlaneModel or None
     objects: list = field(default_factory=list)     # list[DetectedObject]
+    raw_detections: list = field(default_factory=list)  # list[DetectedObject], PRE-TRACKER
+                                             # (this frame's fresh, unfiltered fit —
+                                             # needed for any bias-vs-range diagnostic,
+                                             # since the EMA-tracked `objects` above is
+                                             # autocorrelated across frames and would
+                                             # hide/smear a range-dependent trend)
     cropped_points: np.ndarray = None       # (N,3) base frame  (for viz)
     cropped_colors: np.ndarray = None       # (N,3) uint8
     above_points: np.ndarray = None         # (M,3) above-plane points (for viz)
     plane_centroid: np.ndarray = None       # (3,) centroid of plane inliers (debug)
+    plane_bbox_center: np.ndarray = None    # (3,) bounding-box center of inliers (better estimate)
+    table_extent_x: float = 0.0            # [m] observed X extent of plane inliers
+    table_extent_y: float = 0.0            # [m] observed Y extent of plane inliers
     n_raw: int = 0
     map_size: int = 0                       # voxels in the fused map (0 if off)
     proc_ms: float = 0.0
+    # --- OBB / memory-tracking estimator (config.py §14, OFF by default) ---
+    # Populated only when cfg.ENABLE_OBB_ESTIMATOR is True; always empty/None
+    # otherwise, so the default pipeline output is completely unaffected.
+    obb_tracks: list = field(default_factory=list)     # list[OBBTrack]
+    obb_primary_target: object = None                  # OBBTrack or None
 
 
 class PerceptionPipeline:
@@ -47,6 +63,9 @@ class PerceptionPipeline:
         self.tracker = ObjectTracker()     # object-level temporal fusion
         self._tracked = []                  # (legacy, unused)
         self.voxel_map = VoxelMap() if cfg.ENABLE_ACCUMULATION else None
+        # OBB / memory-tracking estimator (config.py §14) — independent,
+        # OFF-by-default, ported estimator run alongside the cylinder pipeline.
+        self.obb_tracker = ObbTracker() if cfg.ENABLE_OBB_ESTIMATOR else None
 
     # ------------------------------------------------------------------ #
     # Frame transform                                                     #
@@ -122,8 +141,22 @@ class PerceptionPipeline:
 
         # Debug: centroid of the plane inliers. If the cloud is correctly
         # placed this should sit near the known table centre (x~1.0, y~0.0).
+        # ALSO compute the BOUNDING-BOX CENTER (less biased than the mean when
+        # the camera sees one side of the table more than the other — the mean
+        # is pulled toward the dense/near side, while the bbox mid-point only
+        # depends on the extreme points which exist on both sides if ANY
+        # return reaches there). AND report the X/Y extent of the plane inliers
+        # for intrinsics validation (should match TABLE_SIZE within the visible
+        # portion).
         if inlier_mask is not None and inlier_mask.any():
-            res.plane_centroid = work_pts[inlier_mask].mean(axis=0)
+            inlier_pts = work_pts[inlier_mask]
+            res.plane_centroid = inlier_pts.mean(axis=0)
+            # Bounding-box center: robust to asymmetric point density
+            xyz_min = inlier_pts.min(axis=0)
+            xyz_max = inlier_pts.max(axis=0)
+            res.plane_bbox_center = (xyz_min + xyz_max) / 2.0
+            res.table_extent_x = float(xyz_max[0] - xyz_min[0])
+            res.table_extent_y = float(xyz_max[1] - xyz_min[1])
 
         # 3. Above-plane slab = candidate objects.
         sd = plane.signed_distance(work_pts)
@@ -137,10 +170,30 @@ class PerceptionPipeline:
 
         # 4. Cluster + fit + classify.
         detections = self.detector.detect(above_pts, above_cols, plane)
+        res.raw_detections = detections    # pre-tracker, this frame only (diagnostics)
 
         # 5. Object-level temporal fusion (grow-only dims + persistence). Only
         # fuse when the head is settled so motion never corrupts the estimate.
         res.objects = self.tracker.update(detections, allow_update=allow_track_update)
+
+        # 6. OBB / memory-tracking estimator (config.py §14) — an independent,
+        # shape-free estimator run on the SAME above-plane points/clusters,
+        # gated OFF by default so the primary cylinder pipeline's output
+        # (res.objects above) is completely unaffected either way. Reuses
+        # ObjectDetector's own voxel-downsample + Euclidean clustering (single
+        # source of truth for clustering, per this project's convention)
+        # rather than re-implementing PCL's VoxelGrid + EuclideanClusterExtraction
+        # a second time.
+        if self.obb_tracker is not None:
+            pts_ds, cols_ds = ObjectDetector._voxel_downsample(above_pts, above_cols, cfg.VOXEL_SIZE)
+            clusters = ObjectDetector._euclidean_cluster(pts_ds)
+            boxes = []
+            for idx in clusters:
+                box = fit_oriented_box(pts_ds[idx], cols_ds[idx])
+                if box is not None:
+                    boxes.append(box)
+            table_surface_z = plane.height
+            res.obb_tracks, res.obb_primary_target = self.obb_tracker.update(boxes, table_surface_z)
 
         res.proc_ms = (time.perf_counter() - t0) * 1e3
         return res
