@@ -281,7 +281,8 @@ GAMMA_FILTER_TAU = 0.125       # Low-pass time constant for the gamma scheduler
 # reference velocity/acceleration that the CLF must handle, preserving QP
 # feasibility guarantees even under aggressive/discontinuous commands.
 # See triago_control/qp_controller/reference_governor.py for the full design.
-ENABLE_REFERENCE_GOVERNOR = False      # Master switch (False = raw passthrough, no filtering)
+ENABLE_REFERENCE_GOVERNOR = True       # Master switch (False = raw passthrough, no filtering)
+                                       # [2026-07-04, operator-enabled for this test pass]
 
 # --- Velocity shaping: clamp the reference velocity magnitude (direction preserved) ---
 GOV_V_MAX_LIN = 0.20                  # [m/s] max linear reference velocity passed to the CLF
@@ -481,14 +482,27 @@ CAPSULE_RADIUS = 0.06                 # DEFAULT radius of the arm collision caps
 #                           the mesh's true centroid; by construction this
 #                           vector has zero component along the axis).
 #   radius                : per-link capsule radius, REPLACING CAPSULE_RADIUS
-#                           for this link only. Includes a +1mm safety margin
-#                           over the raw "radius_needed" the audit computes
-#                           (cheap insurance against minor mesh/URDF/build
-#                           differences; ~1-1.3% of the capsule radius, so it
-#                           does not meaningfully affect CBF behavior). Since
-#                           a capsule's ends are HEMISPHERES, this margin also
-#                           implicitly pads axial reach at both ends -- no
-#                           separate margin was added to the extensions below.
+#                           for this link only.
+#
+# 2026-07-04 UPDATE (operator-requested reduction, exploratory pass): the
+# tight-fit radii (raw "radius_needed" + 1mm margin) made the SoftMin CBF
+# feel overly conservative once visualized in Meshcat/tested live -- every
+# link visibly "puffed out" ~25% vs. the original 60mm. Per operator
+# instruction, EVERY overridden radius below has been reduced by 5mm from
+# its tight-fit value (i.e. now ~4mm BELOW the raw radius_needed, not above
+# it) as an exploratory step to loosen the CBF's felt conservatism before
+# deciding on D_SAFE_BASE / final tuning. This DELIBERATELY reintroduces a
+# small (~4mm), KNOWN, ACCEPTED mesh protrusion on links 1-5 -- re-running
+# capsule_alignment_audit.py (no --suggest-fix) is EXPECTED to show
+# protrusion_mm ~= +4.00 on those links now; that is not a regression, it is
+# the direct, deliberate consequence of this change, kept for easy
+# before/after comparison. If a reduced-radius config is ever locked in
+# permanently, the proximal/distal extensions below should be RE-DERIVED
+# for the new (smaller) radius via a fresh --suggest-fix pass -- they are
+# currently still the values computed for the ORIGINAL tight-fit radius
+# (the axial hemisphere-cap reach shrinks with radius too, so these are a
+# reasonable approximation for a small reduction like this, not an exact
+# re-fit).
 #   proximal_extension    : extends the segment's PROXIMAL end (t=0, at the
 #                           parent joint) outward along its own axis, to
 #                           cover mesh that reaches past the raw joint-to-
@@ -513,15 +527,30 @@ CAPSULE_RADIUS = 0.06                 # DEFAULT radius of the arm collision caps
 # regenerated against a DIFFERENT URDF and right/left no longer match,
 # split them into separate 'arm_right_N_link'/'arm_left_N_link' entries.
 #
-# VERIFY after any change here by re-running the audit WITHOUT --suggest-fix
-# -- every previously-flagged link should now show protrusion_mm <= 0.
+# VERIFY after any change here by re-running the audit WITHOUT --suggest-fix.
+# NOTE (2026-07-04, see the radius comment above): with the operator-
+# requested -5mm reduction below, links 1-5 are now EXPECTED to show
+# protrusion_mm ~= +4.00 (not <= 0) -- this is the deliberate, accepted
+# result of this exploratory pass, not a bug.
+#
+# Link 6 REMOVED entirely (2026-07-04, operator instruction): the grasping
+# phase was tuned against link 6's ORIGINAL geometry (CAPSULE_RADIUS=60mm,
+# no offset/extension) -- restoring it here means link 6 is COMPLETELY
+# ABSENT from CAPSULE_OFFSET_OVERRIDES below, which by this file's own
+# contract ("A link absent from this dict is completely unaffected") makes
+# it byte-identical to before this whole feature existed: pure
+# calculate_offsets() placement/length + the global CAPSULE_RADIUS. Its
+# ORIGINAL measured misalignment (33.37mm protrusion at 60mm radius, per
+# the very first capsule_alignment_audit.py run) is therefore KNOWINGLY
+# reintroduced -- an explicit operator trade-off (grasp-tuning fidelity
+# over collision-geometry tightness for this one link), not an oversight.
 _CAPSULE_FIX = {
-    1: {'lateral_offset': [-22.46, 9.11, 0.00], 'radius': 75.42, 'proximal_extension': 0.00, 'distal_extension': 0.20},
-    2: {'lateral_offset': [8.82, -0.00, -8.67], 'radius': 75.07, 'proximal_extension': 0.00, 'distal_extension': 0.00},
-    3: {'lateral_offset': [11.49, 25.66, 0.00], 'radius': 75.97, 'proximal_extension': 0.00, 'distal_extension': 0.20},
-    4: {'lateral_offset': [-8.82, 0.00, -8.67], 'radius': 75.07, 'proximal_extension': 0.00, 'distal_extension': 0.00},
-    5: {'lateral_offset': [0.72, -32.79, 0.00], 'radius': 77.29, 'proximal_extension': 13.52, 'distal_extension': 0.00},
-    6: {'lateral_offset': [0.00, 6.87, -56.09], 'radius': 70.04, 'proximal_extension': 0.00, 'distal_extension': 0.00},
+    1: {'lateral_offset': [-22.46, 9.11, 0.00], 'radius': 70.42, 'proximal_extension': 0.00, 'distal_extension': 0.20},
+    2: {'lateral_offset': [8.82, -0.00, -8.67], 'radius': 70.07, 'proximal_extension': 0.00, 'distal_extension': 0.00},
+    3: {'lateral_offset': [11.49, 25.66, 0.00], 'radius': 70.97, 'proximal_extension': 0.00, 'distal_extension': 0.20},
+    4: {'lateral_offset': [-8.82, 0.00, -8.67], 'radius': 70.07, 'proximal_extension': 0.00, 'distal_extension': 0.00},
+    5: {'lateral_offset': [0.72, -32.79, 0.00], 'radius': 72.29, 'proximal_extension': 13.52, 'distal_extension': 0.00},
+    # 6: intentionally removed -- see note above.
 }
 CAPSULE_OFFSET_OVERRIDES = {}
 for _n, _fix in _CAPSULE_FIX.items():
