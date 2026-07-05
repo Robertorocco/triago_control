@@ -145,7 +145,10 @@ class SharedControlNode(Node):
         #             commands the robot directly via /arm_right/cartesian_reference.
         # When False: normal operation (Haption + assistive_reference topic).
 
-        self.test_goal_key = 'Red_Side'  # starting goal; changed at runtime via console
+        # test_goal_key's actual starting value is set further below, once
+        # self.target_keys is known (see the world-scene-aware default there)
+        # -- it must be a key that this world's GoalSet actually offers.
+        self.test_goal_key = None
         self._test_goal_lock = threading.Lock()
 
         # --- Noisy Human Model Parameters ---
@@ -182,7 +185,20 @@ class SharedControlNode(Node):
         cylinders = self._cylinders_from_world_scene(self.world_scene)
         self.goal_set = GoalSet(cylinders=cylinders, platform=self.world_scene.platform)
         self.target_keys = self.goal_set.target_keys
-        self.active_goal_key = 'Red_Side'
+
+        # Default active/test goal key. 'Red_Side' is only valid for a world
+        # whose cylinders offer the Top/Side grasp types (e.g. no_obstacle) --
+        # a Front-only world (e.g. movement_tutorial) has NO 'Red_Side' key at
+        # all, and every self.target_keys-indexed dict (ee_policies etc. in
+        # timer_callback) would KeyError on it immediately. Fall back to the
+        # first entry of self.target_keys whenever the preferred default isn't
+        # actually offered by this world, so startup is always valid regardless
+        # of which world_name was loaded.
+        _preferred_default_goal = 'Red_Side'
+        _default_goal = (_preferred_default_goal if _preferred_default_goal in self.target_keys
+                         else self.target_keys[0])
+        self.active_goal_key = _default_goal
+        self.test_goal_key = _default_goal   # keep POLICY_BELIEF_TEST's console default in sync
 
         # --- Intent Inference (delegated to BeliefEstimator) ---
         # Weighting matrix (penalizes translation heavily, respects rotation)
