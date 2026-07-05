@@ -372,8 +372,19 @@ class HeadPerceptionNode(Node):
             else:
                 diag += f"\n       [XFORM] TF cam={np.round(tf_t,3)}  (FK: frame not in model)"
         if r.plane_centroid is not None:
-            diag += (f"\n       [PLANE-CENTROID] {np.round(r.plane_centroid,3)} "
-                     f"(expect ~[1.0, 0.0, 0.70])")
+            diag += (f"\n       [PLANE-CENTROID] mean={np.round(r.plane_centroid,3)}  "
+                     f"bbox={np.round(r.plane_bbox_center,3) if r.plane_bbox_center is not None else 'N/A'}")
+            diag += (f"\n       [TABLE-EXTENT] X={r.table_extent_x:.3f}m (expect {cfg.TABLE_SIZE[0]:.2f}) "
+                     f"Y={r.table_extent_y:.3f}m (expect {cfg.TABLE_SIZE[1]:.2f})")
+            # Intrinsics sanity: if the observed Y-extent of the table is
+            # significantly different from the known physical width, the
+            # intrinsics (fx/fy) are probably wrong (lateral scale error).
+            if r.table_extent_y > 0.05:
+                y_ratio = r.table_extent_y / cfg.TABLE_SIZE[1]
+                if y_ratio < 0.5:
+                    diag += f"  [!Y-extent only {y_ratio*100:.0f}% of physical — partial view or fx wrong]"
+                elif y_ratio > 1.3:
+                    diag += f"  [!Y-extent {y_ratio*100:.0f}% of physical — fx too HIGH?]"
 
         self.get_logger().info(
             head_line + "\n"

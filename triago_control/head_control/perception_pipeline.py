@@ -35,6 +35,9 @@ class PerceptionResult:
     cropped_colors: np.ndarray = None       # (N,3) uint8
     above_points: np.ndarray = None         # (M,3) above-plane points (for viz)
     plane_centroid: np.ndarray = None       # (3,) centroid of plane inliers (debug)
+    plane_bbox_center: np.ndarray = None    # (3,) bounding-box center of inliers (better estimate)
+    table_extent_x: float = 0.0            # [m] observed X extent of plane inliers
+    table_extent_y: float = 0.0            # [m] observed Y extent of plane inliers
     n_raw: int = 0
     map_size: int = 0                       # voxels in the fused map (0 if off)
     proc_ms: float = 0.0
@@ -122,8 +125,22 @@ class PerceptionPipeline:
 
         # Debug: centroid of the plane inliers. If the cloud is correctly
         # placed this should sit near the known table centre (x~1.0, y~0.0).
+        # ALSO compute the BOUNDING-BOX CENTER (less biased than the mean when
+        # the camera sees one side of the table more than the other — the mean
+        # is pulled toward the dense/near side, while the bbox mid-point only
+        # depends on the extreme points which exist on both sides if ANY
+        # return reaches there). AND report the X/Y extent of the plane inliers
+        # for intrinsics validation (should match TABLE_SIZE within the visible
+        # portion).
         if inlier_mask is not None and inlier_mask.any():
-            res.plane_centroid = work_pts[inlier_mask].mean(axis=0)
+            inlier_pts = work_pts[inlier_mask]
+            res.plane_centroid = inlier_pts.mean(axis=0)
+            # Bounding-box center: robust to asymmetric point density
+            xyz_min = inlier_pts.min(axis=0)
+            xyz_max = inlier_pts.max(axis=0)
+            res.plane_bbox_center = (xyz_min + xyz_max) / 2.0
+            res.table_extent_x = float(xyz_max[0] - xyz_min[0])
+            res.table_extent_y = float(xyz_max[1] - xyz_min[1])
 
         # 3. Above-plane slab = candidate objects.
         sd = plane.signed_distance(work_pts)
