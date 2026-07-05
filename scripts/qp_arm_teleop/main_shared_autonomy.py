@@ -1455,6 +1455,52 @@ class SharedControlNode(Node):
             # the original tuned value) since this is a test-mode-specific fix,
             # not a general retune.
             dt_virtual = 0.10 if self.POLICY_BELIEF_TEST else 0.02
+
+            # TEST-MODE-ONLY minimum lead-distance floor (kept OUT of the
+            # grasp_exec/BLENDING path entirely -- that path is untouched,
+            # still exactly `dt_virtual=0.02` * target_twist, byte-identical
+            # to before this whole fix).
+            #
+            # WHY: raising dt_virtual alone only helps FAR from the goal. Near
+            # the goal, target_twist's magnitude itself shrinks toward zero
+            # (tanh-saturated proportional convergence law: v_mag = v_max *
+            # tanh(K_p*dist/v_max) ~= K_p*dist for small dist -- see
+            # compute_v_geo), so the carrot's lead distance (dt_virtual *
+            # ||twist||) collapses toward zero THERE regardless of how large
+            # dt_virtual is -- a fixed dt_virtual cannot fix a problem whose
+            # severity scales with 1/||twist||. This reproduced the reported
+            # "still see high oscillation in one phase" even after the
+            # dt_virtual=0.10 bump: that phase is exactly the near-goal
+            # approach, matching the reported oscillation being specifically
+            # in POSITION error and slack.
+            #
+            # FIX: floor the ABSOLUTE LINEAR lead distance directly -- if
+            # dt_virtual * lin_speed would be smaller than _MIN_LEAD_LIN,
+            # stretch the EFFECTIVE dt (not target_twist itself -- direction
+            # and convergence behavior are unaffected) just enough to restore
+            # that minimum lead, capped by _TEST_DT_VIRTUAL_MAX so a near-zero
+            # twist (right at the goal) cannot blow this up into an unbounded
+            # lead. Deliberately LINEAR-ONLY (not also angular): a single
+            # shared dt scales integrate_twist's linear AND angular parts
+            # together, so a second, independent angular floor could demand a
+            # different dt than the linear one whenever both speeds shrink
+            # together near full convergence -- with the cap then unable to
+            # satisfy both simultaneously. Since the reported symptom is
+            # specifically position/slack oscillation, driving dt purely from
+            # linear speed avoids that conflict entirely while directly
+            # targeting the reported problem.
+            if self.POLICY_BELIEF_TEST:
+                _MIN_LEAD_LIN = 0.005       # [m] minimum linear carrot lead distance
+                _TEST_DT_VIRTUAL_MAX = 0.5  # [s] cap, prevents unbounded lead as twist -> 0
+
+                lin_speed = float(np.linalg.norm(target_twist[:3]))
+                if lin_speed > 1e-6:
+                    dt_needed_lin = _MIN_LEAD_LIN / lin_speed
+                    dt_virtual = float(np.clip(dt_needed_lin, dt_virtual, _TEST_DT_VIRTUAL_MAX))
+                # else: twist is ~zero (already at the goal) -- keep the base
+                # dt_virtual=0.10; there is no meaningful direction to lead
+                # along, and no real motion left to oscillate over.
+
             T_virtual_ref = self.integrate_twist(self.current_T_EE, target_twist, dt_virtual)
 
             p_ref = T_virtual_ref[:3, 3]
