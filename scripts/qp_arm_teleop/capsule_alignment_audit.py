@@ -277,9 +277,20 @@ def _find_link_geoms(model, vmodel, link_name):
     return geoms
 
 
-def audit_chain(model, data, vmodel, chain, tool_link_name, capsule_radius):
-    # Reuse the REAL production function -- zero drift vs. what
+def audit_chain(model, data, vmodel, chain, tool_link_name, capsule_radius, apply_overrides=True):
+    # Reuse the REAL production functions -- zero drift vs. what
     # main_qp_controller.py actually builds into the collision model.
+    #
+    # BUGFIX (2026-07-04): this used to call ONLY calculate_offsets() and
+    # then check against the raw global `capsule_radius` -- i.e. it audited
+    # the PRE-override geometry even after CAPSULE_OFFSET_OVERRIDES was
+    # added and wired into build_collision_model via
+    # CollisionManager._apply_capsule_override. That made re-running this
+    # script after applying the fix silently show the OLD, unfixed numbers
+    # (byte-identical to the very first run) -- the fix was correctly in
+    # production code, but this diagnostic was never checking it. Now calls
+    # _apply_capsule_override too (the exact same call build_collision_model
+    # makes), so the audited geometry is ACTUALLY what gets shipped.
     col = CollisionManager(model, data)
     offsets = col.calculate_offsets(chain, tool_link_name)
 
@@ -290,6 +301,11 @@ def audit_chain(model, data, vmodel, chain, tool_link_name, capsule_radius):
             continue
 
         placement, length = offsets[link_name]
+        if apply_overrides:
+            placement, length, capsule_radius_for_link = col._apply_capsule_override(
+                link_name, placement, length)
+        else:
+            capsule_radius_for_link = capsule_radius
         z_axis = placement.rotation @ np.array([0., 0., 1.])
         p_mid = placement.translation
         a = p_mid - (length / 2.0) * z_axis
@@ -309,7 +325,7 @@ def audit_chain(model, data, vmodel, chain, tool_link_name, capsule_radius):
             verts_joint = (R @ verts_local.T + t.reshape(3, 1)).T
             for v in verts_joint:
                 dist, t_along = _point_segment_distance_and_t(v, a, b)
-                protrusion = dist - capsule_radius
+                protrusion = dist - capsule_radius_for_link
                 if worst is None or protrusion > worst['protrusion']:
                     worst = {'protrusion': protrusion, 't': t_along, 'mesh_name': g.name}
 
@@ -319,7 +335,7 @@ def audit_chain(model, data, vmodel, chain, tool_link_name, capsule_radius):
 
         results.append({
             'link': link_name,
-            'capsule_radius': capsule_radius,
+            'capsule_radius': capsule_radius_for_link,
             'capsule_length': length,
             'protrusion_mm': worst['protrusion'] * 1000.0,
             't_along_capsule': worst['t'],
@@ -352,7 +368,18 @@ def main():
                              "(lateral offset + axial extension) for every flagged link, "
                              "and print it as a ready-to-paste config.py dict, PLUS a "
                              "verification pass confirming the fix actually contains every "
-                             "mesh vertex (worst-case protrusion after fix should be <= 0).")
+                             "mesh vertex (worst-case protrusion after fix should be <= 0). "
+                             "Always computed from RAW (pre-override) geometry -- see "
+                             "--no-overrides below; combining --suggest-fix with an "
+                             "ALREADY-populated cfg.CAPSULE_OFFSET_OVERRIDES is meaningless "
+                             "(it would propose a fresh fix on top of an already-fixed link).")
+    parser.add_argument('--no-overrides', action='store_true',
+                        help="Audit the RAW calculate_offsets() geometry, ignoring "
+                             "cfg.CAPSULE_OFFSET_OVERRIDES entirely (pre-fix numbers). "
+                             "Default: apply overrides, matching EXACTLY what "
+                             "build_collision_model ships in production -- use the default "
+                             "to verify a fix; use --no-overrides to see the original "
+                             "problem or to regenerate a fix from scratch.")
     args = parser.parse_args()
 
     model = pin.buildModelFromUrdf(args.urdf)
@@ -375,7 +402,8 @@ def main():
             continue
 
         print(f"\n--- {chain_key.upper()} chain ---")
-        results = audit_chain(model, data, vmodel, chain, tool_link, cfg.CAPSULE_RADIUS)
+        results = audit_chain(model, data, vmodel, chain, tool_link, cfg.CAPSULE_RADIUS,
+                              apply_overrides=not args.no_overrides)
         header = f"{'link':<20} {'radius_mm':>10} {'length_mm':>10} {'protrusion_mm':>15} {'t_along':>8}  mesh"
         print(header)
         print("-" * len(header))
@@ -430,9 +458,16 @@ def main():
                 chain, tool_link = CHAINS[chain_key]
                 link_name = r['link']
 
+                # ALWAYS from RAW geometry (see --suggest-fix's help text) --
+                # this proposes a fresh fix from scratch, regardless of
+                # whether --no-overrides was passed for the audit table above.
                 col = CollisionManager(model, data)
                 offsets = col.calculate_offsets(chain, tool_link)
                 placement, length = offsets[link_name]
+                if link_name in cfg.CAPSULE_OFFSET_OVERRIDES:
+                    print(f"  [!] NOTE: {link_name} already has a CAPSULE_OFFSET_OVERRIDES "
+                          f"entry -- this proposes a FRESH fix from raw geometry, ignoring "
+                          f"it. Do not blindly add both.")
                 z_axis = placement.rotation @ np.array([0., 0., 1.])
                 a = placement.translation - (length / 2.0) * z_axis
 
