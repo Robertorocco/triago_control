@@ -34,7 +34,7 @@
   <depend>urdf_parser_py</depend>
 
   <!-- head_pcl_perception_node (C++/PCL cross-check pipeline). Eigen is
-       pulled in transitively via libpcl-all-dev -- no separate depend
+       pulled in transitively via libpcl-all-dev, so no separate depend is
        needed (mirrors the CMakeLists.txt decision not to find_package it
        standalone). -->
   <depend>tf2_sensor_msgs</depend>
