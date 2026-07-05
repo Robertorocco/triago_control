@@ -788,7 +788,7 @@ class HeadPclPerceptionNode : public rclcpp::Node {
           << "cm n=" << o.n_points << " unseen=" << o.frames_unseen << " |\n";
     }
     out << "       |-- BIAS-VS-GT REGRESSION (raw detections, read-only) ------------|\n";
-    for (const std::string &color : {"red", "blue"}) {
+    for (const std::string color : {"red", "blue"}) {
       auto it = bias_samples_.find(color);
       if (it == bias_samples_.end() || it->second.size() < 5) {
         out << "       |   " << color << ": not enough samples yet"
