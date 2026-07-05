@@ -1773,6 +1773,115 @@ candidates differ by exactly a 180-degree roll about that fixed axis.
 
 ---
 
+### 9.15 `movement_tutorial` follow-up fixes (post-§9.14 testing)
+
+Four fixes found while the operator actually ran `movement_tutorial` end to
+end (POLICY_BELIEF_TEST mode), none requiring further world-schema changes:
+
+1. **`KeyError: 'Red_Side'` at startup.** `self.active_goal_key`/`self.
+   test_goal_key` were hardcoded to the literal `'Red_Side'` -- valid only
+   for a world whose cylinders offer Top/Side grasp types. A Front-only
+   world has no `'Red_Side'` key at all, so the very first `timer_callback`
+   tick crashed on `ee_policies[self.active_goal_key]`. Fixed by resolving
+   both defaults AFTER `self.target_keys` is known: `'Red_Side'` if this
+   world actually offers it (unchanged for `no_obstacle`), otherwise the
+   first entry of `self.target_keys` (`'Red_Front'` for `movement_tutorial`).
+
+2. **Invalid XML comments in `movement_tutorial.world`.** Long comment
+   blocks used `--` as a prose dash (fine in Python/YAML `#` comments,
+   invalid inside XML `<!-- -->` per the XML spec -- a comment body must
+   never contain `--` except immediately before the closing `-->`). This
+   confused VS Code's XML-aware highlighter into losing track of comment
+   boundaries, visually rendering `work_table` (and everything after the
+   first offending comment) as commented-out even though it was correctly
+   present and active in the file. Fixed by replacing every `--` with
+   ordinary punctuation; verified via an XML DOM parse plus a scan for any
+   residual bare `--` inside a comment body. Same care taken in
+   `shield_world.world` (§9.16 below) from the start.
+
+3. **High-frequency oscillation (position error + slack) in
+   POLICY_BELIEF_TEST, independent of `ENABLE_REFERENCE_GOVERNOR`.**
+   Root cause: the "virtual carrot" (`T_virtual_ref`, integrated from
+   `target_twist` by `dt_virtual` seconds) re-anchors from `self.
+   current_T_EE` -- the LIVE, still-settling EE pose -- every 100Hz tick.
+   At the original `dt_virtual=0.02`, the carrot's lead distance (~2mm at
+   typical policy speed) was small enough that ordinary EE tracking lag
+   (a few mm, normal for any closed-loop tracker) became a LARGE relative
+   fraction of the carrot's own motion each tick -- a genuinely jittery
+   reference, which the CLF (and, when enabled, the governor's
+   acceleration limiter -- a nonlinear rate CLAMP, not a low-pass filter --
+   chasing that same staircase-shaped input) then faithfully tracked,
+   producing the observed oscillation. Disabling the governor only removed
+   one amplifier; the noisy reference itself was still there underneath,
+   which is why the oscillation persisted.
+
+   Fix, MODE-GATED on `self.POLICY_BELIEF_TEST` (grasp-execution/`BLENDING`
+   teleop is completely untouched, still exactly `dt_virtual=0.02`):
+   `dt_virtual` raised to `0.10` in test mode.
+
+4. **Oscillation persisting specifically in the NEAR-GOAL approach phase**,
+   even after fix #3. `dt_virtual` alone cannot fix this: the carrot's lead
+   distance is `dt_virtual * ||target_twist||`, and `||target_twist||`
+   itself shrinks toward zero near the goal (tanh-saturated proportional
+   convergence law, `v_mag ~= K_p*dist` for small `dist` -- see
+   `compute_v_geo`) -- so the lead collapses toward zero exactly where the
+   oscillation was observed, regardless of how large `dt_virtual` is (a
+   fixed constant cannot fix a problem that scales with `1/||twist||`).
+
+   Fix (also `POLICY_BELIEF_TEST`-gated only): floors the ABSOLUTE LINEAR
+   lead distance to 5mm by stretching the EFFECTIVE `dt` (never
+   `target_twist` itself -- direction/convergence unaffected) whenever
+   `dt_virtual * lin_speed` would fall below that floor, capped at
+   `dt_virtual <= 0.5s` so a twist that shrinks to exactly zero at the goal
+   cannot blow this up unboundedly. Deliberately LINEAR-ONLY (no angular
+   floor): a single shared `dt` scales `integrate_twist`'s linear AND
+   angular parts together, and an independent angular floor could demand a
+   different `dt` than the linear one whenever both speeds shrink together
+   near full convergence, with the cap then unable to satisfy both at once
+   -- confirmed this exact conflict numerically while building the fix.
+   Since the reported symptom was specifically position/slack oscillation
+   (not orientation), driving `dt` from linear speed alone avoids that
+   conflict while directly targeting the reported problem.
+
+   Verified numerically before pushing (both fixes #3/#4): far-field speeds
+   stay at the base `0.10` (floor inactive); moderate near-goal speeds get
+   the floor exactly satisfied; very-near-goal speeds are correctly capped
+   at `0.5s` (floor only partially met, by design -- the deliberate
+   trade-off vs. an unbounded lead); at-goal (`twist~0`) falls back to the
+   base `0.10`; teleop/grasp_exec/`BLENDING` remain untouched at exactly
+   `0.02` regardless of speed, in every case.
+
+### 9.16 `shield_world`: World 2 with a static obstacle (no code changes)
+
+New world, `config/worlds/shield_world.yaml` / `.world`: identical to
+`no_obstacle` (same table, same red/blue graspable cylinders at the same
+poses, same platform) PLUS one new static obstacle, `shield_obstacle` -- a
+thin glass safety-shield pane standing at the table's front edge (absolute
+collision pose `[0.70, 0.00, 0.75]`, size `[0.02, 0.35, 0.30]`, derived by
+composing the Gazebo model's own pose `[0.70, 0.00, 0.70]` with its
+collision sub-pose `[0, 0, 0.05]` -- the model's two corner-bracket visuals
+are VISUAL-ONLY in the source SDF, no `<collision>` block, so they are not
+represented as separate `ObstacleSpec` entries here, consistent with the
+schema tracking collision-relevant geometry only).
+
+**Zero code changes required** -- this is the direct payoff of the
+generic world-loading architecture (§9.12-9.14): `CollisionManager`,
+`VisualizationEngine`, and `GoalSet` all already consume
+`static_obstacles` generically, so a new obstacle with `role: "obstacle"`
+flows through the exact same collision-geometry-creation and RViz-marker
+code path the table already uses, automatically kept in sync across
+RViz/Meshcat/CBF by construction. Verified numerically before pushing:
+`_cylinders_from_world_scene`'s output and the derived `target_keys` are
+BYTE-IDENTICAL to `no_obstacle`'s (same 5 keys: `Red_Top`/`Red_Side`/
+`Blue_Top`/`Blue_Side`/`Platform_Place`) -- confirming the goal/belief side
+is completely unaffected by the added obstacle, exactly as intended.
+
+Vision-obstacle behavior (the shield occluding the head camera's view of
+the table) is explicitly OUT OF SCOPE for this pass -- flagged for a
+future request once camera-driven obstacle handling exists.
+
+---
+
 ## 10. Adaptive Scheduling (shadow-price feedback)
 
 - **Decoupled slack weighting**: each arm's slack weight drops (toward `BASE_WEIGHT_SLACK=5`) when its shadow price grows, letting the slack absorb more tracking error near obstacles. In free space it rises (toward `MAX_WEIGHT_SLACK=50`) for tighter tracking.

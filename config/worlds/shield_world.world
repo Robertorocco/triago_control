@@ -1,0 +1,195 @@
+<?xml version="1.0" ?>
+<sdf version="1.4">
+  <world name="bimanual_manipulation_world">
+
+    <!-- ================================================================
+         PHYSICS: same tuning as no_obstacle.world, kept identical.
+    ================================================================ -->
+    <physics type="ode">
+      <gravity>0 0 -9.81</gravity>
+      <ode>
+        <solver>
+          <type>quick</type>
+          <iters>150</iters>
+          <sor>1.3</sor>
+        </solver>
+        <constraints>
+          <cfm>0.0</cfm>
+          <erp>0.5</erp>
+          <contact_max_correcting_vel>2.0</contact_max_correcting_vel>
+          <contact_surface_layer>0.001</contact_surface_layer>
+        </constraints>
+      </ode>
+      <real_time_update_rate>1000</real_time_update_rate>
+      <max_step_size>0.001</max_step_size>
+    </physics>
+
+    <plugin name="ros2_linkattacher" filename="libgazebo_link_attacher.so"/>
+
+    <!-- Standard illumination and ground -->
+    <include><uri>model://sun</uri></include>
+    <include><uri>model://ground_plane</uri></include>
+
+    <!-- ================================================================
+         WORK TABLE: same pose, size, and material as no_obstacle.world's
+         work_table.
+    ================================================================ -->
+    <model name="work_table">
+      <static>true</static>
+      <pose>1.000 0.0 0.35 0 0 0</pose>
+      <link name="link">
+        <collision name="col">
+          <geometry><box><size>0.6 0.5 0.7</size></box></geometry>
+          <surface>
+            <contact>
+              <ode>
+                <kp>1000000</kp>
+                <kd>100</kd>
+                <max_vel>0.5</max_vel>
+                <min_depth>0.001</min_depth>
+              </ode>
+            </contact>
+            <friction><ode><mu>0.8</mu><mu2>0.8</mu2></ode></friction>
+          </surface>
+        </collision>
+        <visual name="vis">
+          <geometry><box><size>0.6 0.5 0.7</size></box></geometry>
+          <material>
+            <script>
+              <uri>file://media/materials/scripts/gazebo.material</uri>
+              <name>Gazebo/Wood</name>
+            </script>
+          </material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Visual placement manifold (Yellow Area), no collision, same as
+         no_obstacle.world -->
+    <model name="placement_area">
+      <static>true</static>
+      <pose>1.000 0.0 0.701 0 0 0</pose>
+      <link name="link">
+        <visual name="vis">
+          <geometry><cylinder><radius>0.15</radius><length>0.002</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Yellow</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ================================================================
+         RED CYLINDER, right arm manipulandum. Same as no_obstacle.world.
+    ================================================================ -->
+    <model name="red_cylinder">
+      <static>false</static>
+      <pose>0.800 -0.20 0.775 0 0 0</pose>
+      <link name="link">
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <mass>0.15</mass>
+          <inertia>
+            <ixx>0.000309</ixx>
+            <iyy>0.000309</iyy>
+            <izz>0.000030</izz>
+            <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz>
+          </inertia>
+        </inertial>
+        <collision name="col">
+          <geometry><cylinder><radius>0.02</radius><length>0.15</length></cylinder></geometry>
+          <surface>
+            <contact>
+              <ode>
+                <soft_cfm>0.0</soft_cfm>
+                <soft_erp>0.5</soft_erp>
+                <kp>20000</kp>
+                <kd>50</kd>
+                <max_vel>1.0</max_vel>
+                <min_depth>0.001</min_depth>
+              </ode>
+            </contact>
+            <friction><ode><mu>0.6</mu><mu2>0.6</mu2></ode></friction>
+          </surface>
+        </collision>
+        <visual name="vis">
+          <geometry><cylinder><radius>0.02</radius><length>0.15</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Red</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ================================================================
+         BLUE CYLINDER, left arm manipulandum. Same as no_obstacle.world.
+    ================================================================ -->
+    <model name="blue_cylinder">
+      <static>false</static>
+      <pose>0.800 0.20 0.775 0 0 0</pose>
+      <link name="link">
+        <inertial>
+          <pose>0 0 0 0 0 0</pose>
+          <mass>0.15</mass>
+          <inertia>
+            <ixx>0.000309</ixx>
+            <iyy>0.000309</iyy>
+            <izz>0.000030</izz>
+            <ixy>0</ixy><ixz>0</ixz><iyz>0</iyz>
+          </inertia>
+        </inertial>
+        <collision name="col">
+          <geometry><cylinder><radius>0.02</radius><length>0.15</length></cylinder></geometry>
+          <surface>
+            <contact>
+              <ode>
+                <soft_cfm>0.0</soft_cfm>
+                <soft_erp>0.5</soft_erp>
+                <kp>20000</kp>
+                <kd>50</kd>
+                <max_vel>1.0</max_vel>
+                <min_depth>0.001</min_depth>
+              </ode>
+            </contact>
+            <friction><ode><mu>0.6</mu><mu2>0.6</mu2></ode></friction>
+          </surface>
+        </collision>
+        <visual name="vis">
+          <geometry><cylinder><radius>0.02</radius><length>0.15</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Blue</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ================================================================
+         SAFETY SHIELD ASSEMBLY: new for this world. Static glass pane
+         standing at the table's front edge, with two decorative corner
+         brackets (visual only, no collision). Matches
+         config/worlds/shield_world.yaml's "shield_obstacle" entry exactly
+         (absolute collision pose 0.70 0.00 0.75, size 0.02 0.35 0.30).
+    ================================================================ -->
+    <model name="safety_shield_assembly">
+      <static>true</static>
+      <pose>0.70 0.00 0.70 0 0 0</pose>
+      <link name="link">
+        <collision name="shield_col">
+          <pose>0 0 0.05 0 0 0</pose>
+          <geometry><box><size>0.02 0.35 0.30</size></box></geometry>
+        </collision>
+        <visual name="shield_vis">
+          <pose>0 0 0.05 0 0 0</pose>
+          <geometry><box><size>0.02 0.35 0.30</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Glass</name></script></material>
+        </visual>
+
+        <visual name="bracket_1">
+          <pose>0 0.12 0.02 0 0 0</pose>
+          <geometry><box><size>0.04 0.04 0.04</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="bracket_2">
+          <pose>0 -0.12 0.02 0 0 0</pose>
+          <geometry><box><size>0.04 0.04 0.04</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+  </world>
+</sdf>

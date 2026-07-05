@@ -1,0 +1,97 @@
+# =============================================================================
+# shield_world.yaml
+# -----------------------------------------------------------------------------
+# World 2 of the user-study set: same table + red/blue graspable cylinders +
+# platform as no_obstacle.yaml, PLUS one new static obstacle: a glass safety
+# shield assembly standing between the robot and the table. Goal poses
+# (cylinders, platform) are UNCHANGED from no_obstacle -- this is purely an
+# added obstacle, nothing else about the scene changes.
+#
+# The shield is also intended as a future VISION obstacle (occludes the head
+# camera's view of part of the table) -- that aspect is NOT addressed here;
+# this pass only covers the CBF/RViz/Meshcat collision-geometry side.
+#
+# Shield geometry (from the Gazebo model "safety_shield_assembly"):
+#   model pose:        [0.70, 0.00, 0.70, 0, 0, 0]
+#   collision sub-pose: [0, 0, 0.05, 0, 0, 0]   (relative to the model)
+#   -> absolute collision box pose: [0.70, 0.00, 0.75, 0, 0, 0]
+#   collision box size: [0.02, 0.35, 0.30]  (thin glass pane)
+# The two corner brackets (bracket_1/bracket_2 in the SDF) are VISUAL ONLY,
+# no <collision> block in the source model -- not represented as separate
+# obstacles here, since this schema only tracks collision-relevant geometry
+# (see world_loader.py's ObstacleSpec).
+#
+# No code changes were needed to add this world: CollisionManager/
+# VisualizationEngine/GoalSet all consume static_obstacles generically (any
+# role other than "wall"/"table" falls into the same generic collision +
+# RViz-marker path the table/cylinders already use).
+#
+# Matches the Gazebo world launched via:
+#   ros2 launch triago_gazebo triago_gazebo.launch.py ... world_name:=shield_world
+#
+# See triago_control/qp_controller/world_loader.py for the full schema.
+# =============================================================================
+
+world_name: "shield_world"
+gazebo_world_file: "shield_world.world"
+
+static_obstacles:
+  - name: "work_table"
+    role: "table"
+    shape: "box"
+    pose: [1.0, 0.0, 0.35, 0.0, 0.0, 0.0]
+    size: [0.6, 0.5, 0.7]
+    color: [0.6, 0.4, 0.2, 0.8]
+    collision: true
+
+  - name: "red_cylinder"
+    role: "graspable"
+    shape: "cylinder"
+    pose: [0.800, -0.20, 0.775, 0.0, 0.0, 0.0]
+    size: [0.02, 0.15]          # [radius, length]
+    color: [1.0, 0.0, 0.0, 1.0]
+    collision: true
+
+  - name: "blue_cylinder"
+    role: "graspable"
+    shape: "cylinder"
+    pose: [0.800, 0.20, 0.775, 0.0, 0.0, 0.0]
+    size: [0.02, 0.15]
+    color: [0.0, 0.0, 1.0, 1.0]
+    collision: true
+
+  # Safety shield assembly -- new for this world. Absolute pose = model pose
+  # [0.70, 0.00, 0.70] + collision sub-pose [0, 0, 0.05] (see header). Sits
+  # right at the table's front edge (table spans x in [0.70, 1.30]), narrower
+  # than the table's own width (0.35m vs the table's 0.50m), from just below
+  # the table top (z=0.60) to 20cm above it (z=0.90).
+  - name: "shield_obstacle"
+    role: "obstacle"
+    shape: "box"
+    pose: [0.70, 0.00, 0.75, 0.0, 0.0, 0.0]
+    size: [0.02, 0.35, 0.30]
+    color: [0.7, 0.9, 1.0, 1.0]   # light "glass" blue-ish tint (rendered fully
+                                  # opaque regardless -- see visualization_
+                                  # engine.py's color_collision_model, which
+                                  # forces alpha=1.0 on every collision-model
+                                  # color to prevent the translucent-mesh
+                                  # z-fighting/flicker fixed earlier)
+    collision: true
+
+  - name: "virtual_wall"
+    role: "wall"
+    shape: "box"
+    pose: [0.5, 0.0, 0.5, 0.0, 0.0, 0.0]
+    size: [1.0, 0.02, 1.0]
+    color: [1.0, 0.5, 0.0, 0.5]
+    collision: false
+
+grasp_roles:
+  red: "red_cylinder"
+  blue: "blue_cylinder"
+
+platform:
+  pose: [1.000, 0.0, 0.701]
+  radius: 0.15
+  thickness: 0.002
+  place_margin: 0.03
