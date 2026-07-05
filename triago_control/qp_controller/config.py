@@ -447,7 +447,87 @@ GRIPPER_SLIDER_ROW = ['gripper_left_finger_joint', 'gripper_right_finger_joint']
 # =============================================================================
 # 6. GEOMETRY + WORKSPACE
 # =============================================================================
-CAPSULE_RADIUS = 0.06                 # Radius of the arm collision capsules
+CAPSULE_RADIUS = 0.06                 # DEFAULT radius of the arm collision capsules
+                                       # (used for any link WITHOUT an entry in
+                                       # CAPSULE_OFFSET_OVERRIDES below)
+
+# =============================================================================
+# 6b. PER-LINK CAPSULE ALIGNMENT OVERRIDES (2026-07-04)
+# =============================================================================
+# CollisionManager.calculate_offsets builds each arm/head link's capsule as a
+# STRAIGHT segment directly between joint(i) and joint(i+1) (dominant-axis
+# snapped) with the single global CAPSULE_RADIUS above. The real CAD mesh's
+# true centerline is not always collinear with that line, and several links
+# are physically thicker at their widest point than CAPSULE_RADIUS -- so a
+# capsule built purely from the joint geometry can let the visual mesh poke
+# outside it (verified via scripts/qp_arm_teleop/capsule_alignment_audit.py:
+# every arm_*_{1..6}_link showed a real, measurable protrusion at the default
+# 60mm radius, ranging ~2mm to ~33mm depending on the link).
+#
+# Rather than growing CAPSULE_RADIUS globally (which would fatten EVERY link
+# uniformly -- including ones already fine -- silently loosening the tuned
+# CBF margins, D_SAFE_BASE/ALPHA_SOFTMIN/etc., everywhere instead of just
+# where needed), each entry here corrects ONE named link, computed directly
+# from that link's real mesh vertex data (closed-form: see
+# capsule_alignment_audit.py's `_compute_capsule_fix` for the exact
+# derivation) -- NOT hand-guessed. A link absent from this dict is completely
+# unaffected: CAPSULE_RADIUS + calculate_offsets' original placement/length,
+# byte-identical to before this feature existed.
+#
+# Fields per entry (all in mm, joint-local frame -- the SAME frame
+# calculate_offsets' placement/length already live in):
+#   lateral_offset       : [x, y, z] shift of the capsule's core line,
+#                           PERPENDICULAR to its own axis (re-centers onto
+#                           the mesh's true centroid; by construction this
+#                           vector has zero component along the axis).
+#   radius                : per-link capsule radius, REPLACING CAPSULE_RADIUS
+#                           for this link only. Includes a +1mm safety margin
+#                           over the raw "radius_needed" the audit computes
+#                           (cheap insurance against minor mesh/URDF/build
+#                           differences; ~1-1.3% of the capsule radius, so it
+#                           does not meaningfully affect CBF behavior). Since
+#                           a capsule's ends are HEMISPHERES, this margin also
+#                           implicitly pads axial reach at both ends -- no
+#                           separate margin was added to the extensions below.
+#   proximal_extension    : extends the segment's PROXIMAL end (t=0, at the
+#                           parent joint) outward along its own axis, to
+#                           cover mesh that reaches past the raw joint-to-
+#                           joint segment (accounts for the capsule's rounded
+#                           end caps not otherwise reaching that far).
+#   distal_extension      : same, for the DISTAL end (t=1).
+#
+# Applied by CollisionManager._apply_capsule_override, called from
+# build_collision_model's add_arm_geoms -- AFTER the existing dominant-axis
+# snap, as a pure additive correction (never rewrites calculate_offsets'
+# own straight-line-segment logic).
+#
+# Computed 2026-07-04 from the repo's own triago_extracted.urdf via:
+#   ros2 run triago_control capsule_alignment_audit.py \
+#        --urdf triago_extracted.urdf --suggest-fix
+# The SAME override applies to arm_right_*/arm_left_*/arm_head_* for a given
+# link NUMBER: the audit's real per-mesh measurement came out numerically
+# identical across all three chains for each link number (consistent with
+# config.py's own documented convention that the head reuses the arms'
+# exact hardware/geometry recipe, and that this URDF defines both arms with
+# consistent local joint-frame conventions). If this dict is ever
+# regenerated against a DIFFERENT URDF and right/left no longer match,
+# split them into separate 'arm_right_N_link'/'arm_left_N_link' entries.
+#
+# VERIFY after any change here by re-running the audit WITHOUT --suggest-fix
+# -- every previously-flagged link should now show protrusion_mm <= 0.
+_CAPSULE_FIX = {
+    1: {'lateral_offset': [-22.46, 9.11, 0.00], 'radius': 75.42, 'proximal_extension': 0.00, 'distal_extension': 0.20},
+    2: {'lateral_offset': [8.82, -0.00, -8.67], 'radius': 75.07, 'proximal_extension': 0.00, 'distal_extension': 0.00},
+    3: {'lateral_offset': [11.49, 25.66, 0.00], 'radius': 75.97, 'proximal_extension': 0.00, 'distal_extension': 0.20},
+    4: {'lateral_offset': [-8.82, 0.00, -8.67], 'radius': 75.07, 'proximal_extension': 0.00, 'distal_extension': 0.00},
+    5: {'lateral_offset': [0.72, -32.79, 0.00], 'radius': 77.29, 'proximal_extension': 13.52, 'distal_extension': 0.00},
+    6: {'lateral_offset': [0.00, 6.87, -56.09], 'radius': 70.04, 'proximal_extension': 0.00, 'distal_extension': 0.00},
+}
+CAPSULE_OFFSET_OVERRIDES = {}
+for _n, _fix in _CAPSULE_FIX.items():
+    for _side in ('arm_right', 'arm_left', 'arm_head'):
+        CAPSULE_OFFSET_OVERRIDES[f'{_side}_{_n}_link'] = _fix
+del _n, _fix, _side, _CAPSULE_FIX
 
 # --- DEPRECATED (2026-07-04): world scene obstacles now live in YAML --------
 # TABLE_POS/TABLE_SIZE/RED_CYLINDER_POS/BLUE_CYLINDER_POS/CYLINDER_SIZE/

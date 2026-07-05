@@ -131,6 +131,55 @@ class CollisionManager:
                 print(f"  Failed {link_name}: {e}")
         return offsets
 
+    def _apply_capsule_override(self, link_name, placement_wrt_joint, length):
+        """Applies this link's cfg.CAPSULE_OFFSET_OVERRIDES entry (if any) to
+        its raw calculate_offsets() placement/length, and returns the
+        possibly-corrected (placement, length, radius). A link with NO entry
+        returns (placement_wrt_joint, length, cfg.CAPSULE_RADIUS) UNCHANGED --
+        this function is a pure additive correction, never a rewrite of
+        calculate_offsets' own straight-line-segment math.
+
+        See config.py section 6b for the full field-by-field derivation.
+        `lateral_offset` is applied in the capsule's OWN local frame (i.e.
+        rotated by placement_wrt_joint.rotation), since it was computed
+        relative to that same joint-relative axis by capsule_alignment_
+        audit.py's `_compute_capsule_fix` -- NOT in the parent joint's raw
+        x/y/z, which would apply the correction in the wrong direction
+        whenever the dominant-axis snap picked something other than a pure
+        Z-axis alignment relative to the joint frame.
+        """
+        override = cfg.CAPSULE_OFFSET_OVERRIDES.get(link_name)
+        if override is None:
+            return placement_wrt_joint, length, cfg.CAPSULE_RADIUS
+
+        # lateral_offset/extensions are stored in mm (see config.py) -- convert once here.
+        lateral_mm = np.array(override['lateral_offset'], dtype=float)
+        lateral_local = lateral_mm / 1000.0
+        prox_ext = override['proximal_extension'] / 1000.0
+        dist_ext = override['distal_extension'] / 1000.0
+        radius = override['radius'] / 1000.0
+
+        # The capsule's own Z axis, expressed in the joint-local frame (same
+        # convention calculate_offsets itself uses: "Align the capsule's
+        # Z-axis with the dominant direction").
+        z_axis_local = np.array([0., 0., 1.])
+
+        # Shift the midpoint sideways (already _|_ to z_axis_local by
+        # construction from _compute_capsule_fix -- see config.py), THEN
+        # re-center to accommodate the axial extension: extending the
+        # proximal end by prox_ext and the distal end by dist_ext grows the
+        # segment by (prox_ext + dist_ext) and shifts its midpoint by
+        # (dist_ext - prox_ext) / 2 along z_axis_local.
+        new_length = length + prox_ext + dist_ext
+        axial_recenter = (dist_ext - prox_ext) / 2.0
+
+        new_translation = (placement_wrt_joint.translation
+                          + placement_wrt_joint.rotation @ lateral_local
+                          + placement_wrt_joint.rotation @ (axial_recenter * z_axis_local))
+        new_placement = pin.SE3(placement_wrt_joint.rotation, new_translation)
+
+        return new_placement, new_length, radius
+
     def build_collision_model(self, right_offsets, left_offsets, head_offsets=None,
                               world_scene=None):
         # Assemble the full collision geometry model: arms, grippers, body, ground, obstacles.
@@ -153,8 +202,18 @@ class CollisionManager:
                     frame_id = self.model.getFrameId(link_name)
                 parent_joint_id = self.model.frames[frame_id].parentJoint
                 # placement_wrt_joint is already relative to the joint origin (no extra multiply)
-                shape = hppfcl.Capsule(cfg.CAPSULE_RADIUS, length)
-                obj = pin.GeometryObject(f"{prefix}_{link_name}", parent_joint_id, placement_wrt_joint, shape)
+                #
+                # PER-LINK ALIGNMENT OVERRIDE (2026-07-04, see config.py section
+                # 6b for the full derivation/rationale): calculate_offsets' pure
+                # joint-to-joint straight segment can leave the real visual mesh
+                # poking outside the capsule (measured via
+                # capsule_alignment_audit.py). A link WITHOUT an override entry
+                # is completely unaffected -- byte-identical placement/length/
+                # radius to before this feature existed.
+                placement_fixed, length_fixed, radius = self._apply_capsule_override(
+                    link_name, placement_wrt_joint, length)
+                shape = hppfcl.Capsule(radius, length_fixed)
+                obj = pin.GeometryObject(f"{prefix}_{link_name}", parent_joint_id, placement_fixed, shape)
                 id_list.append(self.cmodel.addGeometryObject(obj))
 
         add_arm_geoms(right_offsets, "shadow_right", self.right_geom_ids)
