@@ -3,10 +3,10 @@
   <world name="bimanual_manipulation_world">
 
     <!-- ================================================================
-         PHYSICS: same tuning as no_obstacle.world (kept identical -- no
-         cylinders exist in this world to tip/settle, but nothing here
+         PHYSICS: same tuning as no_obstacle.world, kept identical. No
+         cylinders exist in this world to tip or settle, but nothing here
          depends on the physics constants specifically, so no reason to
-         diverge from the shared baseline).
+         diverge from the shared baseline.
     ================================================================ -->
     <physics type="ode">
       <gravity>0 0 -9.81</gravity>
@@ -34,9 +34,9 @@
     <include><uri>model://ground_plane</uri></include>
 
     <!-- ================================================================
-         WORK TABLE: same pose/size/material as no_obstacle.world's
+         WORK TABLE: same pose, size, and material as no_obstacle.world's
          work_table. This is the ONLY obstacle in this world (movement
-         tutorial -- no graspable cylinders, no other clutter).
+         tutorial; no graspable cylinders, no other clutter).
     ================================================================ -->
     <model name="work_table">
       <static>true</static>
@@ -69,19 +69,20 @@
     </model>
 
     <!-- ================================================================
-         RED / BLUE TARGET MARKERS (visual only -- no collision, no mass,
-         no LinkAttacher relevance). These purely mark, IN THE SIMULATED
-         WORLD, where the two "Front" reach/hover goals actually are, so
-         the user can visually confirm the ghost-gripper RViz markers (which
-         are what the shared-autonomy belief pipeline actually renders) line
-         up with something real in the scene. They deliberately have NO
-         <collision> block -- matching config/worlds/movement_tutorial.yaml's
-         red_target/blue_target entries, which are also collision:false.
+         RED / BLUE TARGET MARKERS. Visual only: no collision, no mass,
+         no LinkAttacher relevance. These purely mark, in the simulated
+         world, where the two "Front" reach/hover goals actually are, so
+         the user can visually confirm the ghost-gripper RViz markers
+         (which are what the shared-autonomy belief pipeline actually
+         renders) line up with something real in the scene. They
+         deliberately have NO collision block, matching
+         config/worlds/movement_tutorial.yaml's red_target/blue_target
+         entries, which are also collision:false.
 
          Poses (base_footprint / world, robot at origin):
-           red_target  : 20cm right of table center, 50cm above the table top
-                         x=1.0, y=-0.45, z=1.20
-           blue_target : mirrored on y=+0.45
+           red_target:  20cm right of table center, 50cm above the table
+                        top. x=1.0, y=-0.45, z=1.20
+           blue_target: mirrored on y=+0.45
     ================================================================ -->
     <model name="red_target">
       <static>true</static>
