@@ -59,20 +59,21 @@ BLENDING = True
 # rest" always means "hold the current gripper orientation", however the gripper
 # is posed (e.g. a top-down grasp approach).
 JOYSTICK_NEUTRAL_POSITION_M = [0.5, -0.03, -0.03]
-# Measured on the device (virtuose/pose) with the handle placed at the operator's
-# comfortable rest orientation. This is the handle orientation that maps to "hold
+# Measured on the device (virtuose/pose) with the handle at the operator's
+# comfortable rest orientation — the pose the spring controller settles at when
+# the user releases the handle. This is the handle orientation that maps to "hold
 # the gripper's current orientation" (zero rotational command) the first time each
 # arm becomes active.
-JOYSTICK_NEUTRAL_ORIENTATION_XYZW = [-0.0917523130774498, 0.7981895208358765,
-                                     0.016726883128285408, 0.5951430201530457]
+JOYSTICK_NEUTRAL_ORIENTATION_XYZW = [-0.015140674076974392, 0.8170770406723022,
+                                     0.06124841421842575, 0.5730659365653992]
 
 # --- Displacement -> twist mapping (teleop_triago_joystick.py) --------------
 # The commanded twist magnitude is STRICTLY PROPORTIONAL to the handle's distance
 # from home, past a deadband. Deadband: displacement below these -> zero twist
 # (and, in the arbitration, a zero user twist is treated as perfectly ALIGNED so
 # the autonomy leads the motion). 5 cm / 5 deg initial values -- to be tuned.
-JOYSTICK_DEADBAND_LIN = 0.02         # m   (2 cm)
-JOYSTICK_DEADBAND_ANG = 0.0349066    # rad (2 deg)
+JOYSTICK_DEADBAND_LIN = 0.06         # m   (6 cm) -- large: the spring can't settle to mm precision
+JOYSTICK_DEADBAND_ANG = 0.15         # rad (~8.6 deg) -- large: residual oscillation around home
 JOYSTICK_K_TRANS = 0.8               # (m/s) per m of handle linear displacement
 JOYSTICK_K_ROT = 1.5                 # (rad/s) per rad of handle angular displacement
 JOYSTICK_V_MAX_LIN = 0.10            # m/s   hard safety clamp on the commanded linear twist
