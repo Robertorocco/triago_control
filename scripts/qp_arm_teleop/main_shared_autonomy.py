@@ -1230,13 +1230,22 @@ class SharedControlNode(Node):
                 self.current_T_user[:3, 3] - self.current_T_EE[:3, 3]))
             alpha = self.compute_alpha(b_max, pos_divergence=pos_divergence)
             self.last_alpha = alpha
+            # Deadband the user twist: sub-threshold handle velocity (residual
+            # F_sync jitter / device noise) is NOT genuine intent. With the
+            # magnitude clamp below (policy clamped to the user's magnitude), a
+            # still handle -> v_user = 0 -> policy clamped to 0 -> target = 0, so
+            # belief/alpha can NEVER creep the arm on their own.
+            v_user = self.current_v_h.copy()
+            if np.linalg.norm(v_user[0:3]) < cfg.USER_TWIST_DEADBAND_LIN:
+                v_user[0:3] = 0.0
+            if np.linalg.norm(v_user[3:6]) < cfg.USER_TWIST_DEADBAND_ANG:
+                v_user[3:6] = 0.0
             # Magnitude-fair blend: clamp the policy twist's magnitude to the
             # user's own (per linear/angular channel) BEFORE blending, so a small
             # user twist is never overwhelmed by the large saturated policy twist
-            # -- the user sets the speed, alpha sets the direction mix. A still
-            # user clamps the policy to ~0, so the autonomy cannot lead on its own.
-            v_policy_clamped = self._clamp_twist_to(tick_output.target_twist, self.current_v_h)
-            target_twist = (1 - alpha) * self.current_v_h + alpha * v_policy_clamped
+            # -- the user sets the speed, alpha sets the direction mix.
+            v_policy_clamped = self._clamp_twist_to(tick_output.target_twist, v_user)
+            target_twist = (1 - alpha) * v_user + alpha * v_policy_clamped
         else:
             alpha = 0.0
             self.last_alpha = 0.0

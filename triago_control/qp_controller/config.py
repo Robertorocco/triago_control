@@ -59,10 +59,19 @@ ALPHA_LPF_COEFF = 0.08    # Low-pass filter coefficient on alpha
 # tether fighting them / injecting a fake twist into the loop. The SAME two
 # distances gate alpha smoothly to 0 when far. Read by both
 # main_shared_autonomy.py and haptic_force_manager_blending_tutorial.py.
-SYNC_D_MIN = 0.03         # m -- at/below this: F_sync = SYNC_F_MAX and dist_gate = 1
+SYNC_D_MIN = 0.03         # m -- F_sync PEAKS here (SYNC_F_MAX); ramps to 0 below; dist_gate = 1
 SYNC_D_MAX = 0.30         # m -- at/beyond this: F_sync = SYNC_F_MIN and dist_gate = 0
-SYNC_F_MAX = 8.0          # N -- linear sync force magnitude at SYNC_D_MIN (close)
+SYNC_F_MAX = 8.0          # N -- peak linear sync force magnitude at SYNC_D_MIN (close)
 SYNC_F_MIN = 1.0          # N -- linear sync force magnitude at SYNC_D_MAX (far)
+
+# Deadband on the user twist used for blending (main_shared_autonomy.py): a
+# handle velocity below these thresholds is treated as ZERO intent, so a still
+# handle commands exactly zero robot motion. Combined with the magnitude clamp
+# (policy clamped to the user's magnitude) this guarantees belief/alpha alone
+# can NEVER drive the arm -- the residual F_sync jitter / device noise that used
+# to creep the reference is filtered out here.
+USER_TWIST_DEADBAND_LIN = 0.005   # m/s
+USER_TWIST_DEADBAND_ANG = 0.02    # rad/s
 
 # Distance-based assistance-intensity boost: compensates pi_policy's natural falloff
 # near the goal so the approach can actually conclude, capped so full autonomy is
