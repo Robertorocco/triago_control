@@ -124,6 +124,8 @@ class HeadPerceptionNode(Node):
             f"  Table top   : z={cfg.TABLE_TOP_Z_WORLD:.2f} m  "
             f"centre={cfg.TABLE_CENTER_BASE[:2]} (base frame)\n"
             f"  Scan        : {'ON' if cfg.ENABLE_SCAN else 'OFF'}\n"
+            f"  Head POV    : {cfg.HEAD_POV_MODE.upper()} "
+            f"(posture target={np.round(cfg.HEAD_POSTURE_TARGET, 3).tolist()})\n"
             "==================================================================")
 
     # ================================================================== #

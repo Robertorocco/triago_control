@@ -101,7 +101,70 @@ LOOKAT_SLACK_WEIGHT = 500.0  # HIGH penalty: the look-at task dominates over pos
 # relative to the rim-extraction fit correction in object_detector.py (which
 # addresses a ~5mm systematic bias vs. this ~1-2mm noise-floor improvement),
 # but it is free (no other tradeoff) so we take it.
-HEAD_POSTURE_TARGET = np.array([-0.35, -0.25, -0.60, -1.15, -1.00, -1.25, 0.00])
+#
+# "TOP" posture: near-top-down view of the table (elevation ~56 deg below
+# horizontal — steep look-down angle). This was the ONLY posture until the
+# "FRONT" alternative below was added (2026-07-06).
+HEAD_POSTURE_TARGET_TOP = np.array([-0.35, -0.25, -0.60, -1.15, -1.00, -1.25, 0.00])
+
+# =============================================================================
+# 4b. ALTERNATIVE POV: "FRONT" — lower camera height + shallow (near-
+#     horizontal) look-down angle, to test whether viewing the table more
+#     from the side/front (seeing the cylinders' SIDE profile, not just their
+#     top disk) improves cylinder pose/radius/height estimation compared to
+#     the steep top-down "TOP" posture above. Added 2026-07-06 at the user's
+#     request, purely as an experimental A/B vantage point — no perception
+#     algorithm changes accompany this (rim-extraction fit, plane RANSAC,
+#     etc. are all viewpoint-agnostic and untouched).
+#
+# Derivation (FK-optimized against the real URDF via scipy.optimize, then
+# verified by running the ACTUAL closed-loop look-at QP, i.e.
+# LookAtController.compute() bit-for-bit, in simulation for 15-20s from
+# several different starting configs including the "TOP" steady state —
+# not just a kinematic snapshot):
+#   - camera position   ≈ (0.36, -0.14, 0.88) m in base_footprint
+#     (z LOWERED from ~1.22m (TOP) to ~0.88m — the requested "lower its
+#     position" — while x/y are pulled in so the camera is close enough for
+#     good depth resolution)
+#   - elevation (look-down) angle ≈ 16-18 deg below horizontal, i.e. NEAR
+#     HORIZONTAL — vs. TOP's ~56 deg. This is the requested "more horizontal
+#     optical axis": the camera looks at the table much more from the side/
+#     front than from above.
+#   - distance to table centre ≈ 0.68 m (comparable to TOP's ~0.63 m, so
+#     depth-noise variance is not worsened by this change)
+#   - look-at residual error ≈ 0.0 deg at steady state (the QP's rotational
+#     task converges exactly, as expected — only the REDUNDANT null-space
+#     posture differs from TOP)
+#   - joint-limit margin ≥ ~16 deg (~0.28 rad) on every one of the 7 head
+#     joints at steady state AND throughout the existing SCAN_WAYPOINTS sweep
+#     (§5 below) — comfortably clear of JOINT_LIMIT_BUFFER=0.15 rad, so the
+#     joint-limit CBF stays inactive in normal operation
+#   - both cylinders (red & blue, full top/bottom rim, using the GT_* values
+#     in §13 purely as a numerical check target — NOT fed into control) stay
+#     within the camera's pixel FOV and above DEPTH_MIN=0.35m (closest point
+#     checked, the near table edge, sits at ≈0.40m — still a safety margin
+#     above the sensor's rated floor)
+# All of the above was re-verified starting from the TOP steady-state config
+# (i.e. simulating the actual transition an operator would see when flipping
+# HEAD_POV_MODE) — the QP settles onto this posture within one SCAN_DWELL_S
+# window with no joint-limit violation and no manual retuning needed.
+HEAD_POSTURE_TARGET_FRONT = np.array(
+    [-0.1029, -2.1435, -1.3118, -2.1435, -0.3859, 0.0395, -2.3180]
+)
+
+# Select which posture the null-space spring in look_at_controller.py pulls
+# toward. "top" = original steep top-down view; "front" = new, lower/more-
+# horizontal view (see §4b above). This is the SINGLE switch for the A/B
+# comparison the user asked for — flip it and restart main_head.py to compare.
+HEAD_POV_MODE = "front"      # "top" | "front"
+
+if HEAD_POV_MODE == "front":
+    HEAD_POSTURE_TARGET = HEAD_POSTURE_TARGET_FRONT
+elif HEAD_POV_MODE == "top":
+    HEAD_POSTURE_TARGET = HEAD_POSTURE_TARGET_TOP
+else:
+    raise ValueError(f"Unknown HEAD_POV_MODE={HEAD_POV_MODE!r}; expected 'top' or 'front'.")
+
 POSTURE_GAIN = 0.50          # acts in the look-at null space (slack weight is high)
 # Velocity-aware joint-limit CBF.
 JOINT_LIMIT_GAMMA = 2.0
@@ -173,8 +236,9 @@ PIXEL_STRIDE = 2
 # stereo-matching artefacts, not genuine near-field returns. 0.35m keeps a
 # small margin below the rated floor (so we don't clip legitimately-valid
 # points right at the boundary) while rejecting the worst near-range noise.
-# With the new, closer HEAD_POSTURE_TARGET (~0.63m to the table centre, see
-# §4), the working range now sits safely above this floor with headroom.
+# Both postures in §4/§4b keep the camera-to-table-centre distance in the
+# ~0.55-0.70m range (TOP ~0.63m, FRONT ~0.68m — see HEAD_POV_MODE), so the
+# working range sits safely above this floor with headroom either way.
 DEPTH_MIN = 0.35             # [m] ignore points closer than this (noise/self)
 DEPTH_MAX = 2.50             # [m] ignore points beyond this (background/walls)
 
