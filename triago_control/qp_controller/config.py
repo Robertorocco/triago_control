@@ -59,7 +59,12 @@ BLENDING = True
 # rest" always means "hold the current gripper orientation", however the gripper
 # is posed (e.g. a top-down grasp approach).
 JOYSTICK_NEUTRAL_POSITION_M = [0.5, -0.03, -0.03]
-JOYSTICK_NEUTRAL_ORIENTATION_XYZW = [0.0, 0.7071068, 0.0, 0.7071068]
+# Measured on the device (virtuose/pose) with the handle placed at the operator's
+# comfortable rest orientation. This is the handle orientation that maps to "hold
+# the gripper's current orientation" (zero rotational command) the first time each
+# arm becomes active.
+JOYSTICK_NEUTRAL_ORIENTATION_XYZW = [-0.0917523130774498, 0.7981895208358765,
+                                     0.016726883128285408, 0.5951430201530457]
 
 # --- Displacement -> twist mapping (teleop_triago_joystick.py) --------------
 # The commanded twist magnitude is STRICTLY PROPORTIONAL to the handle's distance
