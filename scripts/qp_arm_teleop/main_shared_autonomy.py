@@ -1221,20 +1221,22 @@ class SharedControlNode(Node):
             self._release_object()
 
         if cfg.BLENDING and tick_output.new_state == "SHARED_AUTONOMY":
-            # Simplified authority (2026-07-06): alpha depends ONLY on belief
-            # confidence and the alignment between the user's twist and the
-            # assistive policy's twist toward the most probable goal. No
-            # proximity boost / effort gate / divergence override / catch-up --
-            # alignment alone now handles "let the user redirect or escape"
-            # (misaligned push -> low alpha) and "conclude the task"
-            # (aligned or passive user -> full alpha). See compute_alpha.
-            alpha = self.compute_alpha(b_max, v_user=self.current_v_h,
-                                       v_policy=tick_output.target_twist)
+            # Authority (2026-07-06): alpha = f(belief) * dist_gate. The distance
+            # gate (d = ||user reference - EE||) forces alpha -> 0 when the EE is
+            # far from the user's reference, so the robot first PURELY follows the
+            # user toward their reference; only once F_sync has pulled the two
+            # together (d small) does the policy earn any authority.
+            pos_divergence = float(np.linalg.norm(
+                self.current_T_user[:3, 3] - self.current_T_EE[:3, 3]))
+            alpha = self.compute_alpha(b_max, pos_divergence=pos_divergence)
             self.last_alpha = alpha
-            # v_blend = (1-alpha)*v_user + alpha*pi_policy -- blended at the
-            # TWIST level (not a one-shot pose offset), so it accumulates into
-            # genuine, persistent motion when integrated below (section 6).
-            target_twist = (1 - alpha) * self.current_v_h + alpha * tick_output.target_twist
+            # Magnitude-fair blend: clamp the policy twist's magnitude to the
+            # user's own (per linear/angular channel) BEFORE blending, so a small
+            # user twist is never overwhelmed by the large saturated policy twist
+            # -- the user sets the speed, alpha sets the direction mix. A still
+            # user clamps the policy to ~0, so the autonomy cannot lead on its own.
+            v_policy_clamped = self._clamp_twist_to(tick_output.target_twist, self.current_v_h)
+            target_twist = (1 - alpha) * self.current_v_h + alpha * v_policy_clamped
         else:
             alpha = 0.0
             self.last_alpha = 0.0
@@ -2081,35 +2083,55 @@ class SharedControlNode(Node):
         t = float(np.clip((x - lo) / (hi - lo), 0.0, 1.0))
         return t * t * (3.0 - 2.0 * t)
 
-    def compute_alpha(self, b_max, v_user=None, v_policy=None):
-        """Autonomy authority weight from ONLY belief confidence and twist alignment.
+    @staticmethod
+    def _clamp_twist_to(v_policy, v_user):
+        """Clamp the policy twist's magnitude to the user's own, per channel.
 
-        Simplified formula (2026-07-06), replacing the previous stack of
-        proximity-boost / effort-gate / divergence-override terms:
+        The blend v = (1-alpha)*v_user + alpha*v_policy is only fair if the two
+        twists are comparable in magnitude. pi_policy is a large, saturated
+        velocity while comfortable hand motion is much smaller, so a small user
+        twist would be overwhelmed even when alpha favours the user. Clamping the
+        policy's LINEAR and ANGULAR norms so neither exceeds the user's own
+        (direction preserved) means the USER sets the overall speed and alpha
+        only sets the DIRECTION mix. In particular a still user (v_user ~ 0)
+        clamps the policy to ~0, so the autonomy can never lead a stationary
+        user around.
+        """
+        vp = np.asarray(v_policy, dtype=float).copy()
+        vu = np.asarray(v_user, dtype=float)
+        pl = float(np.linalg.norm(vp[0:3]))
+        ul = float(np.linalg.norm(vu[0:3]))
+        if pl > ul and pl > 1e-9:
+            vp[0:3] *= (ul / pl)
+        pa = float(np.linalg.norm(vp[3:6]))
+        ua = float(np.linalg.norm(vu[3:6]))
+        if pa > ua and pa > 1e-9:
+            vp[3:6] *= (ua / pa)
+        return vp
 
-            alpha = ALPHA_MAX * b**ALPHA_GAMMA * s
+    def compute_alpha(self, b_max, pos_divergence=None):
+        """Autonomy authority weight from belief confidence and EE<->reference distance.
 
-        where
-            b = belief confidence: the maximum belief probability normalised
-                against the uniform baseline 1/N_active into [0, 1]:
-                    b = clip((b_max - 1/N) / (1 - 1/N), 0, 1)
-                b = 0 at uniform belief (no assistance), b = 1 at certainty.
-                ALPHA_GAMMA < 1 bows the curve up so a "confident enough" belief
-                already hands most of the authority (unchanged from before).
-            s = alignment in [0, 1] between the user's linear twist and the
-                assistive policy's linear twist toward the most probable goal:
-                    s = clip( cos(v_user_lin, v_policy_lin), 0, 1 )
-                s = 1 when the user pushes WITH the policy (full assistance so
-                the task can conclude); s = 0 when the user pushes AGAINST or
-                across it (>= 90 deg) -> authority handed back to the user so
-                they can redirect or help the arm escape near an obstacle.
-                When the user is passive (||v_user_lin|| ~ 0) there is nothing to
-                disagree with, so s = 1 (full assistance -- the "satisfied /
-                near-goal" case).
+            alpha = ALPHA_MAX * b**ALPHA_GAMMA * dist_gate(d)
 
-        The result is low-pass filtered (ALPHA_LPF_COEFF) so alpha never jumps
-        discontinuously between ticks. cfg.TASK_WEIGHTS_6D (the CLF's own
-        position:orientation cost ratio) is intentionally NOT touched here.
+        b = belief confidence: the maximum belief probability normalised against
+            the uniform baseline 1/N_active into [0, 1]:
+                b = clip((b_max - 1/N) / (1 - 1/N), 0, 1)
+            b = 0 at uniform belief (no assistance), b = 1 at certainty;
+            ALPHA_GAMMA < 1 bows the curve up so a "confident enough" belief
+            already hands most of the authority.
+        dist_gate(d) in [0, 1], d = ||user_reference - EE|| (pos_divergence):
+            = 1 when the EE has matched the user's reference (d <= SYNC_D_MIN,
+              3cm) -> blending is allowed; smoothly -> 0 as d grows to SYNC_D_MAX
+              (30cm) -> alpha = 0. So far from the reference the robot PURELY
+              follows the user's own twist toward their reference and the
+              autonomy never leads a still/uncertain user around; only once
+              F_sync has pulled EE and reference together does the policy earn
+              authority.
+
+        LPF'd (ALPHA_LPF_COEFF) so alpha never jumps discontinuously between
+        ticks. cfg.TASK_WEIGHTS_6D (the CLF's own position:orientation cost
+        ratio) is intentionally NOT touched here.
         """
         # --- Belief confidence, normalised against the uniform baseline ---
         active_goals = [k for k in self.target_keys
@@ -2123,19 +2145,14 @@ class SharedControlNode(Node):
                 (b_max - uniform_max) / max(1.0 - uniform_max, 1e-9), 0.0, 1.0))
         belief_norm = belief_norm ** cfg.ALPHA_GAMMA
 
-        # --- Alignment between the user's intent and the assistive policy ---
-        align = 1.0
-        if v_user is not None and v_policy is not None:
-            vu = np.asarray(v_user)[0:3]
-            vp = np.asarray(v_policy)[0:3]
-            nu = float(np.linalg.norm(vu))
-            npo = float(np.linalg.norm(vp))
-            if nu >= 1e-3 and npo >= 1e-6:
-                cos_sim = float(np.dot(vu, vp) / (nu * npo))
-                align = float(np.clip(cos_sim, 0.0, 1.0))
-            # else: user passive (or no policy) -> align stays 1.0 (full assist).
+        # --- Distance gate: 1 when matched (d <= SYNC_D_MIN), 0 when far (>= SYNC_D_MAX) ---
+        dist_gate = 1.0
+        if pos_divergence is not None:
+            dist_gate = self._smoothstep(
+                cfg.SYNC_D_MAX - float(pos_divergence),
+                0.0, cfg.SYNC_D_MAX - cfg.SYNC_D_MIN)
 
-        alpha_raw = float(cfg.ALPHA_MAX * belief_norm * align)
+        alpha_raw = float(cfg.ALPHA_MAX * belief_norm * dist_gate)
         self.alpha_lpf = ((cfg.ALPHA_LPF_COEFF * alpha_raw)
                          + (1.0 - cfg.ALPHA_LPF_COEFF) * self.alpha_lpf)
         return self.alpha_lpf

@@ -43,11 +43,26 @@ ORIENTATION_CTRL = True         # True = control Pos+Ori (6DOF), False = Pos onl
 # /arm_*/cartesian_reference even in normal teleop.
 BLENDING = True
 
-# alpha(belief) shaping -- see main_shared_autonomy.compute_alpha. x = normalised
-# belief in [0,1]. alpha = ALPHA_MAX * x**ALPHA_GAMMA.
-ALPHA_MAX = 0.60          # Hard cap on autonomy authority away from the goal (user retains >= 40%)
+# alpha(belief) shaping -- see main_shared_autonomy.compute_alpha.
+#   alpha = ALPHA_MAX * belief_norm**ALPHA_GAMMA * dist_gate(||user_ref - EE||)
+# belief_norm is the belief confidence normalised into [0,1]; dist_gate goes
+# 1 (EE matched to the user reference, d <= SYNC_D_MIN) -> 0 (d >= SYNC_D_MAX),
+# so blending only switches on once F_sync has pulled EE and reference together.
+ALPHA_MAX = 0.80          # Hard cap on autonomy authority (user retains >= 20%)
 ALPHA_GAMMA = 0.5         # <1 = alpha ramps toward ALPHA_MAX quickly once belief is high
 ALPHA_LPF_COEFF = 0.08    # Low-pass filter coefficient on alpha
+
+# --- F_sync distance-decaying stiffness + alpha distance gate (2026-07-06) ---
+# d = ||EE - user_reference|| (position divergence). F_sync's linear magnitude
+# follows a 1/d-shaped law: MAXIMUM near the reference (lock/settle zone) and
+# MINIMUM far away, so the user can move the handle FREELY when far without the
+# tether fighting them / injecting a fake twist into the loop. The SAME two
+# distances gate alpha smoothly to 0 when far. Read by both
+# main_shared_autonomy.py and haptic_force_manager_blending_tutorial.py.
+SYNC_D_MIN = 0.03         # m -- at/below this: F_sync = SYNC_F_MAX and dist_gate = 1
+SYNC_D_MAX = 0.30         # m -- at/beyond this: F_sync = SYNC_F_MIN and dist_gate = 0
+SYNC_F_MAX = 8.0          # N -- linear sync force magnitude at SYNC_D_MIN (close)
+SYNC_F_MIN = 1.0          # N -- linear sync force magnitude at SYNC_D_MAX (far)
 
 # Distance-based assistance-intensity boost: compensates pi_policy's natural falloff
 # near the goal so the approach can actually conclude, capped so full autonomy is
