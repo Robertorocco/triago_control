@@ -311,7 +311,55 @@ PERCEPTION_RATE_HZ = 5.0     # perception pipeline rate (objects move slowly)
 CONSOLE_SUMMARY_PERIOD_S = 5.0   # low-frequency console report (no spam!)
 
 # =============================================================================
-# 13. GROUND TRUTH (SIMULATION-ONLY — DIAGNOSTIC USE ONLY)
+# 13. TABLETOP PERCEPTION NODE (generic OBB + memory-tracked pipeline)
+# =============================================================================
+# Ported from the sibling `triago_perception` ROS 2 package (repository
+# chiarapanagrosso/Triago_Project, src/tabletop_perception_node.cpp) as
+# scripts/head_controller/tabletop_perception_node.py. Deliberately INDEPENDENT
+# from ObjectDetector/ObjectTracker/TableSegmenter above:
+#   * no colour classification, no upright-cylinder assumption — fits a
+#     Z-aligned oriented bounding box (2D PCA) to ANY above-plane cluster.
+#   * table-plane RANSAC here is UNBIASED (no verticality filter, no known-
+#     table-height gate) — matching the original node, which has no such
+#     scene-specific prior. TableSegmenter's gating is specific to the known
+#     tutorial-table scenario and must not be reused here.
+#   * temporal fusion is GROW-ONLY (dimensions can only increase) + hard
+#     persistence deletion, NOT the EMA policy in object_tracker.py — this is
+#     an intentional 1:1 port of the original node's own memory-tracking
+#     design, not an endorsement of grow-only over EMA (see object_tracker.py's
+#     module docstring for why EMA was chosen for the cylinder pipeline).
+# The upstream node subscribes to `/filtered_cloud`, a topic produced OUTSIDE
+# triago_control (a throttled RealSense cloud in the full stack) — there is no
+# such publisher in this repo. The topic name is kept for interface parity and
+# is overridable via the `cloud_topic` ROS parameter.
+TP_CLOUD_TOPIC = "/filtered_cloud"
+TP_TARGET_FRAME = BASE_FRAME
+
+# RANSAC table-plane segmentation (unbiased — see note above).
+TP_PLANE_RANSAC_ITERS = 100
+TP_PLANE_DIST_THRESH = 0.02   # [m]
+
+# Euclidean cluster extraction (above-plane points -> candidate objects).
+TP_CLUSTER_TOLERANCE = 0.03   # [m]
+TP_CLUSTER_MIN_POINTS = 50
+TP_CLUSTER_MAX_POINTS = 25000
+
+# Memory tracking (grow-only dimensions + hysteresis persistence).
+TP_MAX_UNSEEN_FRAMES = 10     # frames an unmatched track survives
+TP_MATCH_DIST_THRESH = 0.15   # [m] centroid distance to associate a cluster
+
+# Marker cosmetics.
+TP_TABLE_BBOX_PADDING = 0.005     # [m]
+TP_OBSTACLE_PADDING = 0.005       # [m]
+TP_TARGET_PADDING = 0.005         # [m]
+TP_MIN_MARKER_SCALE = 0.01        # [m] floor so zero-thickness boxes stay visible
+
+# TF lookup tolerance at the cloud's own timestamp (no "latest" fallback, to
+# match the original node's exact-time-only lookup).
+TP_TF_TIMEOUT_S = 0.05
+
+# =============================================================================
+# 14. GROUND TRUTH (SIMULATION-ONLY — DIAGNOSTIC USE ONLY)
 # =============================================================================
 # Hard-coded from the Gazebo "tutorial" world SDF. The perception algorithm
 # itself NEVER reads this section — it exists purely so diagnostic/plotting
