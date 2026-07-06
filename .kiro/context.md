@@ -1,7 +1,15 @@
 # AI Agent Context — triago_control
 
 > **This file is maintained by the AI agent. Do not edit manually.**
-> Last updated: 2026-07-04 (§9.12 follow-up: added the `platform` field to
+> Last updated: 2026-07-06 (§5.11 NEW: `head_control/config.py` gained a
+> second static head POV, "FRONT" — lower camera height + a near-horizontal
+> optical axis (elevation ~16-18 deg vs. the original "TOP" posture's ~56
+> deg), selectable via a new `HEAD_POV_MODE` switch. Purely an experimental
+> A/B vantage point requested by the operator to test whether viewing the
+> table more from the front/side improves cylinder pose estimation vs. the
+> steep top-down view — no perception algorithm changes. Pushed to
+> `feature/head-front-pov`, not yet merged to `main`. See §5.11.)
+> Earlier: 2026-07-04 (§9.12 follow-up: added the `platform` field to
 > the world scene schema -- the yellow `placement_area` disk used by
 > shared-autonomy's Platform_Place goal. NOT an obstacle (no collision, not
 > in `static_obstacles`) -- a separate top-level `WorldScene.platform`
@@ -697,6 +705,84 @@ estimator is actually trustworthy.
 - **Collision CBF not wired**: the hppfcl collision model is built but distance constraints are not yet formulated as QP inequalities.
 - **No shared config file**: gains are hard-coded in-script (unlike the arm QP which uses `config.py`). Will be refactored as the module matures.
 - **Loop rate**: currently event-driven (`spin_once` + `solve_and_publish` per iteration). Future: dedicated timer at a fixed frequency.
+
+### 5.11 Second static head POV, "FRONT" (2026-07-06) — `head_control/config.py`
+
+Operator request: try lowering the head/camera and making its optical axis
+more horizontal, to test whether viewing the table from the front (seeing
+the cylinders' SIDE profile) instead of top-down improves cylinder pose/
+radius/height estimation vs. the existing steep top-down posture. Purely an
+experimental A/B vantage point for `main_head.py` — **no perception
+algorithm change** (rim extraction, plane RANSAC, circle fit, etc. in
+`object_detector.py`/`perception_pipeline.py` are all viewpoint-agnostic and
+untouched by this pass).
+
+**What changed**: the single `HEAD_POSTURE_TARGET` constant consumed by
+`look_at_controller.py`'s null-space posture spring (§5.3) is now DERIVED
+from a new switch instead of being a single hard-coded array:
+```python
+HEAD_POSTURE_TARGET_TOP   = np.array([-0.35, -0.25, -0.60, -1.15, -1.00, -1.25, 0.00])  # original
+HEAD_POSTURE_TARGET_FRONT = np.array([-0.1029, -2.1435, -1.3118, -2.1435, -0.3859, 0.0395, -2.3180])  # NEW
+HEAD_POV_MODE = "front"   # "top" | "front"  -- single switch, restart main_head.py to apply
+HEAD_POSTURE_TARGET = HEAD_POSTURE_TARGET_FRONT if HEAD_POV_MODE == "front" else HEAD_POSTURE_TARGET_TOP
+```
+`look_at_controller.py` itself is UNCHANGED — it only ever reads
+`cfg.HEAD_POSTURE_TARGET`, so the mode switch is entirely contained to
+`config.py`. `main_head.py`'s startup banner now logs the active
+`HEAD_POV_MODE` and its posture array for operator visibility.
+
+**FRONT posture, vs. the existing TOP posture** (both numbers below are the
+camera's STEADY-STATE pose once the look-at QP converges while fixating the
+table centre, not the raw joint target):
+
+| | TOP (original) | FRONT (new) |
+|---|---|---|
+| camera height (z, base_footprint) | ~1.22 m | ~0.88 m |
+| look-down elevation angle | ~56 deg (steep top-down) | ~16-18 deg (near-horizontal) |
+| distance to table centre | ~0.63 m | ~0.68 m (comparable — depth-noise variance not worsened) |
+| look-at residual error at steady state | ~0 deg | ~0 deg |
+
+This directly implements both parts of the request: the camera is LOWER in
+the world frame, and its optical axis is MORE HORIZONTAL (viewing the table
+from the front/side rather than from above).
+
+**Derivation & verification method** (no real robot/Gazebo access in this
+session, same constraint as §5.10): the 7 head joint angles were found via
+`scipy.optimize.minimize` against the REAL URDF (`triago_extracted.urdf`)
+loaded through Pinocchio, minimizing look-at error + a target elevation
+angle + a joint-limit-margin penalty + a table/cylinder pixel-FOV penalty
+(reusing the exact `qp_head_visual_servo`-style pinhole model, `fx=fy=640,
+cx=640, cy=360, 1280x720`) + a near-clip/`DEPTH_MIN` depth penalty. The
+resulting posture was then NOT just kinematically snapshotted — it was fed
+as the null-space target into the **actual, unmodified**
+`LookAtController.compute()` QP (same class `main_head.py` imports) and
+simulated closed-loop for 15-20s at the real 50Hz control rate, from
+several different starting joint configs, INCLUDING starting from the TOP
+posture's own steady state (i.e. simulating the live transition an operator
+sees when flipping `HEAD_POV_MODE` and restarting). Confirmed: the QP
+converges to ~0.001 deg look-at residual, ≥~17 deg (~0.28 rad) of margin
+from every one of the 7 joints' limits (well clear of `JOINT_LIMIT_BUFFER=
+0.15 rad`, so the joint-limit CBF stays inactive), and — checked against the
+`GT_RED_CENTER`/`GT_BLUE_CENTER` §13 ground-truth constants purely as a
+NUMERICAL VERIFICATION target (never as a control input, per the project's
+standing perception-honesty rule) — both cylinders' full top/bottom rim
+stays inside the camera's pixel FOV and above `DEPTH_MIN=0.35m` (closest
+checked point, the table's near edge, sits at ≈0.40m). Also re-checked
+across the existing `SCAN_WAYPOINTS` sweep (§5.5) from the FRONT steady
+state — margins stay ≥~16 deg at every waypoint, so the pre-existing scan
+motion is compatible with the new posture without any retuning.
+
+**Not changed**: `SCAN_WAYPOINTS`/`SCAN_DWELL_S` (§5.5), `DEPTH_MIN`/
+`DEPTH_MAX` (§6, comment updated to reference both postures' distance
+instead of only TOP's), the perception pipeline, and `POSTURE_GAIN`. To
+switch back to the original top-down view, set `HEAD_POV_MODE = "top"` in
+`config.py` and restart `main_head.py`.
+
+**Pushed to `feature/head-front-pov`** — not yet merged to `main`, pending
+the operator's hands-on comparison of cylinder-pose accuracy between the
+two POVs (that comparison itself was NOT run in this session — no
+robot/Gazebo access — this pass only adds and numerically verifies the new
+POV option).
 
 ---
 
@@ -2513,6 +2599,7 @@ deadband), not yet validated hands-on.
 | Haption teleoperation (Virtual Fixture mode) | ✅ Working | `teleop_triago_clutch.py` + `haptic_force_manager_tutorial.py`. Force layers: F_guide (velocity-field, v_max_user 0.04/0.10) + F_fixture (position spring near goal). Handle drag during autonomous phases (KP+KD velocity-following). Active when `cfg.BLENDING=False` (default). |
 | Shared-autonomy TWIST BLENDING mode | 🔧 New (2026-07-03), untested on real hardware | `cfg.BLENDING=True` (§11.5): `main_shared_autonomy.py` becomes the sole persistent publisher of `/arm_*/cartesian_reference`, integrating `v_blend=(1-alpha)*v_user+alpha*pi_policy` every tick; `teleop_triago_clutch.py` redirects to `/arm_*/user_cartesian_reference`; `haptic_force_manager_blending_tutorial.py` renders ONLY F_sync (tethered to the pure user pose) + a new "Authority Share" plot sourced from `/shared_autonomy/blend_debug`. Usability pass (§11.6): `ALPHA_MAX` 0.80→0.60 (user floor 20%→40%), smooth distance-based proximity boost so the task can be concluded near the goal (capped `ALPHA_PROXIMITY_CAP=0.90`), new `/blended_reference_marker` RViz gripper (light-blue, literal QP-bound pose) shown alongside the existing pure-user-intent `/guidance_policy_marker` for A/B comparison. User-effort gating (§11.7, first trial values): `compute_alpha` scales alpha down by how briskly the user is moving the handle (`ALPHA_EFFORT_THRESHOLD=0.4 m/s`, `ALPHA_EFFORT_OVERRIDE=0.5`), fixing the "arm blind to user twist" report — no QP Lagrangian/shadow-price feedback involved. Position-divergence override + bounded reference catch-up (§11.8, untested first trial): a SUSTAINED alpha override (`ALPHA_DIVERGENCE_OVERRIDE=0.6`) plus a new capped P-pull (`compute_reference_catchup`, `V_CATCHUP_MAX_LIN=0.06 m/s`) toward the user's held reference pose, fixing "robot doesn't follow through once the hand stops moving / user fights F_sync". |
 | Head control (visual servoing) | 🔧 Active dev | `qp_head_visual_servo.py`: QP-based hand-tracking, independent loop. Starting point — no image processing yet. |
+| Head static POV (`main_head.py`) | 🔧 New (2026-07-06), untested on real hardware/Gazebo | `cfg.HEAD_POV_MODE` (§5.11): "top" (original, ~56 deg steep look-down, ~1.22m cam height) vs. "front" (NEW, ~16-18 deg near-horizontal, ~0.88m cam height, comparable ~0.68m table distance). Numerically verified via the real `LookAtController` QP in closed-loop sim (converges, joint-limit margins OK, cylinders stay in FOV) — NOT yet hands-on compared for actual cylinder-pose accuracy. Pushed to `feature/head-front-pov`. |
 | Head cylinder perception (`main_head.py`) | ✅ Improved (2026-07-02, §5.10) | Rim-extraction + Hyper circle fit (removed a ~-4 to -5mm disk-interior bias in the radius fit), top-slice-median height (removed a `z_max` high-bias), 3mm voxel leaf (was 10mm — too coarse vs. a 2cm cylinder radius), closer/verified-reachable `HEAD_POSTURE_TARGET`, distortion-correctness gap closed in `camera_interface.py`, tracker fusion switched grow-only→EMA. Verified numerically (not on real hardware) to land single-view/scanned radius+height error at roughly -1 to -4mm, comfortably under the 1cm target. `feature/head-sweep-compute-track` reviewed, not merged (incompatible kwargs, re-enables the already-disabled point-level VoxelMap) — see §5.10 for salvageable ideas. |
 | Arm-vs-head collision avoidance | ✅ Working | Head chain modeled as a quasi-static CBF obstacle in the ARM QP (§9.7): live FK-driven capsules (yellow in Meshcat), zero head joints added to the decision vector. `arm_right_1`/`arm_left_1` excluded from head pairs per instruction. Head's OWN separate controller/collision model (`qp_head_visual_servo.py`) is unchanged. |
 | Mobile base integration | 🔧 Partial | `base_controller.py` exists but not QP-certified |
