@@ -355,6 +355,14 @@ class SharedControlNode(Node):
         # --- State Variables ---
         self.current_v_h = np.zeros(6)
         self.current_T_EE = np.eye(4)
+        # Persistent latched reference for the BLENDING blend-hold path
+        # (2026-07-06): the blended twist is integrated into this stored pose so
+        # an idle user yields an ABSOLUTE hold instead of a reference that chases
+        # the live EE (which never resists low-level sag -> the reported creep
+        # toward the ground). Re-anchored to the real EE on startup and whenever
+        # the blend path is not active (grasp execution / test mode). See sec. 6.
+        self.T_blend_ref = np.eye(4)
+        self._blend_ref_valid = False
         self.J_c = None
         self.h_c = None
 
@@ -1220,7 +1228,8 @@ class SharedControlNode(Node):
         if tick_output.release_object:
             self._release_object()
 
-        if cfg.BLENDING and tick_output.new_state == "SHARED_AUTONOMY":
+        blend_active = cfg.BLENDING and tick_output.new_state == "SHARED_AUTONOMY"
+        if blend_active:
             # Authority (2026-07-06): alpha = f(belief) * dist_gate. The distance
             # gate (d = ||user reference - EE||) forces alpha -> 0 when the EE is
             # far from the user's reference, so the robot first PURELY follows the
@@ -1409,82 +1418,79 @@ class SharedControlNode(Node):
         #   exactly like the grasp-execution / test-mode reference always was.
         publish_cmd = self.POLICY_BELIEF_TEST or grasp_exec or cfg.BLENDING
         if publish_cmd and not np.allclose(self.current_T_EE, np.eye(4)):
-            # Virtual Haptic Cursor: integrate the optimal policy twist a short
-            # distance into the future so the QP's CLF always has a moving,
-            # reachable carrot to track (sending current pose stalls tracking;
-            # sending the final goal causes a jerk).
-            # NOTE: 0.02s is conservative for GRASP EXECUTION / BLENDING TELEOP
-            # (unchanged, tuned/tested against those modes). Larger values (e.g.
-            # 0.1) cause the reference to fling far when the twist reverses (CBF
-            # repulsion), which made the green gripper fly away from the goal.
-            # 0.02s = 2mm lead at 0.1 m/s -- just enough for the CLF to track
-            # smoothly in THOSE modes.
+            # --- Reference integration -------------------------------------
+            # use_persistent: real BLENDING teleop in SHARED_AUTONOMY. The blended
+            # twist is integrated into a PERSISTENT latched pose (self.T_blend_ref)
+            # instead of re-deriving the reference from the LIVE current_T_EE each
+            # tick.
             #
-            # POLICY_BELIEF_TEST is DIFFERENT: T_virtual_ref re-anchors from
-            # self.current_T_EE (the live, still-settling EE pose) every 100Hz
-            # tick. At 0.02s the lead distance (~2mm at typical policy speed) is
-            # small enough that ordinary EE tracking lag/settling wobble (a few
-            # mm, normal for any closed-loop tracker) becomes a LARGE relative
-            # fraction of the carrot's own motion each tick -- producing a
-            # genuinely jittery reference (observed: high-frequency oscillation
-            # in position error + slack, reported independent of
-            # ENABLE_REFERENCE_GOVERNOR). A larger lead distance in test mode
-            # dilutes that same absolute wobble to a smaller fraction of the
-            # carrot's motion, fixing it at the root instead of only patching
-            # a downstream amplifier. Kept mode-gated (grasp_exec/BLENDING keep
-            # the original tuned value) since this is a test-mode-specific fix,
-            # not a general retune.
-            dt_virtual = 0.10 if self.POLICY_BELIEF_TEST else 0.02
-
-            # Minimum lead-distance floor. Applied in POLICY_BELIEF_TEST AND
-            # cfg.BLENDING (approved 2026-07-06). The legacy BLENDING=False
-            # grasp-execution path is deliberately LEFT UNTOUCHED (base
-            # dt_virtual=0.02, no floor).
+            # WHY this is the real fix (not a patch): the old "integrate a small
+            # lead off current_T_EE" reference is a FOLLOWER, not an ANCHOR. When
+            # the user is idle (target_twist=0) it collapses to exactly the live
+            # EE pose -- it tells the QP "your target is wherever you already
+            # are", which is satisfied no matter where the arm drifts, so it
+            # exerts ZERO restoring authority. The soft CLF's residual slack + the
+            # posture potential field then leak a sub-mm EE velocity toward the
+            # lowest-cost joint config each tick, and because the reference
+            # re-anchors on the drifted EE next tick, that drift is never opposed
+            # -- it integrates monotonically (the reported creep "toward the
+            # ground", with a single publisher and v_blend=0). A LATCHED pose
+            # fixes the position AND orientation hold in one stroke (it latches
+            # the full SE(3) pose): when idle the latch stays put, so EE drift now
+            # GROWS a real task error the CLF actively corrects. It also removes
+            # the mm-scale oscillation for free -- the reference no longer
+            # re-anchors to the jittering, still-settling live EE.
             #
-            # WHY: raising dt_virtual alone only helps FAR from the goal. Near
-            # the goal, target_twist's magnitude itself shrinks toward zero
-            # (tanh-saturated proportional convergence law: v_mag = v_max *
-            # tanh(K_p*dist/v_max) ~= K_p*dist for small dist -- see
-            # compute_v_geo), so the carrot's lead distance (dt_virtual *
-            # ||twist||) collapses toward zero THERE regardless of how large
-            # dt_virtual is -- a fixed dt_virtual cannot fix a problem whose
-            # severity scales with 1/||twist||. This reproduced the reported
-            # "still see high oscillation in one phase" even after the
-            # dt_virtual=0.10 bump: that phase is exactly the near-goal
-            # approach, matching the reported oscillation being specifically
-            # in POSITION error and slack.
-            #
-            # FIX: floor the ABSOLUTE LINEAR lead distance directly -- if
-            # dt_virtual * lin_speed would be smaller than _MIN_LEAD_LIN,
-            # stretch the EFFECTIVE dt (not target_twist itself -- direction
-            # and convergence behavior are unaffected) just enough to restore
-            # that minimum lead, capped by _TEST_DT_VIRTUAL_MAX so a near-zero
-            # twist (right at the goal) cannot blow this up into an unbounded
-            # lead. Deliberately LINEAR-ONLY (not also angular): a single
-            # shared dt scales integrate_twist's linear AND angular parts
-            # together, so a second, independent angular floor could demand a
-            # different dt than the linear one whenever both speeds shrink
-            # together near full convergence -- with the cap then unable to
-            # satisfy both simultaneously. Since the reported symptom is
-            # specifically position/slack oscillation, driving dt purely from
-            # linear speed avoids that conflict entirely while directly
-            # targeting the reported problem.
-            if self.POLICY_BELIEF_TEST or cfg.BLENDING:
-                _MIN_LEAD_LIN = 0.005       # [m] minimum linear carrot lead distance
-                # Cap prevents unbounded lead as twist -> 0. Test mode keeps its
-                # original generous cap; BLENDING uses a tighter 0.12 s so the
-                # carrot never runs far ahead during real teleop.
-                _DT_VIRTUAL_MAX = 0.5 if self.POLICY_BELIEF_TEST else 0.12
-
-                lin_speed = float(np.linalg.norm(target_twist[:3]))
-                if lin_speed > 1e-6:
-                    dt_needed_lin = _MIN_LEAD_LIN / lin_speed
-                    dt_virtual = float(np.clip(dt_needed_lin, dt_virtual, _DT_VIRTUAL_MAX))
-                # else: twist is ~zero (already at the goal) -- keep the base
-                # dt_virtual=0.10; there is no meaningful direction to lead
-                # along, and no real motion left to oscillate over.
-
-            T_virtual_ref = self.integrate_twist(self.current_T_EE, target_twist, dt_virtual)
+            # Grasp execution / test mode keep the original virtual-cursor (a
+            # short lead off the live EE): there, re-anchoring at the EE each tick
+            # is exactly what's wanted. The latch is re-anchored to the EE on the
+            # first blend tick and after any non-blend phase, so blending always
+            # resumes with no jump.
+            use_persistent = bool(blend_active) and not self.POLICY_BELIEF_TEST
+            if use_persistent:
+                if not self._blend_ref_valid:
+                    self.T_blend_ref = self.current_T_EE.copy()
+                    self._blend_ref_valid = True
+                # Advance the latch by the ACTUAL commanded twist over one tick
+                # (true dt, not a lead): target_twist=0 -> latch holds fixed ->
+                # absolute SE(3) hold.
+                self.T_blend_ref = self.integrate_twist(
+                    self.T_blend_ref, target_twist, 1.0 / self.CONTROL_HZ)
+                # Bound how far the latch may lead the real EE during sustained
+                # motion (the downstream reference governor also clamps this).
+                # Keeps any "keeps gliding after you stop" strictly small: on
+                # release the EE catches up by at most _MAX_BLEND_LEAD.
+                _MAX_BLEND_LEAD = 0.10   # m
+                lead_vec = self.T_blend_ref[:3, 3] - self.current_T_EE[:3, 3]
+                lead_norm = float(np.linalg.norm(lead_vec))
+                if lead_norm > _MAX_BLEND_LEAD:
+                    self.T_blend_ref[:3, 3] = (self.current_T_EE[:3, 3]
+                                               + lead_vec * (_MAX_BLEND_LEAD / lead_norm))
+                T_virtual_ref = self.T_blend_ref
+            else:
+                # Virtual Haptic Cursor (grasp execution / POLICY_BELIEF_TEST):
+                # integrate a short lead off the LIVE EE so the CLF always has a
+                # moving, reachable carrot (sending the current pose stalls
+                # tracking; sending the final goal jerks). Invalidate the latch so
+                # it re-anchors cleanly when blending resumes.
+                self._blend_ref_valid = False
+                dt_virtual = 0.10 if self.POLICY_BELIEF_TEST else 0.02
+                # Minimum lead-distance floor (POLICY_BELIEF_TEST only): near the
+                # goal target_twist -> 0, so the carrot lead (dt_virtual*||twist||)
+                # collapses onto the jittering live EE and the reference chatters.
+                # Floor the ABSOLUTE linear lead by stretching the effective dt
+                # (direction/convergence unchanged), capped so a ~zero twist can't
+                # blow the lead up. Linear-only: one shared dt scales linear+
+                # angular together, so an independent angular floor could demand a
+                # conflicting dt near full convergence.
+                if self.POLICY_BELIEF_TEST:
+                    _MIN_LEAD_LIN = 0.005       # [m] minimum linear carrot lead
+                    _DT_VIRTUAL_MAX = 0.5       # [s] cap as twist -> 0
+                    lin_speed = float(np.linalg.norm(target_twist[:3]))
+                    if lin_speed > 1e-6:
+                        dt_needed_lin = _MIN_LEAD_LIN / lin_speed
+                        dt_virtual = float(np.clip(dt_needed_lin, dt_virtual, _DT_VIRTUAL_MAX))
+                T_virtual_ref = self.integrate_twist(self.current_T_EE, target_twist, dt_virtual)
 
             p_ref = T_virtual_ref[:3, 3]
             rpy_ref = R.from_matrix(T_virtual_ref[:3, :3]).as_euler('xyz')
