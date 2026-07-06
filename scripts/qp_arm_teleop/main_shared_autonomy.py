@@ -1221,51 +1221,20 @@ class SharedControlNode(Node):
             self._release_object()
 
         if cfg.BLENDING and tick_output.new_state == "SHARED_AUTONOMY":
-            # pos_divergence: sustained gap between the user's PERSISTENT
-            # reference pose and the real EE -- unlike current_v_h, this does
-            # NOT decay when the user stops moving, so it captures "holding the
-            # hand displaced" (the local-minimum-escape case), not just "moving
-            # fast right now". ang_divergence (2026-07-03, orientation symmetry
-            # fix) is the SAME idea for orientation: the geodesic rotation gap
-            # between the user's held reference orientation and the real EE's --
-            # without this, a user holding their reference ROTATED away got no
-            # override at all (see compute_alpha's docstring).
-            pos_divergence = float(np.linalg.norm(
-                self.current_T_user[:3, 3] - self.current_T_EE[:3, 3]))
-            R_gap = self.current_T_user[:3, :3] @ self.current_T_EE[:3, :3].T
-            trace_gap = np.trace(R_gap)
-            if trace_gap <= -1.0 + 1e-4:
-                ang_divergence = np.pi
-            else:
-                ang_divergence = float(np.linalg.norm(pin.log3(R_gap)))
-
-            # pos_error (EE -> active goal, computed above from current_T_EE)
-            # drives the smooth proximity boost so the assistive twist can
-            # actually finish the approach near the goal. current_v_h (the raw
-            # human twist) drives the user-effort gate so active hand motion
-            # (linear OR angular) takes precedence over the policy.
-            # pos_divergence/ang_divergence drive the SUSTAINED override so
-            # holding the hand/wrist displaced also hands back authority, even
-            # once it stops moving (see compute_alpha).
-            alpha = self.compute_alpha(b_max, pos_error=pos_error, v_user=self.current_v_h,
-                                       pos_divergence=pos_divergence,
-                                       ang_divergence=ang_divergence)
+            # Simplified authority (2026-07-06): alpha depends ONLY on belief
+            # confidence and the alignment between the user's twist and the
+            # assistive policy's twist toward the most probable goal. No
+            # proximity boost / effort gate / divergence override / catch-up --
+            # alignment alone now handles "let the user redirect or escape"
+            # (misaligned push -> low alpha) and "conclude the task"
+            # (aligned or passive user -> full alpha). See compute_alpha.
+            alpha = self.compute_alpha(b_max, v_user=self.current_v_h,
+                                       v_policy=tick_output.target_twist)
             self.last_alpha = alpha
             # v_blend = (1-alpha)*v_user + alpha*pi_policy -- blended at the
             # TWIST level (not a one-shot pose offset), so it accumulates into
             # genuine, persistent motion when integrated below (section 6).
             target_twist = (1 - alpha) * self.current_v_h + alpha * tick_output.target_twist
-
-            # Bounded reference catch-up: ADD a gentle, capped pull toward the
-            # user's held reference pose on top of the blend above. This is
-            # what actually lets the robot follow through to where the hand is
-            # RESTING (not just moving), which is what the user needs to break
-            # the arm out of a local minimum via reference position -- while
-            # staying fully inside the downstream QP CLF-CBF's safety envelope
-            # (it only ever adds a bounded velocity into the SAME reference the
-            # QP tracks; it cannot force the arm through an obstacle).
-            target_twist = target_twist + self.compute_reference_catchup(
-                self.current_T_user, self.current_T_EE)
         else:
             alpha = 0.0
             self.last_alpha = 0.0
@@ -1456,10 +1425,10 @@ class SharedControlNode(Node):
             # not a general retune.
             dt_virtual = 0.10 if self.POLICY_BELIEF_TEST else 0.02
 
-            # TEST-MODE-ONLY minimum lead-distance floor (kept OUT of the
-            # grasp_exec/BLENDING path entirely -- that path is untouched,
-            # still exactly `dt_virtual=0.02` * target_twist, byte-identical
-            # to before this whole fix).
+            # Minimum lead-distance floor. Applied in POLICY_BELIEF_TEST AND
+            # cfg.BLENDING (approved 2026-07-06). The legacy BLENDING=False
+            # grasp-execution path is deliberately LEFT UNTOUCHED (base
+            # dt_virtual=0.02, no floor).
             #
             # WHY: raising dt_virtual alone only helps FAR from the goal. Near
             # the goal, target_twist's magnitude itself shrinks toward zero
@@ -1489,14 +1458,17 @@ class SharedControlNode(Node):
             # specifically position/slack oscillation, driving dt purely from
             # linear speed avoids that conflict entirely while directly
             # targeting the reported problem.
-            if self.POLICY_BELIEF_TEST:
+            if self.POLICY_BELIEF_TEST or cfg.BLENDING:
                 _MIN_LEAD_LIN = 0.005       # [m] minimum linear carrot lead distance
-                _TEST_DT_VIRTUAL_MAX = 0.5  # [s] cap, prevents unbounded lead as twist -> 0
+                # Cap prevents unbounded lead as twist -> 0. Test mode keeps its
+                # original generous cap; BLENDING uses a tighter 0.12 s so the
+                # carrot never runs far ahead during real teleop.
+                _DT_VIRTUAL_MAX = 0.5 if self.POLICY_BELIEF_TEST else 0.12
 
                 lin_speed = float(np.linalg.norm(target_twist[:3]))
                 if lin_speed > 1e-6:
                     dt_needed_lin = _MIN_LEAD_LIN / lin_speed
-                    dt_virtual = float(np.clip(dt_needed_lin, dt_virtual, _TEST_DT_VIRTUAL_MAX))
+                    dt_virtual = float(np.clip(dt_needed_lin, dt_virtual, _DT_VIRTUAL_MAX))
                 # else: twist is ~zero (already at the goal) -- keep the base
                 # dt_virtual=0.10; there is no meaningful direction to lead
                 # along, and no real motion left to oscillate over.
@@ -2109,130 +2081,61 @@ class SharedControlNode(Node):
         t = float(np.clip((x - lo) / (hi - lo), 0.0, 1.0))
         return t * t * (3.0 - 2.0 * t)
 
-    def compute_alpha(self, b_max, pos_error=None, v_user=None, pos_divergence=None,
-                      ang_divergence=None):
-        """Maps the maximum belief probability to the autonomy arbitration weight.
+    def compute_alpha(self, b_max, v_user=None, v_policy=None):
+        """Autonomy authority weight from ONLY belief confidence and twist alignment.
 
-        alpha = cfg.ALPHA_MAX * x**cfg.ALPHA_GAMMA, where x is b_max normalised
-        against the uniform-belief baseline (1/N_goals) into [0, 1]:
-          - b_max <= 1/N_goals (uniform / no information)  -> x = 0 -> alpha = 0
-          - b_max -> 1 (full certainty)                     -> x = 1 -> alpha = ALPHA_MAX
-        cfg.ALPHA_GAMMA < 1 bows the curve upward so alpha reaches most of
-        ALPHA_MAX well before belief is fully certain (a "sufficiently
-        confident" belief already hands strong authority to the policy,
-        instead of only the last few % of certainty mattering).
-        ALPHA_MAX < 1.0 guarantees the user retains at least (1-ALPHA_MAX)
-        authority at all times, regardless of belief.
+        Simplified formula (2026-07-06), replacing the previous stack of
+        proximity-boost / effort-gate / divergence-override terms:
 
-        --- Proximity boost (task-completion fix, 2026-07-03) ---
-        pi_policy naturally shrinks toward zero as the EE nears the goal
-        (CLF-style convergence), so the blended contribution can become too
-        weak to actually FINISH the approach even with belief at 100%. If
-        `pos_error` (EE-to-active-goal distance, meters) is provided, a smooth
-        proximity gain (smoothstep, 1.0 far away -> cfg.ALPHA_PROXIMITY_MAX_GAIN
-        at/inside cfg.ALPHA_PROXIMITY_NEAR) multiplies alpha_raw, then the
-        boosted value is capped at cfg.ALPHA_PROXIMITY_CAP (a higher ceiling
-        than ALPHA_MAX, but still < 1.0 -- the user always retains some
-        authority, even at task completion).
+            alpha = ALPHA_MAX * b**ALPHA_GAMMA * s
 
-        --- User-effort authority gating (2026-07-03, orientation-symmetric) ---
-        Fixes "the arm is blind to the user's own twist": pi_policy is a large,
-        saturated velocity while comfortable hand motion is much smaller, so a
-        fixed alpha(belief) lets the policy dominate v_blend even when the user
-        is actively trying to steer. If `v_user` (the raw human twist,
-        current_v_h) is provided, BOTH its linear AND angular norm gate alpha
-        down by how hard the user is actually pushing/twisting:
-            lin_effort = clip(||v_user[0:3]|| / cfg.ALPHA_EFFORT_THRESHOLD, 0, 1)
-            ang_effort = clip(||v_user[3:6]|| / cfg.ALPHA_EFFORT_ANG_THRESHOLD, 0, 1)
-            effort = max(lin_effort, ang_effort)
-            alpha *= (1 - effort * cfg.ALPHA_EFFORT_OVERRIDE)
-        Still (effort=0) -> alpha unaffected (full belief-driven assistance --
-        helpful near obstacles / when intent changes, exactly where the user
-        typically ISN'T pushing hard). Fast hand motion OR fast wrist rotation
-        (effort=1) -> alpha scaled down by cfg.ALPHA_EFFORT_OVERRIDE, handing
-        more of v_blend to the user's own twist. max() means EITHER channel
-        alone is sufficient -- a pure rotation with a still hand still gets full
-        authority for that rotation, matching how a pure translation already
-        does. Smooth function of the user's OWN commanded twist norm ONLY -- no
-        Lagrangian/shadow-price feedback, no force-side dynamics, so no
-        discontinuity or filtering-induced delay from the QP dual variables is
-        introduced. The effort signal itself is LPF'd (cfg.ALPHA_EFFORT_LPF_COEFF,
-        self.alpha_effort_lpf) before gating.
+        where
+            b = belief confidence: the maximum belief probability normalised
+                against the uniform baseline 1/N_active into [0, 1]:
+                    b = clip((b_max - 1/N) / (1 - 1/N), 0, 1)
+                b = 0 at uniform belief (no assistance), b = 1 at certainty.
+                ALPHA_GAMMA < 1 bows the curve up so a "confident enough" belief
+                already hands most of the authority (unchanged from before).
+            s = alignment in [0, 1] between the user's linear twist and the
+                assistive policy's linear twist toward the most probable goal:
+                    s = clip( cos(v_user_lin, v_policy_lin), 0, 1 )
+                s = 1 when the user pushes WITH the policy (full assistance so
+                the task can conclude); s = 0 when the user pushes AGAINST or
+                across it (>= 90 deg) -> authority handed back to the user so
+                they can redirect or help the arm escape near an obstacle.
+                When the user is passive (||v_user_lin|| ~ 0) there is nothing to
+                disagree with, so s = 1 (full assistance -- the "satisfied /
+                near-goal" case).
 
-        --- Position/orientation-divergence authority override (2026-07-03) ---
-        The velocity-effort gate above relaxes the instant the user decelerates
-        -- but a user HOLDING their hand displaced from the EE (not moving,
-        just stationary-but-elsewhere) is exactly the "stuck in a local minimum,
-        trying to break out via reference position" case the operator described.
-        SAME logic applies to orientation: a user holding their reference
-        ROTATED away from the gripper (at the same position) needs the same
-        sustained override, or the policy's angular twist dominates unopposed.
-        If `pos_divergence` and/or `ang_divergence` (meters / radians) are
-        provided, SUSTAINED (non-decaying-with-velocity) smoothstep gates
-        further scale alpha down:
-            pos_div_t = smoothstep(pos_divergence, ALPHA_DIVERGENCE_NEAR, ALPHA_DIVERGENCE_FAR)
-            ang_div_t = smoothstep(ang_divergence, ALPHA_DIVERGENCE_ANG_NEAR, ALPHA_DIVERGENCE_ANG_FAR)
-            div_effort = max(pos_div_t, ang_div_t)
-            alpha *= (1 - div_effort * cfg.ALPHA_DIVERGENCE_OVERRIDE)
-        LPF'd independently (cfg.ALPHA_DIVERGENCE_LPF_COEFF, self.alpha_divergence_lpf).
-        This is the DOMINANT override (cfg.ALPHA_DIVERGENCE_OVERRIDE=0.6, higher
-        than the velocity gate's 0.5) since it is meant to persist as long as the
-        user is holding their hand/wrist away, not just while it's in motion.
-
-        The final result is LOW-PASS FILTERED (cfg.ALPHA_LPF_COEFF) via
-        self.alpha_lpf so alpha never jumps discontinuously between ticks, even
-        if belief, proximity, effort, or divergence shift abruptly.
-
-        Per operator instruction, cfg.TASK_WEIGHTS_6D (the CLF's own
-        position:orientation cost ratio) is intentionally NOT touched by any of
-        this -- all of the above operates purely at the alpha/blend level.
+        The result is low-pass filtered (ALPHA_LPF_COEFF) so alpha never jumps
+        discontinuously between ticks. cfg.TASK_WEIGHTS_6D (the CLF's own
+        position:orientation cost ratio) is intentionally NOT touched here.
         """
+        # --- Belief confidence, normalised against the uniform baseline ---
         active_goals = [k for k in self.target_keys
                         if k not in self.belief_estimator.get_excluded_goals()]
         n_active = max(len(active_goals), 1)
         uniform_max = 1.0 / n_active
-
         if b_max <= uniform_max:
-            x = 0.0
+            belief_norm = 0.0
         else:
-            x = (b_max - uniform_max) / max(1.0 - uniform_max, 1e-9)
-            x = float(np.clip(x, 0.0, 1.0))
+            belief_norm = float(np.clip(
+                (b_max - uniform_max) / max(1.0 - uniform_max, 1e-9), 0.0, 1.0))
+        belief_norm = belief_norm ** cfg.ALPHA_GAMMA
 
-        alpha_raw = cfg.ALPHA_MAX * (x ** cfg.ALPHA_GAMMA)
-        alpha_raw = float(np.clip(alpha_raw, 0.0, cfg.ALPHA_MAX))
+        # --- Alignment between the user's intent and the assistive policy ---
+        align = 1.0
+        if v_user is not None and v_policy is not None:
+            vu = np.asarray(v_user)[0:3]
+            vp = np.asarray(v_policy)[0:3]
+            nu = float(np.linalg.norm(vu))
+            npo = float(np.linalg.norm(vp))
+            if nu >= 1e-3 and npo >= 1e-6:
+                cos_sim = float(np.dot(vu, vp) / (nu * npo))
+                align = float(np.clip(cos_sim, 0.0, 1.0))
+            # else: user passive (or no policy) -> align stays 1.0 (full assist).
 
-        if pos_error is not None:
-            # far (>= ALPHA_PROXIMITY_FAR) -> proximity_t=0 -> gain=1.0 (no boost)
-            # near (<= ALPHA_PROXIMITY_NEAR) -> proximity_t=1 -> gain=ALPHA_PROXIMITY_MAX_GAIN
-            proximity_t = self._smoothstep(
-                cfg.ALPHA_PROXIMITY_FAR - float(pos_error),
-                0.0, cfg.ALPHA_PROXIMITY_FAR - cfg.ALPHA_PROXIMITY_NEAR)
-            gain = 1.0 + proximity_t * (cfg.ALPHA_PROXIMITY_MAX_GAIN - 1.0)
-            alpha_raw = min(alpha_raw * gain, cfg.ALPHA_PROXIMITY_CAP)
-
-        if v_user is not None:
-            v_arr = np.asarray(v_user)
-            v_user_lin_norm = float(np.linalg.norm(v_arr[0:3]))
-            v_user_ang_norm = float(np.linalg.norm(v_arr[3:6]))
-            lin_effort = float(np.clip(v_user_lin_norm / cfg.ALPHA_EFFORT_THRESHOLD, 0.0, 1.0))
-            ang_effort = float(np.clip(v_user_ang_norm / cfg.ALPHA_EFFORT_ANG_THRESHOLD, 0.0, 1.0))
-            effort_raw = max(lin_effort, ang_effort)
-            self.alpha_effort_lpf = ((cfg.ALPHA_EFFORT_LPF_COEFF * effort_raw)
-                                     + (1.0 - cfg.ALPHA_EFFORT_LPF_COEFF) * self.alpha_effort_lpf)
-            alpha_raw *= (1.0 - self.alpha_effort_lpf * cfg.ALPHA_EFFORT_OVERRIDE)
-
-        if pos_divergence is not None or ang_divergence is not None:
-            pos_div_t = (self._smoothstep(float(pos_divergence),
-                                          cfg.ALPHA_DIVERGENCE_NEAR, cfg.ALPHA_DIVERGENCE_FAR)
-                        if pos_divergence is not None else 0.0)
-            ang_div_t = (self._smoothstep(float(ang_divergence),
-                                          cfg.ALPHA_DIVERGENCE_ANG_NEAR, cfg.ALPHA_DIVERGENCE_ANG_FAR)
-                        if ang_divergence is not None else 0.0)
-            div_raw = max(pos_div_t, ang_div_t)
-            self.alpha_divergence_lpf = ((cfg.ALPHA_DIVERGENCE_LPF_COEFF * div_raw)
-                                         + (1.0 - cfg.ALPHA_DIVERGENCE_LPF_COEFF) * self.alpha_divergence_lpf)
-            alpha_raw *= (1.0 - self.alpha_divergence_lpf * cfg.ALPHA_DIVERGENCE_OVERRIDE)
-
+        alpha_raw = float(cfg.ALPHA_MAX * belief_norm * align)
         self.alpha_lpf = ((cfg.ALPHA_LPF_COEFF * alpha_raw)
                          + (1.0 - cfg.ALPHA_LPF_COEFF) * self.alpha_lpf)
         return self.alpha_lpf
