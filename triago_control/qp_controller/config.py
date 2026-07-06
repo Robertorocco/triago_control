@@ -66,27 +66,29 @@ JOYSTICK_NEUTRAL_ORIENTATION_XYZW = [0.0, 0.7071068, 0.0, 0.7071068]
 # from home, past a deadband. Deadband: displacement below these -> zero twist
 # (and, in the arbitration, a zero user twist is treated as perfectly ALIGNED so
 # the autonomy leads the motion). 5 cm / 5 deg initial values -- to be tuned.
-JOYSTICK_DEADBAND_LIN = 0.05         # m   (5 cm)
-JOYSTICK_DEADBAND_ANG = 0.0872665    # rad (5 deg)
-JOYSTICK_K_TRANS = 0.5               # (m/s) per m of handle linear displacement
-JOYSTICK_K_ROT = 1.0                 # (rad/s) per rad of handle angular displacement
+JOYSTICK_DEADBAND_LIN = 0.02         # m   (2 cm)
+JOYSTICK_DEADBAND_ANG = 0.0349066    # rad (2 deg)
+JOYSTICK_K_TRANS = 0.8               # (m/s) per m of handle linear displacement
+JOYSTICK_K_ROT = 1.5                 # (rad/s) per rad of handle angular displacement
 JOYSTICK_V_MAX_LIN = 0.10            # m/s   hard safety clamp on the commanded linear twist
 JOYSTICK_V_MAX_ANG = 0.50            # rad/s hard safety clamp on the commanded angular twist
 
 # --- Home-orientation rebasing scale ---------------------------------------
 # The gripper's rotation away from its startup reference is scaled DOWN by this
 # factor when building the handle's home orientation (gripper 90 deg -> handle
-# 60 deg), because the Haption's rotational workspace is more restrictive than
-# the arm's. Applies ONLY to the home-pose construction, NOT to the commanded twist.
-JOYSTICK_ROT_HOME_SCALE = 1.5
+# 72 deg), so the handle's rest orientation tracks the gripper closely (feels
+# synchronized) while still staying within the Haption's more restrictive
+# rotational workspace. Applies ONLY to the home-pose construction, NOT to the
+# commanded twist. LOWER -> stronger sync (1.0 = 1:1); higher -> looser.
+JOYSTICK_ROT_HOME_SCALE = 1.25
 
 # --- Restorative centering spring (haptic_force_manager_blending_tutorial.py) --
 # The ONLY haptic force rendered in joystick mode: a virtual spring-damper pulling
 # the handle back to the (dynamic) home pose. No F_guide / F_fixture / F_sync.
-JOYSTICK_SPRING_KP_LIN = 40.0        # N/m
-JOYSTICK_SPRING_KD_LIN = 0.7         # N/(m/s)   light damping for passivity
-JOYSTICK_SPRING_KP_ANG = 1.0         # Nm/rad
-JOYSTICK_SPRING_KD_ANG = 0.1         # Nm/(rad/s)
+JOYSTICK_SPRING_KP_LIN = 60.0        # N/m        (stiffer: resists driving far from home)
+JOYSTICK_SPRING_KD_LIN = 1.0         # N/(m/s)    damping raised with the stiffer spring
+JOYSTICK_SPRING_KP_ANG = 1.5         # Nm/rad
+JOYSTICK_SPRING_KD_ANG = 0.15        # Nm/(rad/s)
 
 # Topic carrying the live joystick home pose (teleop_triago_joystick.py ->
 # haptic_force_manager_blending_tutorial.py) so both nodes agree on the SAME
@@ -102,11 +104,15 @@ JOYSTICK_HOME_POSE_TOPIC = "/joystick/home_pose"
 # actively commanding):
 #   alpha = ALIGN_ALPHA_MIN + (ALIGN_ALPHA_MAX - ALIGN_ALPHA_MIN) * clip(s, 0, 1)
 # Misaligned (s <= 0)  -> alpha = ALIGN_ALPHA_MIN  (policy 20%, USER 80%).
-# Aligned    (s  = 1)  -> alpha = ALIGN_ALPHA_MAX  (policy 80%, user 20%).
-# No user input (handle inside the joystick deadband, v_user = 0) is treated as
-# perfectly aligned (s = 1) so the autonomy leads the motion toward the goal.
+# Aligned    (s  = 1)  -> alpha = ALIGN_ALPHA_MAX  (policy 80%, user 20%) -- fast,
+#                        but ONLY while the user is actively moving in agreement.
+# No user input (handle inside the joystick deadband, v_user = 0) uses a REDUCED
+# idle authority ALIGN_ALPHA_IDLE, so the robot only GENTLY crawls toward the
+# inferred goal when the user is still; the instant the user pushes in a direction
+# the policy agrees with, alpha ramps up to ALIGN_ALPHA_MAX (fast).
 ALIGN_ALPHA_MIN = 0.2                # policy weight when fully misaligned (user prioritised)
-ALIGN_ALPHA_MAX = 0.8                # policy weight when fully aligned / no user input
+ALIGN_ALPHA_MAX = 0.8                # policy weight when aligned AND the user is moving in agreement
+ALIGN_ALPHA_IDLE = 0.35             # policy weight when the user is still (gentle autonomous crawl)
 ALIGN_ALPHA_LPF_COEFF = 0.1          # low-pass on alpha for C0-continuity of the blend
 
 # =============================================================================

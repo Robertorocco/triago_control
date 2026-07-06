@@ -112,16 +112,20 @@ The Cartesian reference sent to the QP is a blend of the user twist and the beli
 v_blend = (1 - alpha) * v_user + alpha * pi_policy
 ```
 
-**`compute_alpha`** — the authority weight `alpha` (weight on the policy) depends **purely on the alignment** between the user twist and the policy twist:
+**`compute_alpha`** — the authority weight `alpha` (weight on the policy) depends on whether the user is driving and, if so, on the alignment between the user twist and the policy twist:
 
 ```
-s     = mean per-channel cosine(v_user, pi_policy)   over whichever channel(s) (lin/ang) the user is commanding
-        = 1  when v_user == 0 (handle inside the joystick deadband) → autonomy leads
-alpha = ALIGN_ALPHA_MIN + (ALIGN_ALPHA_MAX - ALIGN_ALPHA_MIN) · clip(s, 0, 1)     (LPF'd, C0-continuous)
+user STILL (v_user == 0, inside the joystick deadband):
+    alpha = ALIGN_ALPHA_IDLE                                    # gentle autonomous crawl
+user ACTIVE:
+    s     = mean per-channel cosine(v_user, pi_policy)  over whichever channel(s) the user commands
+    alpha = ALIGN_ALPHA_MIN + (ALIGN_ALPHA_MAX - ALIGN_ALPHA_MIN) · clip(s, 0, 1)
+                                                                # (both branches LPF'd, C0-continuous)
 ```
 
-- Misaligned (`s ≤ 0`) → `alpha = ALIGN_ALPHA_MIN = 0.2` → **user keeps 80%** (the operator is prioritised whenever they disagree with the policy).
-- Aligned, or no user input (`s → 1`) → `alpha = ALIGN_ALPHA_MAX = 0.8` → autonomy leads toward the inferred goal.
+- User still → `alpha = ALIGN_ALPHA_IDLE = 0.35` → the robot only **gently crawls** toward the inferred goal (deliberately slow when the user isn't driving).
+- Misaligned (`s ≤ 0`) → `alpha = ALIGN_ALPHA_MIN = 0.2` → **user keeps 80%** (prioritised whenever they disagree with the policy).
+- Aligned and actively moving (`s → 1`) → `alpha = ALIGN_ALPHA_MAX = 0.8` → autonomy leads **fast** toward the goal — the robot only goes fast once the user pushes in a direction the policy agrees with.
 
 Belief still selects *which* goal's policy is `pi_policy`; `alpha` only arbitrates authority. The user twist arrives already deadbanded to zero inside the joystick's home deadband (done teleop-side), so residual handle noise can never creep the arm. This replaces the deprecated belief×distance-gated blend + F_sync force-feedback design, whose force-into-handle path formed an unstable feedback loop.
 

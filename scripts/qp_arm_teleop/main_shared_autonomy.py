@@ -2152,19 +2152,30 @@ class SharedControlNode(Node):
     def compute_alpha(self, v_user, v_policy):
         """Autonomy authority weight from user/policy twist ALIGNMENT (joystick mode).
 
-            alpha = ALIGN_ALPHA_MIN + (ALIGN_ALPHA_MAX - ALIGN_ALPHA_MIN) * clip(s, 0, 1)
+        - User STILL (v_user == 0, handle inside the joystick deadband):
+              alpha = ALIGN_ALPHA_IDLE -- a GENTLE crawl toward the inferred goal.
+              (Previously the still case was treated as fully aligned and ran at
+              ALIGN_ALPHA_MAX, which felt too fast when the user wasn't driving.)
+        - User ACTIVE:
+              alpha = ALIGN_ALPHA_MIN + (ALIGN_ALPHA_MAX - ALIGN_ALPHA_MIN)*clip(s, 0, 1)
+          where s in [-1, 1] is the twist alignment (see _twist_alignment).
+          Misaligned (s <= 0) -> ALIGN_ALPHA_MIN (policy 20%, the USER keeps 80%);
+          aligned (s -> 1) -> ALIGN_ALPHA_MAX (policy 80%, fast) -- so the robot
+          only moves fast once the user is actively pushing in a direction the
+          policy agrees with.
 
-        s = alignment in [-1, 1] (see _twist_alignment). Misaligned (s <= 0) ->
-        alpha = ALIGN_ALPHA_MIN (policy 20%, so the USER keeps 80% -- the operator
-        is prioritised whenever they disagree with the policy). Aligned, or no user
-        input at all, (s -> 1) -> alpha = ALIGN_ALPHA_MAX (policy 80%, autonomy
-        leads). LPF'd (ALIGN_ALPHA_LPF_COEFF) so the blended reference stays
-        C0-continuous. Belief still selects WHICH goal's policy is passed in as
-        v_policy (via blend_policies); alpha only arbitrates authority.
+        LPF'd (ALIGN_ALPHA_LPF_COEFF) so the blended reference stays C0-continuous.
+        Belief still selects WHICH goal's policy is v_policy; alpha only arbitrates
+        authority.
         """
-        s = self._twist_alignment(v_user, v_policy)
-        alpha_raw = float(cfg.ALIGN_ALPHA_MIN
-                          + (cfg.ALIGN_ALPHA_MAX - cfg.ALIGN_ALPHA_MIN) * np.clip(s, 0.0, 1.0))
+        lin_active = float(np.linalg.norm(v_user[0:3])) > 1e-9
+        ang_active = float(np.linalg.norm(v_user[3:6])) > 1e-9
+        if not lin_active and not ang_active:
+            alpha_raw = float(cfg.ALIGN_ALPHA_IDLE)
+        else:
+            s = self._twist_alignment(v_user, v_policy)
+            alpha_raw = float(cfg.ALIGN_ALPHA_MIN
+                              + (cfg.ALIGN_ALPHA_MAX - cfg.ALIGN_ALPHA_MIN) * np.clip(s, 0.0, 1.0))
         self.alpha_lpf = (cfg.ALIGN_ALPHA_LPF_COEFF * alpha_raw
                           + (1.0 - cfg.ALIGN_ALPHA_LPF_COEFF) * self.alpha_lpf)
         return self.alpha_lpf
