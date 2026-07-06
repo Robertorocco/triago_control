@@ -26,7 +26,7 @@ triago_control/
 ├── scripts/
 │   ├── qp_arm_teleop/
 │   │   ├── main_qp_controller.py       ★ QP-CLF-CBF safety loop (arms)
-│   │   ├── main_shared_autonomy.py     ★ intent prediction + twist blending
+│   │   ├── main_shared_autonomy.py     ★ intent prediction + joystick-mode blending
 │   │   ├── trajectory_generator.py     open-loop quintic reference source
 │   │   ├── base_controller.py / keyboard_teleop.py   mobile base / keyboard jog
 │   │   ├── plotter.py / offline_plotter.py           live / static telemetry dashboards
@@ -94,52 +94,38 @@ An intermediate filter between the raw Cartesian reference (from teleop / trajec
 
 Exits on error recovery (`< LME_ERROR_RECOVERED`) or a max duration timeout, whichever comes first.
 
-## 5. Shared Autonomy & Twist Blending (`main_shared_autonomy.py`)
+## 5. Shared Autonomy & Joystick-Mode Blending (`main_shared_autonomy.py`)
 
-Implements Bayesian belief estimation over a discrete goal set, a local QP policy per goal, a grasp state machine, and (when enabled) reference-level blending between human input and autonomous policy.
+Implements Bayesian belief estimation over a discrete goal set, a local QP policy per goal, a grasp state machine, and (when `cfg.BLENDING`) reference-level blending of the human twist with the autonomous policy. The human side is "Joystick Mode" (`haption_teleoperation`'s context.md §3.2): the Haption handle is spring-centered and its displacement from home is the pure user twist.
 
 ### 5.1 Belief & Policy
 
-- **Belief estimator**: Bayesian update over goals, with goal *exclusion* support (a goal held by either arm, or not currently graspable, is pinned to probability 0 and excluded from the "uniform belief" baseline used below).
-- **Local policy per goal**: a constrained QP twist `pi_k` toward each goal `k`, subject to the same CBF-derived constraints as the safety QP (so guidance never points through an obstacle).
-- **Policy blend** (used for RViz guidance + F_guide in Virtual Fixture mode): `pi_blend = Σ_k w(k) · pi_k` (convex combination, smooth in belief).
+- **Local policy per goal**: a constrained QP twist `pi_k` toward each goal `k`, computed **from the true EE pose** `current_T_EE`, subject to the same CBF-derived constraints as the safety QP (so guidance never points through an obstacle).
+- **Belief estimator**: Bayesian update over goals with goal *exclusion* support (a goal held by either arm, or not currently graspable, is pinned to probability 0). The observed action driving the update is the **EE's actual movement** — a finite-difference + EMA estimate of the realized EE 6D twist (`_update_ee_twist`) compared against the EE-anchored policies, so intent is inferred from where the robot is genuinely going, not from raw handle input. `pos_costs` (10% tie-breaker) are also EE-anchored. (In `POLICY_BELIEF_TEST` the injected fake human twist is used instead, equivalent since `current_T_user == current_T_EE` there.)
+- **Policy blend**: `pi_policy = Σ_k belief(k) · pi_k` (convex combination, smooth in belief) — this is the single optimal twist passed into the arbitration.
 
-### 5.2 Twist Blending (`cfg.BLENDING = True`)
+### 5.2 Joystick-Mode Arbitration (`cfg.BLENDING = True`)
 
-The Cartesian reference actually sent to the QP is a continuous blend of user input and the most-likely-goal policy:
+The Cartesian reference sent to the QP is a blend of the user twist and the belief-weighted policy, integrated persistently every tick into a latched reference (`T_blend_ref` via `integrate_twist`, so an idle user yields an absolute hold rather than a reference that chases the drifting EE). `main_shared_autonomy.py` is the sole publisher of `/arm_*/cartesian_reference` while blending is active.
 
 ```
 v_blend = (1 - alpha) * v_user + alpha * pi_policy
 ```
-integrated persistently every tick (`integrate_twist`) — `main_shared_autonomy.py` becomes the sole publisher of `/arm_*/cartesian_reference` while blending is active (see `haption_teleoperation`'s context.md §3.2 for the companion topic-routing).
 
-**`compute_alpha`** — belief-driven base term:
-```
-x = 0                                                          if b_max <= 1/N_active_goals   (uniform belief)
-x = clip((b_max - 1/N_active_goals) / (1 - 1/N_active_goals), 0, 1)   otherwise
-alpha_raw = ALPHA_MAX * x**ALPHA_GAMMA
-```
-`N_active_goals` excludes goals currently pinned to 0.
+**`compute_alpha`** — the authority weight `alpha` (weight on the policy) depends **purely on the alignment** between the user twist and the policy twist:
 
-**Proximity boost** (lets the task actually conclude near the goal, since `pi_policy` naturally shrinks to zero there):
 ```
-gain = 1 + smoothstep(FAR - pos_error, 0, FAR - NEAR) * (MAX_GAIN - 1)
-alpha = min(alpha_raw * gain, ALPHA_PROXIMITY_CAP)
+s     = mean per-channel cosine(v_user, pi_policy)   over whichever channel(s) (lin/ang) the user is commanding
+        = 1  when v_user == 0 (handle inside the joystick deadband) → autonomy leads
+alpha = ALIGN_ALPHA_MIN + (ALIGN_ALPHA_MAX - ALIGN_ALPHA_MIN) · clip(s, 0, 1)     (LPF'd, C0-continuous)
 ```
 
-**User-authority gates** — each multiplicatively *reduces* alpha (hands authority back to the user), combined via `max()` so either the linear or angular channel alone is sufficient:
-```
-effort         = max(clip(‖v_user_lin‖/THRESH_LIN, 0, 1), clip(‖v_user_ang‖/THRESH_ANG, 0, 1))
-alpha *= (1 - effort * ALPHA_EFFORT_OVERRIDE)                          # active while user is moving fast
+- Misaligned (`s ≤ 0`) → `alpha = ALIGN_ALPHA_MIN = 0.2` → **user keeps 80%** (the operator is prioritised whenever they disagree with the policy).
+- Aligned, or no user input (`s → 1`) → `alpha = ALIGN_ALPHA_MAX = 0.8` → autonomy leads toward the inferred goal.
 
-div_effort     = max(smoothstep(pos_divergence, NEAR, FAR), smoothstep(ang_divergence, ANG_NEAR, ANG_FAR))
-alpha *= (1 - div_effort * ALPHA_DIVERGENCE_OVERRIDE)                  # sustained, does not decay with velocity
-```
-where `pos_divergence = ‖pos_user - pos_EE‖`, `ang_divergence` is the geodesic rotation gap (`pin.log3`) between the user's held reference orientation and the real EE's. All terms are LPF'd before combining, so `alpha` is always C0-continuous even under noisy belief/effort signals.
+Belief still selects *which* goal's policy is `pi_policy`; `alpha` only arbitrates authority. The user twist arrives already deadbanded to zero inside the joystick's home deadband (done teleop-side), so residual handle noise can never creep the arm. This replaces the deprecated belief×distance-gated blend + F_sync force-feedback design, whose force-into-handle path formed an unstable feedback loop.
 
-**Bounded reference catch-up** (`compute_reference_catchup`): a gentle, capped P-pull added to `v_blend` toward the user's held pose (position + orientation), gated by a deadband, so a user holding their hand displaced (not just moving it) still drags the reference toward them — still passes through the downstream QP CLF-CBF, so it can never force the arm through an obstacle.
-
-**Telemetry**: `/shared_autonomy/blend_debug` (19 floats: `[alpha, v_user(6), v_policy(6), v_blend(6)]`) is the single source of truth for "who is commanding what," published every tick regardless of `cfg.BLENDING`.
+**Telemetry**: `/shared_autonomy/blend_debug` (19 floats: `[alpha, v_user(6), v_policy(6), v_blend(6)]`), published every tick regardless of `cfg.BLENDING`.
 
 ### 5.3 Bimanual State
 
@@ -228,10 +214,14 @@ ros2 run triago_control main_qp_controller.py
 ros2 run triago_control main_shared_autonomy.py
 ros2 launch triago_control visualize.launch.py
 
-# teleoperation side (haption_teleoperation package)
+# teleoperation side (haption_teleoperation package) -- teleop + force node pair per cfg.BLENDING:
 ros2 run haption_teleoperation virtuose_server_node
+#   BLENDING=False (Virtual Fixture):
 ros2 run haption_teleoperation teleop_triago_clutch.py
-ros2 run haption_teleoperation haptic_force_manager_tutorial.py   # or *_blending_tutorial.py per cfg.BLENDING
+ros2 run haption_teleoperation haptic_force_manager_tutorial.py
+#   BLENDING=True (Joystick Mode):
+ros2 run haption_teleoperation teleop_triago_joystick.py
+ros2 run haption_teleoperation haptic_force_manager_blending_tutorial.py
 ```
 
 **Gazebo Link Attacher** (external dependency, kinematic attach/detach during grasping — not part of this repo):

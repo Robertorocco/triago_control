@@ -34,10 +34,14 @@ out in a comment at its location, summarized here:
   _apply_human_noise:
     - dt was hardcoded as a literal 0.01 instead of derived from the control
       frequency. Now computed from CONTROL_HZ (a class constant).
-  compute_alpha:
-    - was a stub always returning 0.0, silently disabling blending whenever
-      BLENDING=True. Now raises NotImplementedError so a misconfiguration is
-      caught loudly instead of silently no-op'ing.
+  compute_alpha (joystick mode, 2026-07-06):
+    - the autonomy authority alpha is now derived purely from the ALIGNMENT
+      between the user twist and the optimal policy twist (see compute_alpha /
+      _twist_alignment): misaligned -> the operator keeps 80%; aligned or no
+      user input -> the autonomy leads. The old belief*distance-gated blend and
+      its F_sync force-feedback coupling (which formed an unstable loop) are
+      removed; the raw user twist now comes from the spring-centered
+      teleop_triago_joystick.py.
   get_dynamic_goal_pose / pin.log3 singularity:
     - moved into GoalSet, which now uses a Frobenius-norm fallback near the
       pi-rotation singularity instead of calling pin.log3 unconditionally (see
@@ -131,13 +135,13 @@ class SharedControlNode(Node):
         # owns /arm_*/cartesian_reference. See cfg.BLENDING's docstring for the
         # full topic-routing explanation. Use `cfg.BLENDING` everywhere below.
         self.TASK_DIM = 6        # 6 for full SE(3) tracking, 5 for S^2 grasping (align X-axis only)
-        # Persistent LPF state for the belief->alpha mapping (see compute_alpha).
+        # Persistent LPF state for the alignment->alpha arbitration (see compute_alpha).
         self.alpha_lpf = 0.0
         self.last_alpha = 0.0   # most recent alpha actually applied (for telemetry)
-        # Persistent LPF state for the user-effort gating signal (see compute_alpha).
-        self.alpha_effort_lpf = 0.0
-        # Persistent LPF state for the position-divergence gating signal (see compute_alpha).
-        self.alpha_divergence_lpf = 0.0
+        # Actual EE twist (finite-difference + EMA) -- the observed action for the
+        # EE-based belief inference used in joystick mode. See _update_ee_twist.
+        self._ee_twist = np.zeros(6)
+        self._prev_T_EE = None
 
         self.POLICY_BELIEF_TEST = False   # <-- flip this to switch modes
         # When True:  the node injects pi_stars[test_goal_key] as the fake human
@@ -490,10 +494,10 @@ class SharedControlNode(Node):
         self.get_logger().info(f" Blending:    {'ENABLED (Mixing Commands)' if cfg.BLENDING else 'DISABLED (Strict Optimal Policy)'} [cfg.BLENDING]")
         if cfg.BLENDING:
             self.get_logger().info(
-                f" Blending activates above uniform belief (1/N_goals); "
-                f"alpha = {cfg.ALPHA_MAX} * belief_norm**{cfg.ALPHA_GAMMA}, "
-                f"capped at ALPHA_MAX={cfg.ALPHA_MAX} (user retains >= "
-                f"{100*(1-cfg.ALPHA_MAX):.0f}% authority).")
+                f" Mode: JOYSTICK. alpha = alignment-weighted in "
+                f"[{cfg.ALIGN_ALPHA_MIN}, {cfg.ALIGN_ALPHA_MAX}] "
+                f"(misaligned -> user keeps {100*(1-cfg.ALIGN_ALPHA_MIN):.0f}%; "
+                f"aligned / no input -> autonomy leads).")
         self.get_logger().info(f" Active Goal: {self.active_goal_key} (Used if Prediction is False)")
         self.get_logger().info(f" Total Goals: {len(self.target_keys)}")
         self.get_logger().info("=========================================")
@@ -874,6 +878,31 @@ class SharedControlNode(Node):
             rot_mat = R.from_euler('xyz', rpy).as_matrix()
             self.current_T_EE = create_transform(pos, rot_mat)
 
+    def _update_ee_twist(self):
+        """Finite-difference + EMA estimate of the EE's ACTUAL 6D twist (base frame).
+
+        This is the observed action fed into the belief update in joystick mode
+        ("belief based on the actual movement of the end-effector"): the realized
+        EE motion is compared against each goal's EE-anchored policy, so intent is
+        inferred from where the robot is genuinely going, not from the raw handle
+        input. Smoothed with the same EMA coefficient used for joint velocity.
+        """
+        dt = 1.0 / self.CONTROL_HZ
+        T = self.current_T_EE
+        if self._prev_T_EE is None:
+            self._prev_T_EE = T.copy()
+            return
+        v_lin = (T[:3, 3] - self._prev_T_EE[:3, 3]) / dt
+        R_rel = T[:3, :3] @ self._prev_T_EE[:3, :3].T
+        if np.trace(R_rel) <= -1.0 + 1e-4:
+            w = np.zeros(3)   # near-pi singularity guard (matches compute_v_geo)
+        else:
+            w = pin.log3(R_rel) / dt
+        raw = np.concatenate((v_lin, w))
+        a = cfg.ALPHA_FILTER
+        self._ee_twist = a * raw + (1.0 - a) * self._ee_twist
+        self._prev_T_EE = T.copy()
+
     @staticmethod
     def _cylinders_from_world_scene(world_scene):
         """Builds GoalSet's `cylinders` dict from a loaded WorldScene (2026-07-04).
@@ -950,6 +979,10 @@ class SharedControlNode(Node):
                 self.get_logger().warn(f"[FREQ] Control Loop DROPPED: {fps:.1f} Hz")
             self._control_ticks = 0
             self._control_last_print = current_time
+
+        # Actual EE twist (finite difference + EMA) -- the observed action for the
+        # EE-based belief inference used in joystick mode (see _update_ee_twist).
+        self._update_ee_twist()
 
         msg_ignore = String()
         # States that run blind (no goal tracking, no collision-data dependency).
@@ -1073,7 +1106,16 @@ class SharedControlNode(Node):
                 # nearest goal slowly climbs). This fixes the "50/50 deadlock near
                 # aligned goals" where the user is stationary but clearly closer to
                 # one goal than the other.
-                speed = float(np.linalg.norm(self.current_v_h[0:3]))
+                # Observed action for the belief update. Joystick mode infers
+                # intent from the EE's ACTUAL movement (finite-differenced twist
+                # vs. the EE-anchored policies); POLICY_BELIEF_TEST keeps injecting
+                # the fake human twist vs. the user policies (current_T_user ==
+                # current_T_EE there, so the two are equivalent).
+                if self.POLICY_BELIEF_TEST:
+                    obs_twist, obs_policies = self.current_v_h, user_policies
+                else:
+                    obs_twist, obs_policies = self._ee_twist, ee_policies
+                speed = float(np.linalg.norm(obs_twist[0:3]))
                 engagement = float(np.clip(
                     (speed - self.BELIEF_V_LOW) / max(self.BELIEF_V_HIGH - self.BELIEF_V_LOW, 1e-6),
                     0.0, 1.0))
@@ -1099,7 +1141,7 @@ class SharedControlNode(Node):
                     pos_costs[key] = float(np.sum(
                         (self.current_T_EE[:3, 3] - T_g[:3, 3]) ** 2))
                 self.belief_estimator.update(
-                    self.current_v_h, user_policies,
+                    obs_twist, obs_policies,
                     gain=engagement * warmup, pos_costs=pos_costs)
                 # else: user still -> FREEZE belief (hold history, no decay)
 
@@ -1230,35 +1272,18 @@ class SharedControlNode(Node):
 
         blend_active = cfg.BLENDING and tick_output.new_state == "SHARED_AUTONOMY"
         if blend_active:
-            # Authority (2026-07-06): alpha = f(belief) * dist_gate. The distance
-            # gate (d = ||user reference - EE||) forces alpha -> 0 when the EE is
-            # far from the user's reference, so the robot first PURELY follows the
-            # user toward their reference; only once F_sync has pulled the two
-            # together (d small) does the policy earn any authority.
-            pos_divergence = float(np.linalg.norm(
-                self.current_T_user[:3, 3] - self.current_T_EE[:3, 3]))
-            alpha = self.compute_alpha(b_max, pos_divergence=pos_divergence)
-            self.last_alpha = alpha
-            # Deadband the user twist: sub-threshold handle velocity (residual
-            # F_sync jitter / device noise) is NOT genuine intent. With the
-            # magnitude clamp below (policy clamped to the user's magnitude), a
-            # still handle -> v_user = 0 -> policy clamped to 0 -> target = 0, so
-            # belief/alpha can NEVER creep the arm on their own.
+            # Joystick-mode arbitration (2026-07-06). The user twist arrives already
+            # deadbanded to zero inside the joystick's home deadband (done in
+            # teleop_triago_joystick.py), so residual handle noise can never creep
+            # the arm. It is blended with the belief-weighted optimal policy by an
+            # authority weight alpha that depends PURELY on their ALIGNMENT:
+            # misaligned -> the operator keeps 80%; aligned (or no user input at all)
+            # -> the autonomy leads toward the inferred goal. See compute_alpha.
             v_user = self.current_v_h.copy()
-            if np.linalg.norm(v_user[0:3]) < cfg.USER_TWIST_DEADBAND_LIN:
-                v_user[0:3] = 0.0
-            if np.linalg.norm(v_user[3:6]) < cfg.USER_TWIST_DEADBAND_ANG:
-                v_user[3:6] = 0.0
-            # Magnitude-fair blend: clamp the policy twist's magnitude to the
-            # user's own (per linear/angular channel) BEFORE blending, so a small
-            # user twist is never overwhelmed by the large saturated policy twist
-            # -- the user sets the pace, alpha sets the direction mix. The floor
-            # (V_POLICY_MIN_*) lets the autonomy still crawl slowly toward the
-            # goal when the user is still: idle speed = alpha * V_POLICY_MIN.
-            v_policy_clamped = self._clamp_twist_to(
-                tick_output.target_twist, v_user,
-                cfg.V_POLICY_MIN_LIN, cfg.V_POLICY_MIN_ANG)
-            target_twist = (1 - alpha) * v_user + alpha * v_policy_clamped
+            pi_policy = tick_output.target_twist
+            alpha = self.compute_alpha(v_user, pi_policy)
+            self.last_alpha = alpha
+            target_twist = (1.0 - alpha) * v_user + alpha * pi_policy
         else:
             alpha = 0.0
             self.last_alpha = 0.0
@@ -2095,137 +2120,54 @@ class SharedControlNode(Node):
         return pi.copy() + white_noise + self._ou_bias
 
     @staticmethod
-    def _smoothstep(x, lo, hi):
-        """C1-continuous ramp: 0 at x<=lo, 1 at x>=hi, smooth in between."""
-        if hi <= lo:
-            return 1.0 if x >= hi else 0.0
-        t = float(np.clip((x - lo) / (hi - lo), 0.0, 1.0))
-        return t * t * (3.0 - 2.0 * t)
+    def _channel_cos(a, b):
+        """Cosine similarity of two 3-vectors, 0 when either is (near) zero."""
+        na = float(np.linalg.norm(a))
+        nb = float(np.linalg.norm(b))
+        if na < 1e-9 or nb < 1e-9:
+            return 0.0
+        return float(np.clip(np.dot(a, b) / (na * nb), -1.0, 1.0))
 
-    @staticmethod
-    def _clamp_twist_to(v_policy, v_user, v_min_lin=0.0, v_min_ang=0.0):
-        """Clamp the policy twist's magnitude per channel to max(user, floor).
+    def _twist_alignment(self, v_user, v_policy):
+        """Alignment s in [-1, 1] between the user twist and the policy twist.
 
-        The blend v = (1-alpha)*v_user + alpha*v_policy is only fair if the two
-        twists are comparable in magnitude: pi_policy is a large, saturated
-        velocity while comfortable hand motion is much smaller, so a small user
-        twist would be overwhelmed even when alpha favours the user. Clamping the
-        policy's LINEAR and ANGULAR norms so neither exceeds the user's own
-        (direction preserved) means the USER sets the pace and alpha only sets
-        the DIRECTION mix.
-
-        v_min_lin / v_min_ang add a FLOOR to that cap: the policy may always keep
-        at least this speed even when the user is still, so the autonomy can make
-        SLOW progress toward the belief-inferred goal on its own (still gated by
-        alpha = belief * dist_gate, so the effective idle speed is alpha*v_min --
-        it only crawls forward when confident + matched). With v_min = 0 this
-        reduces to the strict "user sets the pace, still user = frozen" clamp.
+        No user input (handle inside the joystick deadband -> v_user == 0) is
+        treated as perfectly ALIGNED (s = 1) so the autonomy leads. Otherwise s
+        is the mean per-channel cosine over whichever channel(s) the user is
+        actively commanding (linear and/or angular), so a translation-only or a
+        rotation-only command is judged on its own direction rather than being
+        diluted by the idle channel.
         """
-        vp = np.asarray(v_policy, dtype=float).copy()
-        vu = np.asarray(v_user, dtype=float)
-        pl = float(np.linalg.norm(vp[0:3]))
-        ul = max(float(np.linalg.norm(vu[0:3])), float(v_min_lin))
-        if pl > ul and pl > 1e-9:
-            vp[0:3] *= (ul / pl)
-        pa = float(np.linalg.norm(vp[3:6]))
-        ua = max(float(np.linalg.norm(vu[3:6])), float(v_min_ang))
-        if pa > ua and pa > 1e-9:
-            vp[3:6] *= (ua / pa)
-        return vp
+        lin_active = float(np.linalg.norm(v_user[0:3])) > 1e-9
+        ang_active = float(np.linalg.norm(v_user[3:6])) > 1e-9
+        if not lin_active and not ang_active:
+            return 1.0
+        cosines = []
+        if lin_active:
+            cosines.append(self._channel_cos(v_user[0:3], v_policy[0:3]))
+        if ang_active:
+            cosines.append(self._channel_cos(v_user[3:6], v_policy[3:6]))
+        return float(np.mean(cosines))
 
-    def compute_alpha(self, b_max, pos_divergence=None):
-        """Autonomy authority weight from belief confidence and EE<->reference distance.
+    def compute_alpha(self, v_user, v_policy):
+        """Autonomy authority weight from user/policy twist ALIGNMENT (joystick mode).
 
-            alpha = ALPHA_MAX * b**ALPHA_GAMMA * dist_gate(d)
+            alpha = ALIGN_ALPHA_MIN + (ALIGN_ALPHA_MAX - ALIGN_ALPHA_MIN) * clip(s, 0, 1)
 
-        b = belief confidence: the maximum belief probability normalised against
-            the uniform baseline 1/N_active into [0, 1]:
-                b = clip((b_max - 1/N) / (1 - 1/N), 0, 1)
-            b = 0 at uniform belief (no assistance), b = 1 at certainty;
-            ALPHA_GAMMA < 1 bows the curve up so a "confident enough" belief
-            already hands most of the authority.
-        dist_gate(d) in [0, 1], d = ||user_reference - EE|| (pos_divergence):
-            = 1 when the EE has matched the user's reference (d <= SYNC_D_MIN,
-              3cm) -> blending is allowed; smoothly -> 0 as d grows to SYNC_D_MAX
-              (30cm) -> alpha = 0. So far from the reference the robot PURELY
-              follows the user's own twist toward their reference and the
-              autonomy never leads a still/uncertain user around; only once
-              F_sync has pulled EE and reference together does the policy earn
-              authority.
-
-        LPF'd (ALPHA_LPF_COEFF) so alpha never jumps discontinuously between
-        ticks. cfg.TASK_WEIGHTS_6D (the CLF's own position:orientation cost
-        ratio) is intentionally NOT touched here.
+        s = alignment in [-1, 1] (see _twist_alignment). Misaligned (s <= 0) ->
+        alpha = ALIGN_ALPHA_MIN (policy 20%, so the USER keeps 80% -- the operator
+        is prioritised whenever they disagree with the policy). Aligned, or no user
+        input at all, (s -> 1) -> alpha = ALIGN_ALPHA_MAX (policy 80%, autonomy
+        leads). LPF'd (ALIGN_ALPHA_LPF_COEFF) so the blended reference stays
+        C0-continuous. Belief still selects WHICH goal's policy is passed in as
+        v_policy (via blend_policies); alpha only arbitrates authority.
         """
-        # --- Belief confidence, normalised against the uniform baseline ---
-        active_goals = [k for k in self.target_keys
-                        if k not in self.belief_estimator.get_excluded_goals()]
-        n_active = max(len(active_goals), 1)
-        uniform_max = 1.0 / n_active
-        if b_max <= uniform_max:
-            belief_norm = 0.0
-        else:
-            belief_norm = float(np.clip(
-                (b_max - uniform_max) / max(1.0 - uniform_max, 1e-9), 0.0, 1.0))
-        belief_norm = belief_norm ** cfg.ALPHA_GAMMA
-
-        # --- Distance gate: 1 when matched (d <= SYNC_D_MIN), 0 when far (>= SYNC_D_MAX) ---
-        dist_gate = 1.0
-        if pos_divergence is not None:
-            dist_gate = self._smoothstep(
-                cfg.SYNC_D_MAX - float(pos_divergence),
-                0.0, cfg.SYNC_D_MAX - cfg.SYNC_D_MIN)
-
-        alpha_raw = float(cfg.ALPHA_MAX * belief_norm * dist_gate)
-        self.alpha_lpf = ((cfg.ALPHA_LPF_COEFF * alpha_raw)
-                         + (1.0 - cfg.ALPHA_LPF_COEFF) * self.alpha_lpf)
+        s = self._twist_alignment(v_user, v_policy)
+        alpha_raw = float(cfg.ALIGN_ALPHA_MIN
+                          + (cfg.ALIGN_ALPHA_MAX - cfg.ALIGN_ALPHA_MIN) * np.clip(s, 0.0, 1.0))
+        self.alpha_lpf = (cfg.ALIGN_ALPHA_LPF_COEFF * alpha_raw
+                          + (1.0 - cfg.ALIGN_ALPHA_LPF_COEFF) * self.alpha_lpf)
         return self.alpha_lpf
-
-    def compute_reference_catchup(self, T_user, T_EE):
-        """Bounded P-control pull toward the user's PERSISTENT reference pose.
-
-        Fixes the core architectural gap: v_blend = (1-alpha)*v_user + alpha*
-        pi_policy has NO memory of the user's persistent reference position
-        (current_T_user) -- only its instantaneous derivative (current_v_h).
-        The instant the user stops moving (holding their hand displaced from
-        the EE, e.g. trying to break the arm out of a local minimum), v_user
-        collapses to zero, the twist blend collapses to alpha*pi_policy alone,
-        and the robot never follows through to where the hand actually is --
-        while the operator fights F_sync's restoring force the whole time.
-
-        This adds a SEPARATE, capped velocity term -- gated by a deadband so
-        ordinary small tracking gaps are untouched -- directly toward the
-        user's held position/orientation. It is ADDED onto whatever
-        target_twist the blend already produced; it never bypasses the
-        downstream QP CLF-CBF (it only ever contributes a bounded velocity
-        INTO the same reference the QP tracks), so a genuinely obstacle-
-        blocked path still cannot be forced through.
-
-        Returns a 6-vector (linear + angular) to be added to target_twist.
-        """
-        pos_gap = T_user[:3, 3] - T_EE[:3, 3]
-        pos_gap_norm = float(np.linalg.norm(pos_gap))
-        pos_gate = self._smoothstep(pos_gap_norm, cfg.CATCHUP_DEADBAND_POS, cfg.CATCHUP_FULL_POS)
-        v_lin = cfg.K_CATCHUP_LIN * pos_gap * pos_gate
-        lin_norm = float(np.linalg.norm(v_lin))
-        if lin_norm > cfg.V_CATCHUP_MAX_LIN:
-            v_lin *= (cfg.V_CATCHUP_MAX_LIN / lin_norm)
-
-        R_err = T_user[:3, :3] @ T_EE[:3, :3].T
-        trace = np.trace(R_err)
-        if trace <= -1.0 + 1e-4:
-            ang_gap_vec = np.zeros(3)
-            ang_gap_norm = np.pi
-        else:
-            ang_gap_vec = pin.log3(R_err)
-            ang_gap_norm = float(np.linalg.norm(ang_gap_vec))
-        ang_gate = self._smoothstep(ang_gap_norm, cfg.CATCHUP_DEADBAND_ANG, cfg.CATCHUP_FULL_ANG)
-        w_ang = cfg.K_CATCHUP_ANG * ang_gap_vec * ang_gate
-        ang_norm = float(np.linalg.norm(w_ang))
-        if ang_norm > cfg.V_CATCHUP_MAX_ANG:
-            w_ang *= (cfg.V_CATCHUP_MAX_ANG / ang_norm)
-
-        return np.concatenate((v_lin, w_ang))
 
     def _console_input_thread(self):
         """Blocking console loop that lets the developer switch the test goal at runtime.

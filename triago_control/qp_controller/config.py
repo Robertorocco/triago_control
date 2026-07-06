@@ -36,91 +36,78 @@ DYNAMIC_GAMMA_CLF = False       # Vary CLF convergence rate with the safety marg
 SIMULATE_IDEAL_KINEMATICS = False  # True = pure math digital twin, False = real hardware
 ORIENTATION_CTRL = True         # True = control Pos+Ori (6DOF), False = Pos only (3DOF)
 
-# Shared-autonomy TWIST BLENDING master switch. False = legacy: teleop_triago_clutch.py
-# drives the robot directly, main_shared_autonomy.py only takes over during autonomous
-# grasp execution or POLICY_BELIEF_TEST. True = main_shared_autonomy.py persistently
-# blends v_blend = (1-alpha)*v_user + alpha*pi_policy and is the sole writer of
-# /arm_*/cartesian_reference even in normal teleop.
+# =============================================================================
+# 1b. SHARED-AUTONOMY BLENDING -- "JOYSTICK MODE"
+# =============================================================================
+# Master switch. False = legacy Virtual-Fixture teleop: teleop_triago_clutch.py
+# drives /arm_*/cartesian_reference directly; main_shared_autonomy.py only takes
+# over during autonomous grasp execution / POLICY_BELIEF_TEST. True = JOYSTICK
+# MODE: teleop_triago_joystick.py maps the Haption handle's displacement-from-home
+# into a pure Cartesian twist on /arm_*/user_cartesian_reference, and
+# main_shared_autonomy.py arbitrates that user twist against the belief-weighted
+# optimal policy (computed from the TRUE EE pose) and is the sole writer of
+# /arm_*/cartesian_reference. This replaces the deprecated "combine F_sync force
+# feedback with a direct user/policy twist blend" design, whose force-into-handle
+# path created an unstable feedback loop. See teleop_triago_joystick.py's module
+# docstring for the full rationale.
 BLENDING = True
 
-# alpha(belief) shaping -- see main_shared_autonomy.compute_alpha.
-#   alpha = ALPHA_MAX * belief_norm**ALPHA_GAMMA * dist_gate(||user_ref - EE||)
-# belief_norm is the belief confidence normalised into [0,1]; dist_gate goes
-# 1 (EE matched to the user reference, d <= SYNC_D_MIN) -> 0 (d >= SYNC_D_MAX),
-# so blending only switches on once F_sync has pulled EE and reference together.
-ALPHA_MAX = 0.80          # Hard cap on autonomy authority (user retains >= 20%)
-ALPHA_GAMMA = 0.5         # <1 = alpha ramps toward ALPHA_MAX quickly once belief is high
-ALPHA_LPF_COEFF = 0.08    # Low-pass filter coefficient on alpha
+# --- Joystick home pose (Haption base frame) -------------------------------
+# The handle is spring-centered to this pose; its displacement from it IS the
+# command. Position is FIXED. Orientation is re-based at joystick startup to the
+# robot gripper's INITIAL orientation (see JOYSTICK_ROT_HOME_SCALE) so "handle at
+# rest" always means "hold the current gripper orientation", however the gripper
+# is posed (e.g. a top-down grasp approach).
+JOYSTICK_NEUTRAL_POSITION_M = [0.5, -0.03, -0.03]
+JOYSTICK_NEUTRAL_ORIENTATION_XYZW = [0.0, 0.7071068, 0.0, 0.7071068]
 
-# --- F_sync distance-decaying stiffness + alpha distance gate (2026-07-06) ---
-# d = ||EE - user_reference|| (position divergence). F_sync's linear magnitude
-# follows a 1/d-shaped law: MAXIMUM near the reference (lock/settle zone) and
-# MINIMUM far away, so the user can move the handle FREELY when far without the
-# tether fighting them / injecting a fake twist into the loop. The SAME two
-# distances gate alpha smoothly to 0 when far. Read by both
-# main_shared_autonomy.py and haptic_force_manager_blending_tutorial.py.
-SYNC_D_MIN = 0.03         # m -- F_sync PEAKS here (SYNC_F_MAX); ramps to 0 below; dist_gate = 1
-SYNC_D_MAX = 0.30         # m -- at/beyond this: F_sync = SYNC_F_MIN and dist_gate = 0
-SYNC_F_MAX = 8.0          # N -- peak linear sync force magnitude at SYNC_D_MIN (close)
-SYNC_F_MIN = 1.0          # N -- linear sync force magnitude at SYNC_D_MAX (far)
+# --- Displacement -> twist mapping (teleop_triago_joystick.py) --------------
+# The commanded twist magnitude is STRICTLY PROPORTIONAL to the handle's distance
+# from home, past a deadband. Deadband: displacement below these -> zero twist
+# (and, in the arbitration, a zero user twist is treated as perfectly ALIGNED so
+# the autonomy leads the motion). 5 cm / 5 deg initial values -- to be tuned.
+JOYSTICK_DEADBAND_LIN = 0.05         # m   (5 cm)
+JOYSTICK_DEADBAND_ANG = 0.0872665    # rad (5 deg)
+JOYSTICK_K_TRANS = 0.5               # (m/s) per m of handle linear displacement
+JOYSTICK_K_ROT = 1.0                 # (rad/s) per rad of handle angular displacement
+JOYSTICK_V_MAX_LIN = 0.10            # m/s   hard safety clamp on the commanded linear twist
+JOYSTICK_V_MAX_ANG = 0.50            # rad/s hard safety clamp on the commanded angular twist
 
-# Deadband on the user twist used for blending (main_shared_autonomy.py): a
-# handle velocity below these thresholds is treated as ZERO intent, so a still
-# handle commands exactly zero robot motion. Combined with the magnitude clamp
-# (policy clamped to the user's magnitude) this guarantees belief/alpha alone
-# can NEVER drive the arm -- the residual F_sync jitter / device noise that used
-# to creep the reference is filtered out here.
-USER_TWIST_DEADBAND_LIN = 0.005   # m/s
-USER_TWIST_DEADBAND_ANG = 0.02    # rad/s
+# --- Home-orientation rebasing scale ---------------------------------------
+# The gripper's rotation away from its startup reference is scaled DOWN by this
+# factor when building the handle's home orientation (gripper 90 deg -> handle
+# 60 deg), because the Haption's rotational workspace is more restrictive than
+# the arm's. Applies ONLY to the home-pose construction, NOT to the commanded twist.
+JOYSTICK_ROT_HOME_SCALE = 1.5
 
-# Minimum autonomous policy speed floor (main_shared_autonomy.py, blend path).
-# The policy twist is clamped to the user's own magnitude so the user sets the
-# pace -- but with a FLOOR so the autonomy can still make SLOW progress toward
-# the belief-inferred goal even when the user is still (a still user no longer
-# means a frozen robot). The effective idle speed is alpha * V_POLICY_MIN, i.e.
-# gated by belief AND the distance gate, so it only crawls forward when the
-# system is confident and matched. Set to 0 to recover the strict "user sets the
-# pace, still user = frozen" behavior.
-V_POLICY_MIN_LIN = 0.02    # m/s  -- slow autonomous cruise when the user is idle
-V_POLICY_MIN_ANG = 0.05    # rad/s
+# --- Restorative centering spring (haptic_force_manager_blending_tutorial.py) --
+# The ONLY haptic force rendered in joystick mode: a virtual spring-damper pulling
+# the handle back to the (dynamic) home pose. No F_guide / F_fixture / F_sync.
+JOYSTICK_SPRING_KP_LIN = 40.0        # N/m
+JOYSTICK_SPRING_KD_LIN = 0.7         # N/(m/s)   light damping for passivity
+JOYSTICK_SPRING_KP_ANG = 1.0         # Nm/rad
+JOYSTICK_SPRING_KD_ANG = 0.1         # Nm/(rad/s)
 
-# Distance-based assistance-intensity boost: compensates pi_policy's natural falloff
-# near the goal so the approach can actually conclude, capped so full autonomy is
-# never reached even at the goal. Smoothstep-shaped in EE-to-goal distance.
-ALPHA_PROXIMITY_NEAR = 0.05      # m -- full boost gain at/inside this distance
-ALPHA_PROXIMITY_FAR = 0.20       # m -- no boost beyond this distance (gain = 1.0)
-ALPHA_PROXIMITY_MAX_GAIN = 1.5   # multiplier applied to alpha at ALPHA_PROXIMITY_NEAR
-ALPHA_PROXIMITY_CAP = 0.90       # hard ceiling on the boosted alpha
+# Topic carrying the live joystick home pose (teleop_triago_joystick.py ->
+# haptic_force_manager_blending_tutorial.py) so both nodes agree on the SAME
+# dynamic home (single source of truth -- the teleop node owns it). Layout:
+#   [pos_x, pos_y, pos_z, quat_x, quat_y, quat_z, quat_w] in the Haption base frame.
+JOYSTICK_HOME_POSE_TOPIC = "/joystick/home_pose"
 
-# User-effort authority gating: scales alpha down by how briskly the user is moving
-# the handle (linear OR angular), so a fast hand/wrist always takes precedence over
-# belief-driven assistance. effort = max(lin_effort, ang_effort), both clipped [0,1].
-ALPHA_EFFORT_THRESHOLD = 0.4      # m/s -- linear twist norm saturating effort to 1.0
-ALPHA_EFFORT_ANG_THRESHOLD = 1.0  # rad/s -- angular twist norm saturating effort to 1.0
-ALPHA_EFFORT_OVERRIDE = 0.5       # fraction of alpha displaced by full user effort
-ALPHA_EFFORT_LPF_COEFF = 0.15     # low-pass filter on the effort signal
-
-# Position/orientation-divergence authority override + reference catch-up: unlike the
-# effort gate above, this reacts to a SUSTAINED pose gap (doesn't decay when the user
-# stops moving), plus a bounded P-control pull toward the user's held pose so the
-# robot actually follows through -- gated by a deadband, capped, and always routed
-# through the same reference the QP-CBF tracks (never bypasses safety).
-ALPHA_DIVERGENCE_NEAR = 0.05      # m -- no override below this position gap
-ALPHA_DIVERGENCE_FAR = 0.20       # m -- full override at/beyond this position gap
-ALPHA_DIVERGENCE_ANG_NEAR = 0.15  # rad (~8.6 deg) -- no override below this orientation gap
-ALPHA_DIVERGENCE_ANG_FAR = 0.60   # rad (~34 deg) -- full override at/beyond this orientation gap
-ALPHA_DIVERGENCE_OVERRIDE = 0.6   # fraction of alpha displaced at full divergence
-ALPHA_DIVERGENCE_LPF_COEFF = 0.15  # LPF on the divergence-override signal
-
-CATCHUP_DEADBAND_POS = 0.03       # m -- below this position gap, catch-up contributes nothing
-CATCHUP_FULL_POS = 0.15           # m -- full catch-up gain reached at/beyond this gap
-K_CATCHUP_LIN = 1.5               # P-gain (1/s) on the linear position gap (pre-clip)
-V_CATCHUP_MAX_LIN = 0.06          # m/s -- hard cap on the catch-up linear velocity
-
-CATCHUP_DEADBAND_ANG = 0.15       # rad (~8.6 deg) -- below this, no orientation catch-up
-CATCHUP_FULL_ANG = 0.6            # rad (~34 deg) -- full orientation catch-up gain
-K_CATCHUP_ANG = 1.0               # P-gain (1/s) on the orientation gap (pre-clip)
-V_CATCHUP_MAX_ANG = 0.15          # rad/s -- hard cap on the catch-up angular velocity
+# --- Twist arbitration (main_shared_autonomy.compute_alpha) -----------------
+# The autonomy authority alpha (weight on the optimal policy in the blend
+#   v_blend = (1 - alpha) * v_user + alpha * pi_policy)
+# is a function ONLY of the ALIGNMENT s in [-1,1] between the user twist and the
+# policy twist (mean per-channel cosine over whichever channels the user is
+# actively commanding):
+#   alpha = ALIGN_ALPHA_MIN + (ALIGN_ALPHA_MAX - ALIGN_ALPHA_MIN) * clip(s, 0, 1)
+# Misaligned (s <= 0)  -> alpha = ALIGN_ALPHA_MIN  (policy 20%, USER 80%).
+# Aligned    (s  = 1)  -> alpha = ALIGN_ALPHA_MAX  (policy 80%, user 20%).
+# No user input (handle inside the joystick deadband, v_user = 0) is treated as
+# perfectly aligned (s = 1) so the autonomy leads the motion toward the goal.
+ALIGN_ALPHA_MIN = 0.2                # policy weight when fully misaligned (user prioritised)
+ALIGN_ALPHA_MAX = 0.8                # policy weight when fully aligned / no user input
+ALIGN_ALPHA_LPF_COEFF = 0.1          # low-pass on alpha for C0-continuity of the blend
 
 # =============================================================================
 # 2. SAFETY + CONTROL HYPERPARAMETERS
