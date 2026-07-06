@@ -74,7 +74,7 @@ JOYSTICK_NEUTRAL_ORIENTATION_XYZW = [-0.015140674076974392, 0.8170770406723022,
 # the autonomy leads the motion). 5 cm / 5 deg initial values -- to be tuned.
 JOYSTICK_DEADBAND_LIN = 0.12         # m   (12 cm) -- large: the spring can't settle to mm precision
 JOYSTICK_DEADBAND_ANG = 0.30         # rad (~17 deg) -- large: residual oscillation around home
-JOYSTICK_K_TRANS = 0.8               # (m/s) per m of handle linear displacement
+JOYSTICK_K_TRANS = 1.6               # (m/s) per m of handle linear displacement
 JOYSTICK_K_ROT = 1.5                 # (rad/s) per rad of handle angular displacement
 JOYSTICK_V_MAX_LIN = 0.10            # m/s   hard safety clamp on the commanded linear twist
 JOYSTICK_V_MAX_ANG = 0.50            # rad/s hard safety clamp on the commanded angular twist
