@@ -434,6 +434,19 @@ class TabletopPerceptionNode(Node):
         self._next_marker_id = 10   # avoid clashing with the table marker (id 0)
         self._rng = np.random.default_rng(0)
 
+        # --- No-data watchdog -----------------------------------------------
+        # Diagnoses the single most common failure mode of this node: if
+        # `cloud_topic` is never actually published (see module docstring —
+        # the upstream project's own launch file has a topic-name mismatch
+        # between its throttle output and what this node subscribes to),
+        # _cloud_callback never runs and EVERY downstream topic (including
+        # the head_plotter bridge) stays empty forever, with no other signal
+        # that anything is wrong. This makes that failure loud instead of
+        # silent.
+        self._n_clouds_received = 0
+        self._cloud_topic_name = cloud_topic
+        self.create_timer(5.0, self._watchdog_tick)
+
         self.get_logger().info(
             "\n"
             "==================================================================\n"
@@ -443,8 +456,24 @@ class TabletopPerceptionNode(Node):
             f"  target_frame : {self.target_frame}\n"
             "==================================================================")
 
+    def _watchdog_tick(self):
+        if self._n_clouds_received > 0:
+            return   # data is flowing, nothing to report
+        self.get_logger().warn(
+            f"No messages received yet on '{self._cloud_topic_name}' — "
+            "_cloud_callback has never run, so table_cloud/objects_cloud/"
+            "bounding_boxes/target_pose and the head_plotter bridge "
+            "(/head_perception/*) are all EMPTY. This is almost always why "
+            "head_plotter.py shows nothing. Check:\n"
+            f"    ros2 topic list | grep -i point\n"
+            f"    ros2 topic hz {self._cloud_topic_name}\n"
+            "If nothing publishes that topic, run cloud_relay_node.py to "
+            "bridge your real depth-camera cloud topic to it, or override "
+            "with --ros-args -p cloud_topic:=<your real topic>.")
+
     # ------------------------------------------------------------------ #
     def _cloud_callback(self, msg: PointCloud2):
+        self._n_clouds_received += 1
         _t_start = time.perf_counter()
 
         # 1. Exact-time TF lookup + transform into target_frame. No "latest

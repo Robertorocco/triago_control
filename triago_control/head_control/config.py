@@ -61,6 +61,19 @@ TABLE_TOP_CENTER_BASE = np.array(
     [TABLE_CENTER_BASE[0], TABLE_CENTER_BASE[1], TABLE_TOP_Z_WORLD - BASE_POSE_IN_WORLD[2]]
 )
 
+# WORLD MISMATCH WARNING (found 2026-07-06): the numbers above are from
+# THIS repo's own `movement_tutorial.world` (table centre x=1.00, top
+# z=0.70). The sibling chiarapanagrosso/Triago_Project stack instead
+# defaults to `world_name: handover` (qp_controller_sim.yaml), whose
+# `handover.world` "picking_table" is at a DIFFERENT pose (centre x=0.80,
+# top z=0.50). If you are running that world, TABLE_TOP_CENTER_BASE here is
+# WRONG for it and head_look_at_table.py will aim at empty space while still
+# reporting a low look-at error (it IS pointing exactly at the *wrong* point).
+# head_look_at_table.py exposes table_x / table_y / table_z ROS params so you
+# can override this per-world without editing this file; its own default is
+# z=0.8 (matching a specific request), not TABLE_TOP_Z_WORLD -- verify against
+# whichever world's actual table pose you are running and override if needed.
+
 # =============================================================================
 # 3. HEAD KINEMATICS  (identical hardware to the L/R arms — 7-DOF)
 # =============================================================================
@@ -357,6 +370,24 @@ TP_MIN_MARKER_SCALE = 0.01        # [m] floor so zero-thickness boxes stay visib
 # TF lookup tolerance at the cloud's own timestamp (no "latest" fallback, to
 # match the original node's exact-time-only lookup).
 TP_TF_TIMEOUT_S = 0.05
+
+# --- cloud_relay_node.py (bridges a real camera cloud -> TP_CLOUD_TOPIC) ---
+# ROOT CAUSE (found 2026-07-06): NOTHING in the upstream chiarapanagrosso/
+# Triago_Project stack actually publishes `/filtered_cloud`. Its own
+# perception.launch.py throttles the RealSense cloud to
+# `/throttle_filtering_points/filtered_points` (confirmed against a captured
+# sim log: MoveIt's pointcloud_octomap_updater listens to THAT name, not
+# `/filtered_cloud`) -- a topic-name mismatch/unfinished wiring in the source
+# repo itself, not something introduced by this port. Without a publisher on
+# `/filtered_cloud`, tabletop_perception_node's `_cloud_callback` never runs,
+# so every downstream topic (including the head_plotter bridge) stays empty
+# forever with no other symptom. cloud_relay_node.py exists purely to plug
+# that gap in THIS project: relay this project's own real camera cloud
+# (see Recording_Rviz.rviz, which already points at this exact topic) to
+# TP_CLOUD_TOPIC, throttled, with no PCL/topic_tools dependency required.
+TP_RELAY_SOURCE_TOPIC = "/gripper_head_camera_rgbd/depth/color/points"
+TP_RELAY_TARGET_TOPIC = TP_CLOUD_TOPIC
+TP_RELAY_RATE_HZ = 10.0
 
 # =============================================================================
 # 14. GROUND TRUTH (SIMULATION-ONLY — DIAGNOSTIC USE ONLY)
