@@ -127,7 +127,9 @@ user ACTIVE:
 - Misaligned (`s ≤ 0`) → `alpha = ALIGN_ALPHA_MIN = 0.2` → **user keeps 80%** (prioritised whenever they disagree with the policy).
 - Aligned and actively moving (`s → 1`) → `alpha = ALIGN_ALPHA_MAX = 0.8` → autonomy leads **fast** toward the goal — the robot only goes fast once the user pushes in a direction the policy agrees with.
 
-Belief still selects *which* goal's policy is `pi_policy`; `alpha` only arbitrates authority. The user twist arrives already deadbanded to zero inside the joystick's home deadband (done teleop-side), so residual handle noise can never creep the arm. This replaces the deprecated belief×distance-gated blend + F_sync force-feedback design, whose force-into-handle path formed an unstable feedback loop.
+Belief still selects *which* goal's policy is `pi_policy`; `alpha` only arbitrates authority. The user twist arrives already deadbanded to zero inside the joystick's home deadband (done teleop-side), so residual handle noise can never creep the arm.
+
+**Blending is active in every user-controlled state** — `SHARED_AUTONOMY`, `PRE_GRASP`, and `HOLDING` — i.e. all states *except* the autonomous grasp-execution ones (`GRASP_ALIGN/APPROACH/CLOSE`, `LIFT`, `RELEASE_LIFT`, `ABORT_RETREAT`), where `grasp_active` suspends the joystick and the state machine drives the arm. So the operator keeps steering while hovering in `PRE_GRASP` (until they trigger the grasp) and while carrying an object in `HOLDING` (until they trigger the release). The persistent `T_blend_ref` latch re-anchors to the live EE on each transition back into a user-controlled state, so control resumes with no jump. This replaces the deprecated belief×distance-gated blend + F_sync force-feedback design, whose force-into-handle path formed an unstable feedback loop.
 
 **Telemetry**: `/shared_autonomy/blend_debug` (19 floats: `[alpha, v_user(6), v_policy(6), v_blend(6)]`), published every tick regardless of `cfg.BLENDING`.
 

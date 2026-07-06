@@ -1270,7 +1270,16 @@ class SharedControlNode(Node):
         if tick_output.release_object:
             self._release_object()
 
-        blend_active = cfg.BLENDING and tick_output.new_state == "SHARED_AUTONOMY"
+        # Joystick teleop is blended in every USER-CONTROLLED state
+        # (SHARED_AUTONOMY, PRE_GRASP, HOLDING) -- i.e. everything EXCEPT the
+        # autonomous grasp-execution states (GRASP_*/LIFT/RELEASE_LIFT/
+        # ABORT_RETREAT), where grasp_active suspends the teleop and the state
+        # machine drives the arm to completion. Previously this was gated on
+        # SHARED_AUTONOMY only, which left the operator's joystick DEAD in
+        # PRE_GRASP (aligned/ready-to-grasp) and HOLDING (driving to place) --
+        # the user could only trigger the grasp, not keep steering.
+        blend_active = cfg.BLENDING and tick_output.new_state in (
+            "SHARED_AUTONOMY", "PRE_GRASP", "HOLDING")
         if blend_active:
             # Joystick-mode arbitration (2026-07-06). The user twist arrives already
             # deadbanded to zero inside the joystick's home deadband (done in

@@ -82,11 +82,11 @@ JOYSTICK_V_MAX_ANG = 0.50            # rad/s hard safety clamp on the commanded 
 # --- Home-orientation rebasing scale ---------------------------------------
 # The gripper's rotation away from its startup reference is scaled DOWN by this
 # factor when building the handle's home orientation (gripper 90 deg -> handle
-# 72 deg), so the handle's rest orientation tracks the gripper closely (feels
+# 75 deg), so the handle's rest orientation tracks the gripper closely (feels
 # synchronized) while still staying within the Haption's more restrictive
 # rotational workspace. Applies ONLY to the home-pose construction, NOT to the
 # commanded twist. LOWER -> stronger sync (1.0 = 1:1); higher -> looser.
-JOYSTICK_ROT_HOME_SCALE = 1.25
+JOYSTICK_ROT_HOME_SCALE = 1.2
 
 # --- Restorative centering spring (haptic_force_manager_blending_tutorial.py) --
 # The ONLY haptic force rendered in joystick mode: a virtual spring-damper pulling
