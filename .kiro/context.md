@@ -133,6 +133,8 @@ Belief still selects *which* goal's policy is `pi_policy`; `alpha` only arbitrat
 
 **Telemetry**: `/shared_autonomy/blend_debug` (19 floats: `[alpha, v_user(6), v_policy(6), v_blend(6)]`), published every tick regardless of `cfg.BLENDING`.
 
+**Operator guidance overlay** (`/joystick/guidance_markers`, `_publish_joystick_guidance`): an egocentric RViz cue anchored at the real EE — an **ORANGE** gripper+arrow in the direction the handle is *currently commanding* (`v_user`, hidden when the handle is centered), a **GREEN** gripper+arrow in the direction the autonomy *suggests* (`pi_policy`), and a white text label of the live mode (`AUTOPILOT` / `ALIGNED → assisting` / `OVERRIDE → you lead`). Direction-normalized (fixed offset from the EE) since the arbitration keys on twist *direction*: lining orange onto green = aligned = full-speed assist. Cleared during autonomous grasp phases.
+
 ### 5.3 Bimanual State
 
 Each arm owns an independent `GraspStateMachine` + `BeliefEstimator` + grasped-color + goal-set placement context; the inactive arm's FSM/belief are simply not stepped. Goal exclusion is the *union* over both arms. A cylinder-vs-cylinder CBF pair prevents two held objects from inter-penetrating.

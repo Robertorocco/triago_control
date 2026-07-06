@@ -459,6 +459,14 @@ class SharedControlNode(Node):
         # simultaneously (independently toggleable in RViz) so the operator can
         # switch between them to judge which is more intuitive.
         self.pub_blended_ref_marker = self.create_publisher(MarkerArray, '/blended_reference_marker', 10)
+        # --- Joystick guidance overlay (operator cue, joystick mode) ---
+        # An egocentric "how do I drive this" display: ORANGE gripper+arrow = the
+        # direction your handle is CURRENTLY commanding (hidden when centered);
+        # GREEN gripper+arrow = the direction the autonomy SUGGESTS; white text =
+        # the live authority mode. Lining ORANGE onto GREEN means "aligned" -> the
+        # blend hands the autonomy full authority and you move fast toward the goal
+        # (this is literally what compute_alpha rewards). See _publish_joystick_guidance.
+        self.pub_joystick_guidance = self.create_publisher(MarkerArray, '/joystick/guidance_markers', 10)
         # Bug fix: this used to be assigned a second time later in __init__,
         # silently leaking the first TransformBroadcaster. Assigned exactly once.
         self.tf_broadcaster = TransformBroadcaster(self)
@@ -1308,6 +1316,13 @@ class SharedControlNode(Node):
                                 + list(map(float, target_twist)))
         self.pub_blend_debug.publish(blend_debug_msg)
 
+        # Joystick guidance overlay: show the operator what they are commanding
+        # (orange) vs what the autonomy suggests (green), plus the live mode.
+        if cfg.BLENDING:
+            self._publish_joystick_guidance(
+                self.current_v_h, tick_output.target_twist, self.last_alpha,
+                self.current_T_EE, blend_active)
+
         # --- AUTHORITY HANDOVER + HAPTIC FIXTURE STATE ---
         # During autonomous grasp execution (approach/close/lift) the node DRIVES
         # the arm directly (see section 6) and the Haption teleop must yield.
@@ -1852,6 +1867,115 @@ class SharedControlNode(Node):
         for pub in (self.pub_markers, self.pub_guidance_marker, self.pub_robot_policy_marker,
                     self.pub_blended_ref_marker):
             pub.publish(ma)
+
+    # ------------------------------------------------------------------
+    # JOYSTICK GUIDANCE OVERLAY (operator cue)
+    # ------------------------------------------------------------------
+    JOYSTICK_GUIDE_DISP = 0.15   # m, fixed offset of the direction grippers from the EE
+
+    def _direction_gripper_pose(self, T_EE, twist, disp_dist=None):
+        """Pose of a gripper placed a FIXED distance from the EE along a twist's direction.
+
+        Direction-normalized on purpose: the arbitration cares about the DIRECTION
+        of the twist (its alignment), not its magnitude, so both the user and the
+        policy grippers sit at the same offset and can be compared by eye. The
+        gripper is also rotated by the twist's (capped) angular part so rotational
+        intent shows too. Returns None if the twist is ~zero (nothing to show).
+        """
+        if disp_dist is None:
+            disp_dist = self.JOYSTICK_GUIDE_DISP
+        twist = np.asarray(twist, dtype=float)
+        ln = float(np.linalg.norm(twist[:3]))
+        an = float(np.linalg.norm(twist[3:]))
+        if ln < 1e-6 and an < 1e-6:
+            return None
+        scale = (disp_dist / ln) if ln > 1e-6 else (disp_dist / an)
+        disp = twist * scale
+        rn = float(np.linalg.norm(disp[3:]))
+        if rn > 0.6:                       # cap the shown rotation so it stays readable
+            disp[3:] *= (0.6 / rn)
+        return self.integrate_twist(T_EE, disp, 1.0)
+
+    def _make_text_marker(self, T_EE, text, now, ns="joystick_label"):
+        """Floating white TEXT_VIEW_FACING label above the EE."""
+        m = Marker()
+        m.header.frame_id = "base_footprint"
+        m.header.stamp = now
+        m.ns = ns
+        m.id = 0
+        m.type = Marker.TEXT_VIEW_FACING
+        m.action = Marker.ADD
+        m.pose.position.x = float(T_EE[0, 3])
+        m.pose.position.y = float(T_EE[1, 3])
+        m.pose.position.z = float(T_EE[2, 3] + 0.25)
+        m.pose.orientation.w = 1.0
+        m.scale.z = 0.05
+        m.color.r, m.color.g, m.color.b, m.color.a = 1.0, 1.0, 1.0, 0.95
+        m.text = text
+        m.lifetime.sec = 1
+        m.lifetime.nanosec = 500000000
+        return m
+
+    def _publish_joystick_guidance(self, v_user, pi_policy, alpha, T_EE, active):
+        """Operator overlay: ORANGE = your command, GREEN = suggested, + mode label.
+
+        Anchored at the real EE. ORANGE (your handle's current command) is hidden
+        when the handle is centered; GREEN (the belief-weighted policy) is hidden
+        when there is nothing to suggest. Cleared entirely during autonomous grasp
+        phases (active=False), when the joystick isn't in charge.
+        """
+        ma = MarkerArray()
+        now = self.get_clock().now().to_msg()
+
+        if not active:
+            clear = Marker()
+            clear.action = Marker.DELETEALL
+            ma.markers.append(clear)
+            self.pub_joystick_guidance.publish(ma)
+            return
+
+        GREEN = (0.1, 0.9, 0.1)
+        ORANGE = (1.0, 0.55, 0.0)
+        ee_pos = [float(T_EE[0, 3]), float(T_EE[1, 3]), float(T_EE[2, 3])]
+
+        # SUGGESTED (green): where the autonomy wants to go.
+        T_sug = self._direction_gripper_pose(T_EE, pi_policy)
+        if T_sug is not None:
+            ma.markers.extend(self.create_gripper_markers(
+                T_sug, 0.9, 0, now, ns="joystick_suggested", rgb=GREEN))
+            ma.markers.append(self._make_arrow(
+                "joystick_suggested_arrow", 0, ee_pos,
+                [float(T_sug[0, 3]), float(T_sug[1, 3]), float(T_sug[2, 3])],
+                (*GREEN, 0.9), now))
+        else:
+            ma.markers.extend(self._delete_gripper_markers(0, now, ns="joystick_suggested"))
+
+        # YOUR COMMAND (orange): where the handle is pushing (hidden at rest).
+        T_usr = self._direction_gripper_pose(T_EE, v_user)
+        if T_usr is not None:
+            ma.markers.extend(self.create_gripper_markers(
+                T_usr, 0.9, 0, now, ns="joystick_user", rgb=ORANGE))
+            ma.markers.append(self._make_arrow(
+                "joystick_user_arrow", 0, ee_pos,
+                [float(T_usr[0, 3]), float(T_usr[1, 3]), float(T_usr[2, 3])],
+                (*ORANGE, 0.9), now))
+        else:
+            ma.markers.extend(self._delete_gripper_markers(0, now, ns="joystick_user"))
+
+        # Mode label: what is happening right now.
+        user_active = (float(np.linalg.norm(v_user[:3])) > 1e-6
+                       or float(np.linalg.norm(v_user[3:])) > 1e-6)
+        if not user_active:
+            label = "AUTOPILOT  (handle centered -> robot drives to goal)"
+        elif alpha >= 0.6:
+            label = "ALIGNED -> assisting  (orange on green = go fast)"
+        elif alpha <= 0.4:
+            label = "OVERRIDE -> you lead"
+        else:
+            label = "BLENDING"
+        ma.markers.append(self._make_text_marker(T_EE, label, now))
+
+        self.pub_joystick_guidance.publish(ma)
 
     def publish_grasp_guidance(self, T_EE, T_goal, pos_error, ang_error, now=None):
         """Draw 'how to move to satisfy the grasp condition' cues on the gripper (legacy wrapper)."""
