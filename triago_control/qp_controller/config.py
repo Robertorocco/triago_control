@@ -41,7 +41,7 @@ ORIENTATION_CTRL = True         # True = control Pos+Ori (6DOF), False = Pos onl
 # grasp execution or POLICY_BELIEF_TEST. True = main_shared_autonomy.py persistently
 # blends v_blend = (1-alpha)*v_user + alpha*pi_policy and is the sole writer of
 # /arm_*/cartesian_reference even in normal teleop.
-BLENDING = False
+BLENDING = True
 
 # alpha(belief) shaping -- see main_shared_autonomy.compute_alpha. x = normalised
 # belief in [0,1]. alpha = ALPHA_MAX * x**ALPHA_GAMMA.
