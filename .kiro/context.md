@@ -133,7 +133,7 @@ Belief still selects *which* goal's policy is `pi_policy`; `alpha` only arbitrat
 
 **Telemetry**: `/shared_autonomy/blend_debug` (19 floats: `[alpha, v_user(6), v_policy(6), v_blend(6)]`), published every tick regardless of `cfg.BLENDING`.
 
-**Operator guidance overlay** (`/joystick/guidance_markers`, `_publish_joystick_guidance`): an egocentric RViz cue anchored at the real EE — an **ORANGE** gripper+arrow in the direction the handle is *currently commanding* (`v_user`, hidden when the handle is centered), a **GREEN** gripper+arrow in the direction the autonomy *suggests* (`pi_policy`), and a white text label of the live mode (`AUTOPILOT` / `ALIGNED → assisting` / `OVERRIDE → you lead`). Direction-normalized (fixed offset from the EE) since the arbitration keys on twist *direction*: lining orange onto green = aligned = full-speed assist. Cleared during autonomous grasp phases.
+**Operator marker** (`/blended_reference_marker`): the single gripper the operator watches while teleoperating — the pose actually being tracked (`T_virtual_ref`, the reference published to `/arm_*/cartesian_reference`, integrated consistently from the blended twist). Colored by who is currently driving it: **GREEN** = tracking the policy (hands-off autopilot, or the user's twist agrees so the policy dominates, `alpha ≥ 0.5`); **ORANGE** = listening to the user's twist intention (the user is actively overriding). This is the primary teleop cue; the other predictive markers (`/guidance_policy_marker`, `/robot_policy_marker`) can be left disabled in RViz.
 
 ### 5.3 Bimanual State
 

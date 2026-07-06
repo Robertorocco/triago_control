@@ -72,8 +72,8 @@ JOYSTICK_NEUTRAL_ORIENTATION_XYZW = [-0.015140674076974392, 0.8170770406723022,
 # from home, past a deadband. Deadband: displacement below these -> zero twist
 # (and, in the arbitration, a zero user twist is treated as perfectly ALIGNED so
 # the autonomy leads the motion). 5 cm / 5 deg initial values -- to be tuned.
-JOYSTICK_DEADBAND_LIN = 0.06         # m   (6 cm) -- large: the spring can't settle to mm precision
-JOYSTICK_DEADBAND_ANG = 0.15         # rad (~8.6 deg) -- large: residual oscillation around home
+JOYSTICK_DEADBAND_LIN = 0.12         # m   (12 cm) -- large: the spring can't settle to mm precision
+JOYSTICK_DEADBAND_ANG = 0.30         # rad (~17 deg) -- large: residual oscillation around home
 JOYSTICK_K_TRANS = 0.8               # (m/s) per m of handle linear displacement
 JOYSTICK_K_ROT = 1.5                 # (rad/s) per rad of handle angular displacement
 JOYSTICK_V_MAX_LIN = 0.10            # m/s   hard safety clamp on the commanded linear twist
@@ -82,11 +82,11 @@ JOYSTICK_V_MAX_ANG = 0.50            # rad/s hard safety clamp on the commanded 
 # --- Home-orientation rebasing scale ---------------------------------------
 # The gripper's rotation away from its startup reference is scaled DOWN by this
 # factor when building the handle's home orientation (gripper 90 deg -> handle
-# 75 deg), so the handle's rest orientation tracks the gripper closely (feels
+# ~69 deg), so the handle's rest orientation tracks the gripper closely (feels
 # synchronized) while still staying within the Haption's more restrictive
 # rotational workspace. Applies ONLY to the home-pose construction, NOT to the
 # commanded twist. LOWER -> stronger sync (1.0 = 1:1); higher -> looser.
-JOYSTICK_ROT_HOME_SCALE = 1.2
+JOYSTICK_ROT_HOME_SCALE = 1.3
 
 # --- Restorative centering spring (haptic_force_manager_blending_tutorial.py) --
 # The ONLY haptic force rendered in joystick mode: a virtual spring-damper pulling
