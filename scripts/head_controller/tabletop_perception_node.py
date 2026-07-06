@@ -52,8 +52,38 @@ adapt, not to redesign the tracking logic).
 TF: exact-time-only lookup at the cloud's own header stamp (no "latest
 available" fallback) — matches the original node's
 `tf2::durationFromSec(0.05)` timeout with no secondary attempt.
+
+HEAD_PLOTTER BRIDGE (additive — does not change anything above)
+    head_plotter.py (the existing dashboard for main_head.py's cylinder
+    pipeline) expects a specific schema:
+        /head_perception/markers    MarkerArray with ns="objects" CYLINDER
+                                     markers (colour red/blue) + ns="table_top"
+                                     CUBE.
+        /head_perception/telemetry  Float64MultiArray
+                                     [n_raw, n_crop, plane_z, look_err_deg,
+                                      slack, proc_ms, red_conf, blue_conf,
+                                      map_size]
+    This node has neither cylinders nor colour, so a like-for-like feed is
+    impossible; instead this bridge re-expresses what this node DOES have
+    (OBB targets/obstacles, table plane) in that same schema so the SAME
+    dashboard can display this pipeline's output without modification:
+        * every tracked target/obstacle -> one CYLINDER marker (ns="objects")
+          sized from the OBB's footprint diameter/height. Targets are tinted
+          red (r>0.5) so the plotter's "red vs blue" classifier bins them as
+          "red"; obstacles are tinted blue (b>0.5) so they land in the "blue"
+          series. This is a display convenience only — it does NOT mean this
+          node performs colour classification, and it has zero effect on the
+          real /perception/* outputs above.
+        * the table AABB -> one ns="table_top" CUBE at the detected surface Z.
+        * telemetry fields that have no equivalent here (look_err_deg, slack,
+          red_conf/blue_conf) are published as 0.0 rather than invented.
+    Fields NOT read by head_plotter.py's GT/error columns still render (the
+    plotter's GT_RED/GT_BLUE circles are unrelated to this generic pipeline);
+    this bridge is about making live detections visible, not about matching
+    the cylinder ground truth.
 """
 
+import time
 from dataclasses import dataclass
 
 import numpy as np
@@ -69,7 +99,7 @@ import tf2_ros
 from sensor_msgs.msg import PointCloud2, PointField
 from geometry_msgs.msg import PoseStamped
 from visualization_msgs.msg import Marker, MarkerArray
-from std_msgs.msg import ColorRGBA
+from std_msgs.msg import ColorRGBA, Float64MultiArray
 
 import triago_control.head_control.config as cfg
 
@@ -388,6 +418,17 @@ class TabletopPerceptionNode(Node):
         self.table_pose_publisher = self.create_publisher(
             PoseStamped, "perception/table_pose", 10)
 
+        # --- head_plotter.py bridge (additive, see module docstring) -------
+        publish_to_head_plotter = self.declare_parameter(
+            "publish_to_head_plotter", True).value
+        self._head_plotter_markers_pub = None
+        self._head_plotter_telemetry_pub = None
+        if publish_to_head_plotter:
+            self._head_plotter_markers_pub = self.create_publisher(
+                MarkerArray, "/head_perception/markers", 1)
+            self._head_plotter_telemetry_pub = self.create_publisher(
+                Float64MultiArray, "/head_perception/telemetry", 10)
+
         # --- Memory tracking state ----------------------------------------
         self._tracked_objects = []
         self._next_marker_id = 10   # avoid clashing with the table marker (id 0)
@@ -404,6 +445,8 @@ class TabletopPerceptionNode(Node):
 
     # ------------------------------------------------------------------ #
     def _cloud_callback(self, msg: PointCloud2):
+        _t_start = time.perf_counter()
+
         # 1. Exact-time TF lookup + transform into target_frame. No "latest
         #    available" fallback — matches the original node's single
         #    exact-stamp attempt with a 0.05s tf2 timeout.
@@ -555,6 +598,72 @@ class TabletopPerceptionNode(Node):
         self.table_publisher.publish(_make_xyz_pointcloud2(cloud_table, frame_id, stamp))
         self.objects_publisher.publish(_make_xyz_pointcloud2(cloud_objects, frame_id, stamp))
         self.bbox_publisher.publish(marker_array)
+
+        # 9. head_plotter.py bridge (additive — see module docstring).
+        if self._head_plotter_markers_pub is not None:
+            proc_ms = (time.perf_counter() - _t_start) * 1000.0
+            self._publish_head_plotter_bridge(
+                frame_id, stamp, table_surface_z, len(points), len(cloud_objects), proc_ms)
+
+    def _publish_head_plotter_bridge(self, frame_id, stamp, table_surface_z,
+                                      n_raw, n_crop, proc_ms):
+        """Re-express this node's OBB tracks in head_plotter.py's expected
+        schema (ns="objects" CYLINDER markers + ns="table_top" CUBE +
+        9-element telemetry array). See module docstring for the exact
+        mapping and its limits (no colour/GT here — display only)."""
+        markers = MarkerArray()
+
+        table_marker = Marker()
+        table_marker.header.frame_id = frame_id
+        table_marker.header.stamp = stamp
+        table_marker.ns = "table_top"
+        table_marker.id = 0
+        table_marker.type = Marker.CUBE
+        table_marker.action = Marker.ADD
+        table_marker.pose.position.z = table_surface_z
+        table_marker.pose.orientation.w = 1.0
+        table_marker.scale.x = float(cfg.TABLE_SIZE[0])
+        table_marker.scale.y = float(cfg.TABLE_SIZE[1])
+        table_marker.scale.z = 0.005
+        table_marker.color = ColorRGBA(r=0.1, g=0.9, b=0.3, a=0.6)
+        markers.markers.append(table_marker)
+
+        for i, tracked in enumerate(self._tracked_objects):
+            cyl = Marker()
+            cyl.header.frame_id = frame_id
+            cyl.header.stamp = stamp
+            cyl.ns = "objects"
+            cyl.id = 10 + i
+            cyl.type = Marker.CYLINDER
+            cyl.action = Marker.ADD
+            cyl.pose.position.x = float(tracked.position[0])
+            cyl.pose.position.y = float(tracked.position[1])
+            cyl.pose.position.z = float(tracked.position[2])
+            cyl.pose.orientation.w = 1.0
+            footprint_diameter = float(max(tracked.dimensions[0], tracked.dimensions[1]))
+            cyl.scale.x = max(footprint_diameter, cfg.TP_MIN_MARKER_SCALE)
+            cyl.scale.y = max(footprint_diameter, cfg.TP_MIN_MARKER_SCALE)
+            cyl.scale.z = max(float(tracked.dimensions[2]), cfg.TP_MIN_MARKER_SCALE)
+            # Display-only tint so head_plotter's red/blue classifier can bin
+            # target vs. obstacle — NOT a colour classification of the object.
+            if tracked.is_obstacle:
+                cyl.color = ColorRGBA(r=0.1, g=0.3, b=1.0, a=0.9)   # -> "blue" bin
+            else:
+                cyl.color = ColorRGBA(r=1.0, g=0.1, b=0.1, a=0.9)   # -> "red" bin
+            markers.markers.append(cyl)
+
+        self._head_plotter_markers_pub.publish(markers)
+
+        telemetry = Float64MultiArray()
+        # [n_raw, n_crop, plane_z, look_err_deg, slack, proc_ms, red_conf,
+        #  blue_conf, map_size] — this node has no look-at controller or
+        # colour confidence, so those fields are honestly reported as 0.0
+        # rather than invented (see module docstring).
+        telemetry.data = [
+            float(n_raw), float(n_crop), float(table_surface_z),
+            0.0, 0.0, float(proc_ms), 0.0, 0.0, float(len(self._tracked_objects)),
+        ]
+        self._head_plotter_telemetry_pub.publish(telemetry)
 
 
 def main():

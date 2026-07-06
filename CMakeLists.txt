@@ -32,6 +32,7 @@ install(PROGRAMS
   scripts/head_controller/calibration_audit.py
   scripts/head_controller/qp_head_visual_servo.py
   scripts/head_controller/tabletop_perception_node.py
+  scripts/head_controller/head_look_at_table.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
