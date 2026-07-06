@@ -73,6 +73,17 @@ SYNC_F_MIN = 1.0          # N -- linear sync force magnitude at SYNC_D_MAX (far)
 USER_TWIST_DEADBAND_LIN = 0.005   # m/s
 USER_TWIST_DEADBAND_ANG = 0.02    # rad/s
 
+# Minimum autonomous policy speed floor (main_shared_autonomy.py, blend path).
+# The policy twist is clamped to the user's own magnitude so the user sets the
+# pace -- but with a FLOOR so the autonomy can still make SLOW progress toward
+# the belief-inferred goal even when the user is still (a still user no longer
+# means a frozen robot). The effective idle speed is alpha * V_POLICY_MIN, i.e.
+# gated by belief AND the distance gate, so it only crawls forward when the
+# system is confident and matched. Set to 0 to recover the strict "user sets the
+# pace, still user = frozen" behavior.
+V_POLICY_MIN_LIN = 0.02    # m/s  -- slow autonomous cruise when the user is idle
+V_POLICY_MIN_ANG = 0.05    # rad/s
+
 # Distance-based assistance-intensity boost: compensates pi_policy's natural falloff
 # near the goal so the approach can actually conclude, capped so full autonomy is
 # never reached even at the goal. Smoothstep-shaped in EE-to-goal distance.

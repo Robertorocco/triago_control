@@ -1252,8 +1252,12 @@ class SharedControlNode(Node):
             # Magnitude-fair blend: clamp the policy twist's magnitude to the
             # user's own (per linear/angular channel) BEFORE blending, so a small
             # user twist is never overwhelmed by the large saturated policy twist
-            # -- the user sets the speed, alpha sets the direction mix.
-            v_policy_clamped = self._clamp_twist_to(tick_output.target_twist, v_user)
+            # -- the user sets the pace, alpha sets the direction mix. The floor
+            # (V_POLICY_MIN_*) lets the autonomy still crawl slowly toward the
+            # goal when the user is still: idle speed = alpha * V_POLICY_MIN.
+            v_policy_clamped = self._clamp_twist_to(
+                tick_output.target_twist, v_user,
+                cfg.V_POLICY_MIN_LIN, cfg.V_POLICY_MIN_ANG)
             target_twist = (1 - alpha) * v_user + alpha * v_policy_clamped
         else:
             alpha = 0.0
@@ -2099,27 +2103,32 @@ class SharedControlNode(Node):
         return t * t * (3.0 - 2.0 * t)
 
     @staticmethod
-    def _clamp_twist_to(v_policy, v_user):
-        """Clamp the policy twist's magnitude to the user's own, per channel.
+    def _clamp_twist_to(v_policy, v_user, v_min_lin=0.0, v_min_ang=0.0):
+        """Clamp the policy twist's magnitude per channel to max(user, floor).
 
         The blend v = (1-alpha)*v_user + alpha*v_policy is only fair if the two
-        twists are comparable in magnitude. pi_policy is a large, saturated
+        twists are comparable in magnitude: pi_policy is a large, saturated
         velocity while comfortable hand motion is much smaller, so a small user
         twist would be overwhelmed even when alpha favours the user. Clamping the
         policy's LINEAR and ANGULAR norms so neither exceeds the user's own
-        (direction preserved) means the USER sets the overall speed and alpha
-        only sets the DIRECTION mix. In particular a still user (v_user ~ 0)
-        clamps the policy to ~0, so the autonomy can never lead a stationary
-        user around.
+        (direction preserved) means the USER sets the pace and alpha only sets
+        the DIRECTION mix.
+
+        v_min_lin / v_min_ang add a FLOOR to that cap: the policy may always keep
+        at least this speed even when the user is still, so the autonomy can make
+        SLOW progress toward the belief-inferred goal on its own (still gated by
+        alpha = belief * dist_gate, so the effective idle speed is alpha*v_min --
+        it only crawls forward when confident + matched). With v_min = 0 this
+        reduces to the strict "user sets the pace, still user = frozen" clamp.
         """
         vp = np.asarray(v_policy, dtype=float).copy()
         vu = np.asarray(v_user, dtype=float)
         pl = float(np.linalg.norm(vp[0:3]))
-        ul = float(np.linalg.norm(vu[0:3]))
+        ul = max(float(np.linalg.norm(vu[0:3])), float(v_min_lin))
         if pl > ul and pl > 1e-9:
             vp[0:3] *= (ul / pl)
         pa = float(np.linalg.norm(vp[3:6]))
-        ua = float(np.linalg.norm(vu[3:6]))
+        ua = max(float(np.linalg.norm(vu[3:6])), float(v_min_ang))
         if pa > ua and pa > 1e-9:
             vp[3:6] *= (ua / pa)
         return vp
