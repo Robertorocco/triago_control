@@ -158,71 +158,53 @@
     </model>
 
     <!-- ================================================================
-         STORAGE RACK: new for this world. An open steel shelving frame
-         that STRADDLES the work table: four vertical legs standing on the
-         floor at the table corners (outside the table footprint and the
-         cylinder line, so the side/front reach stays open) plus one
-         horizontal shelf whose underside sits ~0.50 m above the table top
-         (z = 1.20), directly over BOTH cylinders. The shelf forms a ceiling
-         that blocks the vertical top-grasp corridor, so the operator must
-         grasp the cylinders from the SIDE. Matches config/worlds/
-         rack_world.yaml's rack_* entries exactly (absolute poses; the model
-         pose below is the world origin so every sub-pose is absolute).
+         STORAGE RACK: new for this world. A shelf carried by TWO rear posts
+         standing on the floor just behind the table (the two FRONT posts were
+         removed: they sat near the robot and collided with it at spawn). The
+         horizontal shelf cantilevers forward from the rear posts; its underside
+         sits ~0.40 m above the table top (z = 1.10), directly over BOTH
+         cylinders. The shelf forms a ceiling that blocks the vertical top-grasp
+         corridor, so the operator must grasp the cylinders from the SIDE.
+         Matches config/worlds/rack_world.yaml's rack_* entries exactly
+         (absolute poses; the model pose below is the world origin so every
+         sub-pose is absolute).
     ================================================================ -->
     <model name="storage_rack">
       <static>true</static>
       <pose>0 0 0 0 0 0</pose>
       <link name="link">
 
-        <!-- Horizontal shelf (ceiling over the cylinders), underside at z=1.20 -->
+        <!-- Horizontal shelf (ceiling over the cylinders), underside at z=1.10 -->
         <collision name="shelf_col">
-          <pose>1.00 0.0 1.22 0 0 0</pose>
+          <pose>1.00 0.0 1.12 0 0 0</pose>
           <geometry><box><size>0.66 0.94 0.04</size></box></geometry>
         </collision>
         <visual name="shelf_vis">
-          <pose>1.00 0.0 1.22 0 0 0</pose>
+          <pose>1.00 0.0 1.12 0 0 0</pose>
           <geometry><box><size>0.66 0.94 0.04</size></box></geometry>
           <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
         </visual>
 
-        <!-- Four vertical legs, floor (z=0) up to the shelf underside (z=1.20) -->
-        <collision name="leg_fl_col">
-          <pose>0.70 -0.42 0.60 0 0 0</pose>
-          <geometry><box><size>0.05 0.05 1.20</size></box></geometry>
-        </collision>
-        <visual name="leg_fl_vis">
-          <pose>0.70 -0.42 0.60 0 0 0</pose>
-          <geometry><box><size>0.05 0.05 1.20</size></box></geometry>
-          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
-        </visual>
-
-        <collision name="leg_fr_col">
-          <pose>0.70 0.42 0.60 0 0 0</pose>
-          <geometry><box><size>0.05 0.05 1.20</size></box></geometry>
-        </collision>
-        <visual name="leg_fr_vis">
-          <pose>0.70 0.42 0.60 0 0 0</pose>
-          <geometry><box><size>0.05 0.05 1.20</size></box></geometry>
-          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
-        </visual>
-
+        <!-- Two REAR vertical legs, floor (z=0) up to the shelf underside (z=1.10).
+             Front legs removed (collided with the robot at spawn); the shelf now
+             cantilevers forward from these rear posts. -->
         <collision name="leg_bl_col">
-          <pose>1.30 -0.42 0.60 0 0 0</pose>
-          <geometry><box><size>0.05 0.05 1.20</size></box></geometry>
+          <pose>1.30 -0.42 0.55 0 0 0</pose>
+          <geometry><box><size>0.05 0.05 1.10</size></box></geometry>
         </collision>
         <visual name="leg_bl_vis">
-          <pose>1.30 -0.42 0.60 0 0 0</pose>
-          <geometry><box><size>0.05 0.05 1.20</size></box></geometry>
+          <pose>1.30 -0.42 0.55 0 0 0</pose>
+          <geometry><box><size>0.05 0.05 1.10</size></box></geometry>
           <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
         </visual>
 
         <collision name="leg_br_col">
-          <pose>1.30 0.42 0.60 0 0 0</pose>
-          <geometry><box><size>0.05 0.05 1.20</size></box></geometry>
+          <pose>1.30 0.42 0.55 0 0 0</pose>
+          <geometry><box><size>0.05 0.05 1.10</size></box></geometry>
         </collision>
         <visual name="leg_br_vis">
-          <pose>1.30 0.42 0.60 0 0 0</pose>
-          <geometry><box><size>0.05 0.05 1.20</size></box></geometry>
+          <pose>1.30 0.42 0.55 0 0 0</pose>
+          <geometry><box><size>0.05 0.05 1.10</size></box></geometry>
           <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
         </visual>
 
