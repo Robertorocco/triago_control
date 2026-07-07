@@ -1501,11 +1501,28 @@ class SharedControlNode(Node):
                 if not self._blend_ref_valid:
                     self.T_blend_ref = self.current_T_EE.copy()
                     self._blend_ref_valid = True
-                # Advance the latch by the ACTUAL commanded twist over one tick
-                # (true dt, not a lead): target_twist=0 -> latch holds fixed ->
+
+                # --- Recompute the policy FROM the latch position ----------------
+                # The ee_policies (and thus pi_max/target_twist) were computed from
+                # current_T_EE. But T_blend_ref can be up to 10cm ahead/aside. If we
+                # integrate the EE-anchored policy from the latch's position, the
+                # direction is wrong (it was computed for a DIFFERENT starting point)
+                # and the marker spirals or overshoots. Fix: re-evaluate the policy
+                # from WHERE THE LATCH ACTUALLY IS so the integrated twist always
+                # points from the marker toward the goal.
+                if self.J_c is not None and self.h_c is not None:
+                    v_geo_ref = self.compute_v_geo(self.T_blend_ref, T_active_goal)
+                    pi_ref = self.solve_local_policy(v_geo_ref, self.J_c, self.h_c)
+                    # Re-blend with the same alpha and user twist
+                    target_twist_ref = (1.0 - alpha) * v_user + alpha * pi_ref
+                else:
+                    target_twist_ref = target_twist
+
+                # Advance the latch by the latch-anchored blended twist over one
+                # tick (true dt, not a lead): target_twist=0 -> latch holds fixed ->
                 # absolute SE(3) hold.
                 self.T_blend_ref = self.integrate_twist(
-                    self.T_blend_ref, target_twist, 1.0 / self.CONTROL_HZ)
+                    self.T_blend_ref, target_twist_ref, 1.0 / self.CONTROL_HZ)
                 # Bound how far the latch may lead the real EE during sustained
                 # motion (the downstream reference governor also clamps this).
                 # Keeps any "keeps gliding after you stop" strictly small: on
@@ -1545,7 +1562,9 @@ class SharedControlNode(Node):
             p_ref = T_virtual_ref[:3, 3]
             rpy_ref = R.from_matrix(T_virtual_ref[:3, :3]).as_euler('xyz')
 
-            cmd_data = np.concatenate((p_ref, rpy_ref, target_twist, [self.TASK_DIM]))
+            cmd_data = np.concatenate((p_ref, rpy_ref,
+                                       target_twist_ref if use_persistent else target_twist,
+                                       [self.TASK_DIM]))
             msg_cmd = Float64MultiArray()
             msg_cmd.data = cmd_data.tolist()
 
