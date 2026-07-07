@@ -43,6 +43,21 @@ Two-stage state machine (identical philosophy to qp_head_visual_servo.py):
     error to a camera twist. This channel simultaneously centres the hand
     (u,v -> image centre) AND regulates the stand-off (Z -> TARGET_DISTANCE).
 
+ROLL ALIGNMENT (soft "up-righting", never inverted)
+---------------------------------------------------
+Point tracking leaves the camera roll about the optical axis unconstrained, so
+the view could drift to any roll (including upside-down). A SOFT preference
+aligns the image-right axis (camera X) with the world "right" direction
+(WORLD_RIGHT = world -Y): the signed roll error `theta = atan2(d_y, d_x)`, where
+`d = R_cam^T * WORLD_RIGHT`, is regulated by a roll rate `wz = K_ROLL_ALIGN*theta`
+about the optical axis (dtheta/dt = -wz). It is added as a LOW-WEIGHT
+least-squares term in the QP cost (NOT an equality row), so it only consumes the
+redundancy left after centering + stand-off and can never override tracking; a
+centering gate additionally fades it out during FOV acquisition, and a gimbal
+guard disables it when world-right is ~parallel to the optical axis. The optical
+axis itself stays completely free (the head may view the hand from above or
+below) — the image simply won't roll past vertical / go upside-down.
+
 RUN:
     ros2 run triago_control head_active_arm_tracking.py
     ros2 run triago_control head_active_arm_tracking.py --ros-args -p plot:=false
@@ -119,6 +134,22 @@ JOINT_WEIGHTS = np.array([50.0, 40.0, 30.0, 10.0, 5.0, 1.0, 1.0])
 # Secondary postural centering spring (null-space, keeps joints mid-range).
 K_POSTURE = 0.05
 
+# --- Soft roll-alignment ("up-righting") ----------------------------------
+# Preference (NOT a hard task): keep the image-right axis (camera X) aligned as
+# closely as possible with the robot/world "right" direction (world -Y), so the
+# operator's view is never rolled past vertical / flipped upside-down. The
+# optical axis is left completely free (the head may look at the hand from above
+# or below). Implemented as a low-priority least-squares term in the QP cost, so
+# it only consumes the redundancy left over after centering + stand-off; it can
+# never override tracking (unlike a hard equality row, which broke acquisition).
+WORLD_RIGHT = np.array([0.0, -1.0, 0.0])   # robot's right in the FK root frame
+K_ROLL_ALIGN = 1.0          # roll-alignment servo gain [1/s]
+W_ROLL_ALIGN = 10.0         # cost weight (subordinate to centering; tune here)
+ROLL_WZ_MAX = 0.3           # [rad/s] clamp on the requested roll rate
+ROLL_ALIGN_EPS = 0.1        # gimbal guard: skip when world-right ~parallel to optical axis
+ROLL_GATE_ANGLE_DEG = 30.0  # leveling authority fades out as the hand goes off-axis...
+ROLL_GATE_FLOOR = 0.15      # ...down to this floor (gentle leveling during acquisition)
+
 # Control loop rate
 CONTROL_HZ = 50.0
 
@@ -149,6 +180,7 @@ class HeadActiveArmTracker(Node):
         self.buf_u_err = deque(maxlen=maxlen)      # [px] u - TARGET_U
         self.buf_v_err = deque(maxlen=maxlen)      # [px] v - TARGET_V
         self.buf_ang_err = deque(maxlen=maxlen)    # [deg] optical-axis vs hand
+        self.buf_roll_align = deque(maxlen=maxlen) # [deg] image-right vs world-right
         self.buf_dist = deque(maxlen=maxlen)       # [m] camera->hand distance
         self.buf_in_fov = deque(maxlen=maxlen)     # 1.0 IBVS / 0.0 PBVS
         self.buf_active = deque(maxlen=maxlen)     # 1.0 right / 0.0 left
@@ -342,9 +374,32 @@ class HeadActiveArmTracker(Node):
         else:
             ang_err_deg = 0.0
 
+        # Soft roll alignment: keep image-right (camera X) pointing toward the
+        # world "right" (WORLD_RIGHT). Express world-right in the camera frame
+        # (d = R_cam^T * WORLD_RIGHT); its (x,y) projection makes the signed angle
+        # theta = atan2(d_y, d_x) with camera +X (0 = aligned). Commanding a roll
+        # rate wz = K*theta about the optical axis reduces it (dtheta/dt = -wz).
+        # This touches ONLY the roll DOF; the optical-axis direction stays free.
+        # Gated by centering so it never fights FOV acquisition, and disabled near
+        # the gimbal (world-right ~parallel to the optical axis, roll undefined).
+        R_cam = np.asarray(T_cam.rotation)
+        d_cam = R_cam.T @ WORLD_RIGHT
+        in_plane = float(np.hypot(d_cam[0], d_cam[1]))
+        if in_plane > ROLL_ALIGN_EPS:
+            theta_roll = float(np.arctan2(d_cam[1], d_cam[0]))
+            gate = float(np.clip(1.0 - ang_err_deg / ROLL_GATE_ANGLE_DEG,
+                                 ROLL_GATE_FLOOR, 1.0))
+            wz_align = float(np.clip(K_ROLL_ALIGN * theta_roll,
+                                     -ROLL_WZ_MAX, ROLL_WZ_MAX)) * gate
+        else:
+            theta_roll = 0.0
+            wz_align = 0.0
+        roll_align_err_deg = float(np.degrees(theta_roll))
+
         self.get_logger().info(
             f"[{self.active_arm.upper()}] hand_in_cam={np.round(P_cam, 2)} "
-            f"dist={dist:.2f}m ang_err={ang_err_deg:.1f}deg",
+            f"dist={dist:.2f}m ang_err={ang_err_deg:.1f}deg "
+            f"roll_align={roll_align_err_deg:.1f}deg",
             throttle_duration_sec=2.0)
 
         # 3. FOV state (hand physically in front of the lens)
@@ -384,6 +439,15 @@ class HeadActiveArmTracker(Node):
                 q_center = 0.5 * (q_max + q_min)
                 dq_posture[i] = -K_POSTURE * (q_i - q_center)
         g[:7] = H[:7, :7] @ dq_posture
+
+        # Soft roll-alignment task: add (W/2) * (wz_cam - wz_align)^2 to the cost,
+        # where wz_cam = J_cam[5,:] @ dq is the camera roll rate about the optical
+        # axis. Added AFTER the posture term so posture uses damping only; this
+        # term shapes just the null-space roll and leaves the primary
+        # centering/stand-off equality untouched.
+        J_roll = J_cam[5, :]
+        H[:7, :7] += W_ROLL_ALIGN * np.outer(J_roll, J_roll)
+        g[:7] += W_ROLL_ALIGN * wz_align * J_roll
 
         C, b = [], []
 
@@ -497,6 +561,7 @@ class HeadActiveArmTracker(Node):
             self.buf_u_err.append((u_h - TARGET_U) if u_h is not None else np.nan)
             self.buf_v_err.append((v_h - TARGET_V) if v_h is not None else np.nan)
             self.buf_ang_err.append(ang_err_deg)
+            self.buf_roll_align.append(roll_align_err_deg)
             self.buf_dist.append(dist)
             self.buf_in_fov.append(1.0 if in_fov else 0.0)
             self.buf_active.append(1.0 if self.active_arm == 'right' else 0.0)
@@ -565,11 +630,13 @@ def plotting_thread(node: HeadActiveArmTracker, stop_event: threading.Event):
         line_v, = ax_px.plot([], [], "r-", linewidth=1.5, label="v error")
         ax_px.legend(loc="upper right", fontsize=8)
 
-        ax_ang.set_title("Centering — Angular Error (optical axis vs hand)")
+        ax_ang.set_title("Angular Errors — pointing (opt.axis vs hand) + roll alignment")
         ax_ang.set_ylabel("Error [deg]"); ax_ang.set_xlabel("Time [s]")
         ax_ang.grid(True, alpha=0.3)
         ax_ang.axhline(0.0, color="gray", linestyle="--", linewidth=1)
-        line_ang, = ax_ang.plot([], [], "m-", linewidth=1.5, label="angle error")
+        line_ang, = ax_ang.plot([], [], "m-", linewidth=1.5, label="pointing error")
+        line_roll, = ax_ang.plot([], [], "orange", linewidth=1.5,
+                                 label="roll align (img-right vs world-right)")
         ax_ang.legend(loc="upper right", fontsize=8)
 
         ax_dist.set_title(f"Stand-off Distance vs Target ({node.target_distance:.2f} m)")
@@ -595,6 +662,7 @@ def plotting_thread(node: HeadActiveArmTracker, stop_event: threading.Event):
                 ue = list(node.buf_u_err)
                 ve = list(node.buf_v_err)
                 ang = list(node.buf_ang_err)
+                roll = list(node.buf_roll_align)
                 dist = list(node.buf_dist)
                 in_fov = list(node.buf_in_fov)
 
@@ -602,6 +670,7 @@ def plotting_thread(node: HeadActiveArmTracker, stop_event: threading.Event):
                 line_u.set_data(t, ue)
                 line_v.set_data(t, ve)
                 line_ang.set_data(t, ang)
+                line_roll.set_data(t, roll)
                 line_dist.set_data(t, dist)
                 disterr = [(d - node.target_distance) * 100.0 for d in dist]
                 line_disterr.set_data(t, disterr)
