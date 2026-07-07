@@ -133,11 +133,11 @@ class GraspStateMachine:
     # PER GRASP TYPE. The gripper drives this far from the standoff toward/into the
     # cylinder before closing; selected via _insertion_travel().
     #   - TOP  (0.09): vertical insertion depth — works well, leave as-is.
-    #   - SIDE (0.072): 20% shallower than top. The deeper side insertion was shoving the
+    #   - SIDE (0.0612): shallower than top. The deeper side insertion was shoving the
     #     cylinder sideways before the fingers closed/lifted; a shallower reach still lets
-    #     the fingers bracket the wall but stops pushing the object.
+    #     the fingers bracket the wall but stops pushing the object into the mesh.
     GRASP_INSERTION_TRAVEL_TOP = 0.09
-    GRASP_INSERTION_TRAVEL_SIDE = 0.072
+    GRASP_INSERTION_TRAVEL_SIDE = 0.0612
     GRASP_FORCE_THRESHOLD = 2.0
     GRASP_CLOSE_HOLD_S = 4.0
     GRASP_APPROACH_TIMEOUT_S = 30.0  # increased from 20s — approach can be slow with relaxed CBF
