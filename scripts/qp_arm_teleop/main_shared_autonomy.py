@@ -206,7 +206,7 @@ class SharedControlNode(Node):
 
         # --- Intent Inference (delegated to BeliefEstimator) ---
         # Weighting matrix (penalizes translation heavily, respects rotation)
-        self.W = np.diag([10.0, 10.0, 10.0, 1.0, 1.0, 1.0])
+        self.W = np.diag([10.0, 10.0, 10.0, 2.0, 2.0, 2.0])
         self.plot_lock = threading.Lock()
         self.belief_estimator = BeliefEstimator(
             target_keys=self.target_keys, W=self.W, beta=0.04, ema_alpha=0.995)
@@ -1111,15 +1111,14 @@ class SharedControlNode(Node):
                 # nearest goal slowly climbs). This fixes the "50/50 deadlock near
                 # aligned goals" where the user is stationary but clearly closer to
                 # one goal than the other.
-                # Observed action for the belief update. Joystick mode infers
-                # intent from the EE's ACTUAL movement (finite-differenced twist
-                # vs. the EE-anchored policies); POLICY_BELIEF_TEST keeps injecting
-                # the fake human twist vs. the user policies (current_T_user ==
-                # current_T_EE there, so the two are equivalent).
-                if self.POLICY_BELIEF_TEST:
-                    obs_twist, obs_policies = self.current_v_h, user_policies
-                else:
-                    obs_twist, obs_policies = self._ee_twist, ee_policies
+                # Observed action for the belief update. Intent is inferred from
+                # the USER's commanded twist (the user/joystick gripper intent) vs.
+                # the user-frame policies -- NOT the robot's realized EE twist. This
+                # reflects what the OPERATOR is trying to do and breaks the
+                # autonomy -> EE -> belief self-confirmation loop that made goals
+                # (e.g. Side -> Top) sticky to switch. POLICY_BELIEF_TEST injects a
+                # fake human twist through the same pairing.
+                obs_twist, obs_policies = self.current_v_h, user_policies
                 speed = float(np.linalg.norm(obs_twist[0:3]))
                 engagement = float(np.clip(
                     (speed - self.BELIEF_V_LOW) / max(self.BELIEF_V_HIGH - self.BELIEF_V_LOW, 1e-6),
