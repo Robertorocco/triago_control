@@ -309,15 +309,17 @@ class QPFormulator:
         # B. TASK CONSTRAINTS (Perfect Scalar Inequality CLF)
         #    e^T (J dq) + delta >= e^T xdot_ref + gamma * V(e)
         # =========================================================
-        def add_perfect_scalar_clf(ee_id, e_vec, xdot_ref_vec, slack_idx, gamma):
+        def add_perfect_scalar_clf(ee_id, e_vec, xdot_ref_vec, slack_idx, gamma, task_weights):
             if ee_id is None:
                 return
             J_6D = pin.getFrameJacobian(self.model, kin.data, ee_id, pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)
             dim = len(e_vec)
             J_task = J_6D[:dim, :]
 
-            # Diagonal task weights (heavily penalize position, barely orientation)
-            W = cfg.TASK_WEIGHTS_6D[:dim]
+            # Diagonal task weights. Nominally position-dominant (TASK_WEIGHTS_6D, 25:1);
+            # the arm under autonomous grasp/release control is passed the orientation-
+            # boosted TASK_WEIGHTS_6D_GRASP (2:1) so its approach-axis aligns tightly.
+            W = task_weights[:dim]
             e_w = e_vec * W  # element-wise == W @ e for a diagonal W
 
             if cfg.COMPARISON_CLF:
@@ -340,13 +342,21 @@ class QPFormulator:
                 # b = (W e)^T xdot_ref + gamma * V(e),  V(e) = 0.5 e^T W e
                 b_stack.append(np.dot(e_w, xdot_ref_vec) + 0.5 * gamma * np.dot(e_vec, e_w))
 
+        # Per-arm task weights: the arm under autonomous grasp/release control
+        # (tracking_boost_arm) uses the orientation-boosted grasp weights so its
+        # approach-axis aligns tightly at the grasp/release pose; the other arm
+        # keeps the nominal position-dominant weights. STATIC per-phase swap, no
+        # continuous adaptation.
+        W_task_r = cfg.TASK_WEIGHTS_6D_GRASP if tracking_boost_arm == 'right' else cfg.TASK_WEIGHTS_6D
+        W_task_l = cfg.TASK_WEIGHTS_6D_GRASP if tracking_boost_arm == 'left' else cfg.TASK_WEIGHTS_6D
+
         # Inject per-arm CLF rows only when that arm is tracking a reference.
         # The frozen arm uses GAMMA_MAX (gamma_r / gamma_l set above) so it holds
         # its pose tightly and independently of the active arm.
         if right_motion or xdot_r is not None:
-            add_perfect_scalar_clf(kin.ee_id_right, e_r, v_r, 0, gamma_r)
+            add_perfect_scalar_clf(kin.ee_id_right, e_r, v_r, 0, gamma_r, W_task_r)
         if left_motion or xdot_l is not None:
-            add_perfect_scalar_clf(kin.ee_id_left, e_l, v_l, 1, gamma_l)
+            add_perfect_scalar_clf(kin.ee_id_left, e_l, v_l, 1, gamma_l, W_task_l)
 
         # =========================================================
         # C. SAFETY CONSTRAINTS (TWO INDEPENDENT per-arm SoftMin CBFs)

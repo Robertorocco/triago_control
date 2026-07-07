@@ -64,7 +64,7 @@ Decision vector: `x = [q̇ (nv), δ_right, δ_left]` (joint velocities + one CLF
 - Slack penalty, adaptively weighted per arm (§8).
 
 **Constraints (`C'x ≥ b`)**:
-- **CLF (task tracking)**: scalar-inequality CLF with diagonal task weights `TASK_WEIGHTS_6D = [pos=10,10,10, ori=1,1,1]` (position weighted 10× orientation).
+- **CLF (task tracking)**: scalar-inequality CLF with diagonal task weights `TASK_WEIGHTS_6D = [pos=10,10,10, ori=0.4,0.4,0.4]` (position weighted 25× orientation — position-first approach, orientation yields near obstacles). During autonomous grasp/release execution the **active** arm's CLF row instead uses `TASK_WEIGHTS_6D_GRASP = [10,10,10, 5,5,5]` (2:1) so the gripper's approach-axis aligns tightly at the grasp/release pose. This is a **static per-phase swap** gated on `tracking_boost_arm` (`grasp_active`) — not a continuous/adaptive weight update — and covers `GRASP_ALIGN/APPROACH/CLOSE`, `LIFT`, `RELEASE_LIFT` (the placement approach during `HOLDING` keeps the nominal weights).
 - **CBF (collision avoidance) — two independent per-arm rows**: `J_soft_R · q̇ ≥ b_R` and `J_soft_L · q̇ ≥ b_L`, each a SoftMin aggregate over the `K_MAX_PAIRS=60` closest collision pairs touching that arm's own geometry (a pair touching both arms' geometry — genuine inter-arm contact, or two held objects — contributes to both rows). Each row uses its own dynamic safety margin `d_safe_dynamic_X = D_SAFE_BASE + K_V_SAFE·‖v_X‖`, computed from only that arm's own joint velocities (this per-arm independence, at both the Jacobian and the margin level, is what prevents the inactive arm from being spuriously recruited to satisfy a barrier that has nothing to do with it).
 - **Joint limits**: velocity-aware position buffer (CBF-style): every joint index not in `idx_right ∪ idx_left` (torso, base, gripper fingers, head) is hard-locked to `q̇=0` in the solve — this is also what makes the head chain safe to add as a quasi-static CBF obstacle (below) without ever adding a head joint to the decision vector.
 
@@ -150,7 +150,7 @@ Goals are dynamic SE(3) manifolds, not fixed poses:
 
 `SHARED_AUTONOMY → PRE_GRASP → GRASP_ALIGN → GRASP_APPROACH → GRASP_CLOSE → LIFT → HOLDING` (failure path: `→ ABORT_RETREAT`). On `GRASP_CLOSE → LIFT`, the held object is re-parented as a real link in the QP collision world (its own CBF bypass with the gripper is cleared after a smooth ramp) so it actively avoids the environment from then on. Release reverses this (`DETACH_*`, `RELEASE_LIFT`) and relocates the object's believed pose to where it was actually set down.
 
-**Grasp confirmation is purely geometric** (no force/torque or vision sensing exists on this robot): a signed gripper-box↔object `hppfcl` distance against the object's *believed* (kinematically tracked, not measured) position/axis.
+**Grasp confirmation is purely geometric** (no force/torque or vision sensing exists on this robot): a signed gripper-box↔object `hppfcl` distance against the object's *believed* (kinematically tracked, not measured) position/axis. The required contact overlap is **per grasp type** (`GraspStateMachine._contact_depth_threshold`): `Top = -0.03 m` (shallow — the arm can't seat fingers deeply on a vertical approach) and `Side = -0.045 m` (deeper seating as the fingers bracket the cylinder wall). More-negative = more overlap required = stricter.
 
 ## 6. World Scene Loading (`world_loader.py`, `config/worlds/*.yaml`)
 
