@@ -31,8 +31,11 @@ triago_control/
 │   │   ├── base_controller.py / keyboard_teleop.py   mobile base / keyboard jog
 │   │   ├── plotter.py / offline_plotter.py           live / static telemetry dashboards
 │   │   └── drift_evaluator_node.py     tracking error analysis
-│   └── head_controller/
-│       └── qp_head_visual_servo.py     ★ QP-based visual servoing for the head camera
+│   ├── head_controller/
+│   │   └── qp_head_visual_servo.py     ★ QP-based visual servoing for the head camera
+│   └── analysis/                       user-study data capture + offline analysis (§15)
+│       ├── study_config.py                 study/data settings (paths, topics, thresholds)
+│       └── study_recorder.py               Tkinter GUI wrapper around `ros2 bag record`
 ├── haption_teleoperation/              sibling package (haptic device interface)
 └── triago_control/                     importable Python library
     ├── qp_controller/                  QP safety math
@@ -300,34 +303,37 @@ Canonical labels (used in trial-folder names and the master table):
 
 `virtual_fixture` and `no_assist` **both run at `cfg.BLENDING=False`** and are indistinguishable at the flag level — the experimenter's declaration is the source of truth for those two; the recorder can only auto-verify `blending` against the flag.
 
-### 15.2 Recorder Lifecycle (`study_recorder.py`)
+### 15.2 Recorder — GUI, one launch per trial (`study_recorder.py`)
 
-**Relaunched fresh for every trial** (Gazebo and all nodes are restarted between trials, so a long-lived recorder is not assumed). The node is therefore **stateless** — all cross-trial bookkeeping is derived from disk, never memory. Per launch it:
-1. reads `PARTICIPANT_ID` (constant in `study_config.py`, set once per participant session; overridable via env var / ROS param),
-2. **prompts** for `world` and `condition`, and sanity-checks `condition` against `cfg.BLENDING`,
-3. **auto-derives the repetition number** by scanning `DATA_ROOT` for existing folders matching `participant + condition + world`,
-4. **ENTER → start** (`t=0`; rosbag capture begins),
-5. **ENTER → stop**,
-6. **prompts** manual `success (y/n)` + free-text notes, writes the trial, exits.
+A tiny **Tkinter GUI** wrapping `ros2 bag record`, launched fresh per trial (`ros2 run triago_control study_recorder.py`). It uses **no rclpy** (pure `subprocess` capture) and is stateless. Because it runs headless-importable, the pure helpers (`build_record_command`, `sanitize_token`, `snapshot_cfg`) can be tested without a display; the tkinter import is guarded. Workflow:
+1. `PARTICIPANT_ID` is prefilled from `study_config` (constant per session; `TRIAGO_PARTICIPANT_ID` env / `-p participant:=` overridable) and editable in the form.
+2. The experimenter types a **world shortcut** and selects the **feedback strategy** (radio: `virtual_fixture` / `blending` / `no_assist`); a live label shows the `cfg.BLENDING` consistency check (red on mismatch — e.g. `blending` selected while `cfg.BLENDING=False`; `virtual_fixture`/`no_assist` cannot be auto-distinguished so the declaration wins).
+3. **START** → spawns `ros2 bag record` for `BAG_TOPICS` in its own process group; an elapsed timer runs.
+4. **STOP** → sends SIGINT to the process group so rosbag2 finalises the bag cleanly (falls back to terminate/kill on timeout).
+5. The experimenter marks **Success (Yes/No)** + free-text **Notes** and presses **SAVE**, which writes `metadata.json` and resets the form for the next trial (participant/world/strategy stay sticky). The state machine (`IDLE → RECORDING → AWAIT_SAVE → IDLE`) forces classifying every trial before a new one can start.
 
-**Success is always the experimenter's manual call** (no Gazebo ground-truth is read; correct-placement verification is explicitly out of scope for this study).
+**Success is always the experimenter's manual call** (no Gazebo ground-truth is read; correct-placement verification is explicitly out of scope).
 
 ### 15.3 Capture — rosbag only (post-processed offline)
 
-Chosen design: **the recorder captures a rosbag and nothing else** during a trial (no live subscription, no live resampling, no live metrics — a bug in analysis can never corrupt or crash a live recording, and the bag is the single authoritative raw record). Per trial it writes, into one timestamped folder `DATA_ROOT/<participant>_<condition>_<world>_r<NN>_<ts>/`:
-- **`trial.bag/`** — `ros2 bag record` of a **curated topic allowlist** (`BAG_TOPICS`; `/joint_states` + `/tf` included for standalone replay, head-camera point clouds excluded to bound size). Storage backend `BAG_STORAGE_ID` (default `sqlite3`). Full-fidelity archive for the future.
-- **`metadata.json`** — provenance: participant, condition, world, repetition, presentation order, timestamps, success flag, notes, and a snapshot of relevant `cfg` values.
+**The recorder captures a rosbag and nothing else** during a trial (no live subscription/resampling/metrics — an analysis bug can never corrupt or crash a live recording, and the bag is the single authoritative raw record). Storage layout (`study_config` helpers `participant_dir` / `bag_folder_name` / `bag_path`):
 
-The tidy, time-aligned time-series is **derived offline from the bag** (§15.5), not written live.
+```
+DATA_ROOT/<participant>/<world_shortcut>_<condition_short>/   # = the `ros2 bag record -o` dir
+    <bag>.db3 + metadata.yaml     # written by rosbag2
+    metadata.json                 # our provenance sidecar (METADATA_NAME)
+```
+
+`condition_short` ∈ {`vf`, `bl`, `na`} (`STRATEGY_SHORTCUTS`). There is **one folder per `(participant, world, condition)` triple — re-recording the same triple OVERWRITES it** (confirmed via a dialog; no repetition index, no timestamp, so folders stay trivially scannable). The bag uses the **curated topic allowlist** (`BAG_TOPICS`; `/joint_states` + `/tf` for standalone replay, head-camera point clouds excluded) and storage backend `BAG_STORAGE_ID` (default `sqlite3`). `metadata.json` holds participant / world / condition (+ short), start/stop timestamps, duration, success, notes, `cfg.BLENDING`, a `CFG_SNAPSHOT_KEYS` snapshot of `cfg`, hostname, and the topic list. The tidy time-series is **derived offline from the bag** (§15.5), not written live.
 
 ### 15.4 Storage Split
 
-**Code lives in the git repo; all heavy data lives locally, never on GitHub.** `DATA_ROOT` defaults to `~/exchange/triago_study_data/` (outside the repo); rosbags, timeseries, and figures are written there. A `.gitignore` guard covers the case of pointing the root inside the repo.
+**Code lives in the git repo; all heavy data lives locally, never on GitHub.** `DATA_ROOT` defaults to `~/exchange/triago_study_data/` (outside the repo, `TRIAGO_STUDY_DATA_ROOT`-overridable); rosbags, timeseries, and figures are written there. A `.gitignore` guard (`triago_study_data/`, `*.bag`, `*.db3`, `*.mcap`, `*.parquet`) covers the case of pointing the root inside the repo.
 
 ### 15.5 Offline Analysis
 
 - **`study_metrics.py`** — pure library (no ROS): given a trial's tidy `timeseries` DataFrame + `metadata`, computes the summary metrics (below).
-- **`build_master_table.py`** — walks `DATA_ROOT`; for each trial it **reads `trial.bag/`, resamples the topics onto a common clock (`RESAMPLE_HZ`) into a tidy DataFrame** (optionally cached as `timeseries.<TIMESERIES_FORMAT>` beside the bag for figures), runs `study_metrics`, groups by `PARTICIPANT_ID`, and writes the single `trials_summary.csv` (`MASTER_TABLE_NAME`): one row per `participant × condition × world × repetition`, ready for pandas/R.
+- **`build_master_table.py`** — walks `DATA_ROOT`; for each trial folder it **reads the bag, resamples the topics onto a common clock (`RESAMPLE_HZ`) into a tidy DataFrame** (optionally cached as `timeseries.<TIMESERIES_FORMAT>` beside the bag for figures), runs `study_metrics`, and writes the single `trials_summary.csv` (`MASTER_TABLE_NAME`): one row per `(participant, world, condition)` trial (overwrite semantics mean the latest recording of each triple is the one analysed), ready for pandas/R.
 - **`study_analysis.py`** — reads the master table and produces per-condition comparison figures + stats tables (saved locally).
 
-**Metric families**: (A) *effectiveness* — total/per-phase time (sliced by `/shared_autonomy/grasp_active`), manual success, #retries/#aborts; (B) *motion quality* — SPARC/normalized jerk on `/qp_debug/ee_real`, path efficiency, tracking error + slack; (C) *safety* — min/near-miss stats on `/qp_debug/min_distance`, λ_cbf active-time/integral; (D) *human effort* — clutch-press count/duty (`virtuose/button`, VF/no_assist), force impulse from `virtuose/force_cmd` (**not cross-mode comparable** — different force semantics per condition), handle excursion; (E) *assistance* — α stats and human–policy agreement from `/shared_autonomy/blend_debug`, belief-convergence time from `/shared_autonomy/goal_probabilities`; (F) *subjective* — questionnaire scores (NASA-TLX / trust / preference) stored into `metadata.json`.
+**Metric families**: (A) *effectiveness* — total/per-phase time (sliced by `/shared_autonomy/grasp_active`), manual success, #retries/#aborts; (B) *motion quality* — SPARC/normalized jerk on `/qp_debug/ee_real`, path efficiency, tracking error + slack; (C) *safety* — min/near-miss stats on `/qp_debug/min_distance`, λ_cbf active-time/integral; (D) *human effort* — clutch-press count/duty (`/virtuose/button_right`, VF/no_assist), force impulse from `/virtuose/force_cmd` (**not cross-mode comparable** — different force semantics per condition), handle excursion; (E) *assistance* — α stats and human–policy agreement from `/shared_autonomy/blend_debug`, belief-convergence time from `/shared_autonomy/goal_probabilities`; (F) *subjective* — questionnaire scores (NASA-TLX / trust / preference) stored into `metadata.json`.

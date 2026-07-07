@@ -80,16 +80,39 @@ DATA_ROOT = os.path.expanduser(
 # into DATA_ROOT.
 MASTER_TABLE_NAME = "trials_summary.csv"
 
-# Per-trial artefact filenames (inside each trial's timestamped folder).
-BAG_DIRNAME = "trial.bag"
-TIMESERIES_NAME = "timeseries"          # extension added per TIMESERIES_FORMAT
+# --- Trial folder layout -------------------------------------------------
+# DATA_ROOT/<PARTICIPANT_ID>/<world_shortcut>_<condition_short>/
+#   The innermost folder IS the rosbag output directory (`ros2 bag record -o`),
+#   so it also holds rosbag2's own metadata.yaml and the .db3/.mcap file. Our
+#   metadata.json (METADATA_NAME) and the offline-cached timeseries
+#   (TIMESERIES_NAME) are written alongside, inside that same folder.
+# Re-recording the same (participant, world, condition) OVERWRITES the folder.
 METADATA_NAME = "metadata.json"
+TIMESERIES_NAME = "timeseries"          # extension added per TIMESERIES_FORMAT
+
+# Short codes used in bag-folder names (terse, so folders are easy to eyeball).
+STRATEGY_SHORTCUTS = {
+    "virtual_fixture": "vf",
+    "blending": "bl",
+    "no_assist": "na",
+}
 
 
-def trial_folder_name(participant: str, condition: str, world: str,
-                      repetition: int, timestamp: str) -> str:
-    """Canonical timestamped folder name for a single trial."""
-    return f"{participant}_{condition}_{world}_r{repetition:02d}_{timestamp}"
+def participant_dir(participant: str) -> str:
+    """Absolute path of a participant's folder under DATA_ROOT."""
+    return os.path.join(DATA_ROOT, participant)
+
+
+def bag_folder_name(world_shortcut: str, condition: str) -> str:
+    """Bag folder name '<world_shortcut>_<condition_short>' (e.g. 'shield_bl')."""
+    short = STRATEGY_SHORTCUTS.get(condition, condition)
+    return f"{world_shortcut}_{short}"
+
+
+def bag_path(participant: str, world_shortcut: str, condition: str) -> str:
+    """Absolute rosbag output directory for one trial (overwritten on re-record)."""
+    return os.path.join(participant_dir(participant),
+                        bag_folder_name(world_shortcut, condition))
 
 
 # ---------------------------------------------------------------------------
@@ -173,3 +196,18 @@ TIMESERIES_FORMAT = "parquet"   # "parquet" (preferred) or "csv"
 NEAR_MISS_DISTANCE_M = 0.05     # /qp_debug/min_distance below this = near-miss
 CBF_ACTIVE_LAMBDA = 1.0         # /qp_debug/lambda_cbf above this = barrier active
 BELIEF_CONFIDENCE = 0.80        # goal probability above this = "intent locked"
+
+
+# ---------------------------------------------------------------------------
+# cfg provenance snapshot
+# ---------------------------------------------------------------------------
+# Attribute names read from qp_controller.config and stored into each trial's
+# metadata.json for reproducibility. Missing attributes are silently skipped,
+# so this list can safely name more than any single cfg version defines.
+CFG_SNAPSHOT_KEYS = (
+    "BLENDING",
+    "ALIGN_ALPHA_IDLE", "ALIGN_ALPHA_MIN", "ALIGN_ALPHA_MAX", "ALIGN_ALPHA_LPF_COEFF",
+    "JOYSTICK_DEADBAND_LIN", "JOYSTICK_DEADBAND_ANG",
+    "JOYSTICK_K_TRANS", "JOYSTICK_K_ROT",
+    "D_SAFE_BASE", "K_V_SAFE",
+)
