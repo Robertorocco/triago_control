@@ -54,27 +54,27 @@ BLENDING = True
 
 # --- Joystick home pose (Haption base frame) -------------------------------
 # The handle is spring-centered to this pose; its displacement from it IS the
-# command. Position is FIXED. Orientation is derived STATELESSLY from the
-# gripper's current pose each tick (no saved reference, no re-anchoring):
-#   1. Map gripper orientation to Haption frame (180°-Z frame flip).
-#   2. Apply a fixed alignment rotation Ry(+90°) that maps gripper +X (approach
-#      axis, toward object) to handle -Z (toward user torso).
-#   3. Compute angular deviation from JOYSTICK_NEUTRAL_ORIENTATION_XYZW.
-#   4. Scale deviation by 1/JOYSTICK_ROT_HOME_SCALE to compress into the handle's
-#      limited rotational workspace.
-#   5. Apply scaled deviation to neutral → home_rot.
-# This means: when the gripper is in its startup pose, home_rot = neutral_rot
-# (zero displacement = zero twist). As the gripper rotates (grasp approach, arm
-# switch, post-grasp), the home smoothly and instantly follows — no state
-# transitions, no save/restore, no edge-case re-anchoring needed.
+# command. Position is FIXED. Orientation TRACKS the gripper via a per-arm
+# reference delta (see teleop_triago_joystick.py._update_home_orientation):
+#   1. Capture the gripper's orientation ONCE, the first time each arm becomes
+#      active -- that arm's reference (its home then == neutral).
+#   2. Each tick, take the gripper's DELTA from that reference (base frame).
+#   3. Scale the delta ANGLE by 1/JOYSTICK_ROT_HOME_SCALE to compress it into the
+#      handle's more limited rotational workspace, and map its axis to the Haption
+#      frame (180°-Z frame flip).
+#   4. Apply the scaled/mapped delta to JOYSTICK_NEUTRAL_ORIENTATION_XYZW → home_rot.
+# So at the reference pose home_rot = neutral_rot (zero displacement = zero twist);
+# as the gripper rotates (grasp approach, post-grasp, etc.) the home follows
+# smoothly. The reference is saved/restored per arm and NEVER re-anchored after
+# first capture, so the home stays continuous (no jump-to-neutral) across grasps
+# and arm switches.
 JOYSTICK_NEUTRAL_POSITION_M = [0.5, -0.03, -0.03]
 # Measured on the device (virtuose/pose) with the handle at the operator's
 # comfortable rest orientation — the pose the spring controller settles at when
-# the user releases the handle. In the new stateless design, this is the FIXED
-# REFERENCE POINT: the handle orientation that maps to the gripper's startup pose
-# (approximately pointing upward, slightly left, arm tucked near torso). Any
-# gripper rotation away from startup produces a proportional (scaled) deviation of
-# the home from this quaternion.
+# the user releases the handle. This is the neutral handle quaternion that each
+# arm's captured gripper reference maps to: at first activation home == this quat,
+# and any subsequent gripper rotation away from the reference produces a
+# proportional (scaled) deviation of the home from it.
 JOYSTICK_NEUTRAL_ORIENTATION_XYZW = [-0.015140674076974392, 0.8170770406723022,
                                      0.06124841421842575, 0.5730659365653992]
 
@@ -82,10 +82,11 @@ JOYSTICK_NEUTRAL_ORIENTATION_XYZW = [-0.015140674076974392, 0.8170770406723022,
 # The commanded twist magnitude is STRICTLY PROPORTIONAL to the handle's distance
 # from home, past a deadband. Deadband: displacement below these -> zero twist
 # (and, in the arbitration, a zero user twist is treated as perfectly ALIGNED so
-# the autonomy leads the motion). Reduced 20% from the original 12 cm / ~17 deg
-# (0.12 m / 0.30 rad) initial values for a more responsive handle -- to be tuned.
+# the autonomy leads the motion). Linear stays at 9.6 cm; angular was raised 20%
+# (0.24 -> 0.288 rad) because the centering spring's residual settle-oscillation
+# in orientation was leaking spurious angular twist near home -- to be tuned.
 JOYSTICK_DEADBAND_LIN = 0.096        # m   (9.6 cm) -- large: the spring can't settle to mm precision
-JOYSTICK_DEADBAND_ANG = 0.24         # rad (~13.7 deg) -- large: residual oscillation around home
+JOYSTICK_DEADBAND_ANG = 0.288        # rad (~16.5 deg) -- large: residual oscillation around home
 JOYSTICK_K_TRANS = 1.6               # (m/s) per m of handle linear displacement
 JOYSTICK_K_ROT = 1.5                 # (rad/s) per rad of handle angular displacement
 JOYSTICK_V_MAX_LIN = 0.10            # m/s   hard safety clamp on the commanded linear twist
