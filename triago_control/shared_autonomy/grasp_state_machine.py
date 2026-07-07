@@ -116,7 +116,7 @@ class GraspStateMachine:
     # We have NO force/torque sensing on the real hardware (joint pos/vel + camera
     # only), so contact must be confirmed purely geometrically — tightening these
     # gates is the correct, sensor-realistic way to reduce false positives.
-    GRASP_CONTACT_DEPTH = -0.05      # gripper-box<->cylinder overlap to trigger close (relaxed for robust detection)
+    GRASP_CONTACT_DEPTH = -0.03      # gripper-box<->cylinder overlap to trigger close (relaxed: less overlap required)
     APPROACH_ANG_TOL = 0.135         # rad — approach-axis alignment at end of insertion (was 0.15, ~10% tighter)
     APPROACH_POS_TOL = 0.009         # m — position-reached fallback (was 0.01, ~10% tighter)
     GRASP_INSERTION_TRAVEL = 0.09    # m, straight-line advance from standoff along approach axis (DEPTH knob)
