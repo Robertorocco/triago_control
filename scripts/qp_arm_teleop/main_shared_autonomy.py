@@ -342,6 +342,7 @@ class SharedControlNode(Node):
 
         self.trigger_cmd = False  # consumed event flag
         self._grasp_cue_phase = 0.0  # pulsing animation counter for PRE_GRASP sphere
+        self._grasp_cue_last_seen = 0.0  # latch timer for sphere visibility
 
         # Double-click arm switch state (left button: single=grasp, double=switch arm)
         self.DOUBLE_CLICK_WINDOW = 0.5  # seconds to detect the second press
@@ -1395,14 +1396,25 @@ class SharedControlNode(Node):
                 combined_markers.markers.extend(
                     self._build_goal_pose_markers(beliefs))
 
-                # PRE_GRASP visual cue: pulsing green sphere + one-shot console msg
+                # PRE_GRASP visual cue: pulsing green sphere + one-shot console msg.
+                # A latch timer prevents the sphere from flickering when the state
+                # machine oscillates at the PRE_GRASP/SHARED_AUTONOMY boundary due
+                # to alignment/belief noise. The sphere stays visible for at least
+                # _GRASP_CUE_LATCH_S after PRE_GRASP is last seen.
+                _GRASP_CUE_LATCH_S = 1.0
                 if self.grasp_sm.state == "PRE_GRASP":
+                    self._grasp_cue_last_seen = time.time()
                     combined_markers.markers.extend(
                         self._build_grasp_ready_cue(self.current_T_EE))
                     if not getattr(self, '_pregrasp_cue_logged', False):
                         self._pregrasp_cue_logged = True
                         self.get_logger().info(
                             "=== [PRE-GRASP READY] Aligned! Press LEFT BUTTON on Haption to execute grasp. ===")
+                elif (hasattr(self, '_grasp_cue_last_seen')
+                      and (time.time() - self._grasp_cue_last_seen) < _GRASP_CUE_LATCH_S):
+                    # Within latch window: keep showing the sphere (prevents flicker)
+                    combined_markers.markers.extend(
+                        self._build_grasp_ready_cue(self.current_T_EE))
                 else:
                     if getattr(self, '_pregrasp_cue_logged', False):
                         self._pregrasp_cue_logged = False
@@ -1809,8 +1821,8 @@ class SharedControlNode(Node):
         m.color.g = 1.0
         m.color.b = 0.1
         m.color.a = float(pulse)
-        m.lifetime.sec = 0
-        m.lifetime.nanosec = 500000000  # 500 ms — auto-expires if we stop publishing
+        m.lifetime.sec = 1
+        m.lifetime.nanosec = 500000000  # 1.5 s — survives the periodic DELETEALL sweep
         return [m]
 
     def _build_clear_grasp_ready_cue(self):
