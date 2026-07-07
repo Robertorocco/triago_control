@@ -20,10 +20,14 @@
 #                 -> underside at z = 1.10 (= 0.40 m above the table top),
 #                    x in [0.67,1.33], y in [-0.47,0.47] -> covers both cylinders.
 #   2 REAR legs:  size [0.05,0.05,1.10], centers z = 0.55 (floor z=0 -> shelf z=1.10)
-#                 at the back corners x = 1.30, y in {-0.42,+0.42}. The two FRONT
-#                 legs were removed: standing near the robot, they collided with
-#                 it at spawn. The shelf now cantilevers forward from the rear
-#                 posts, keeping the whole front/side reach to the cylinders clear.
+#                 at the back corners x = 1.30, y in {-0.42,+0.42}.
+#   1 FRONT-CENTER leg: size [0.05,0.05,0.40], center [0.725, 0.0, 0.90] -> stands
+#                 ON THE TABLE (base at the table top z=0.70) at the front edge,
+#                 centered between the two cylinders (y=0), so the table carries it
+#                 and it props the front of the shelf. Footprint fully on the table
+#                 (x in [0.70,0.75]), well clear of the cylinder approach lines at
+#                 y=+-0.20. (The old floor-standing front CORNER legs were removed:
+#                 near the robot, they collided with it at spawn.)
 #
 # The legs + shelf are ordinary collision boxes (role: "obstacle"), so
 # CollisionManager (CBF), VisualizationEngine (RViz + Meshcat) and GoalSet
@@ -98,6 +102,21 @@ static_obstacles:
     shape: "box"
     pose: [1.30, 0.42, 0.55, 0.0, 0.0, 0.0]
     size: [0.05, 0.05, 1.10]
+    color: [0.40, 0.40, 0.42, 1.0]
+    collision: true
+
+  # --- Storage rack: front-center support post (stands ON the table) -------- #
+  # At the front edge (x=0.725, front face flush with the table end x=0.70),
+  # centered between the two cylinders (y=0), from the table top (z=0.70) up to
+  # the shelf underside (z=1.10). The table carries it, so it avoids the spawn
+  # collision the old floor-standing front corner legs caused. It sits at y=0,
+  # 0.20 m clear of both cylinder approach lines (y=+-0.20), so it does not block
+  # the side grasps.
+  - name: "rack_leg_front_center"
+    role: "obstacle"
+    shape: "box"
+    pose: [0.725, 0.0, 0.90, 0.0, 0.0, 0.0]
+    size: [0.05, 0.05, 0.40]
     color: [0.40, 0.40, 0.42, 1.0]
     collision: true
 

@@ -159,15 +159,16 @@
 
     <!-- ================================================================
          STORAGE RACK: new for this world. A shelf carried by TWO rear posts
-         standing on the floor just behind the table (the two FRONT posts were
-         removed: they sat near the robot and collided with it at spawn). The
-         horizontal shelf cantilevers forward from the rear posts; its underside
-         sits ~0.40 m above the table top (z = 1.10), directly over BOTH
-         cylinders. The shelf forms a ceiling that blocks the vertical top-grasp
-         corridor, so the operator must grasp the cylinders from the SIDE.
-         Matches config/worlds/rack_world.yaml's rack_* entries exactly
-         (absolute poses; the model pose below is the world origin so every
-         sub-pose is absolute).
+         (on the floor behind the table) PLUS ONE front-center post that stands
+         ON THE TABLE at the front edge, centered between the two cylinders, so
+         the table carries it and it props the front of the shelf. (The original
+         floor-standing FRONT corner posts were removed: they sat near the robot
+         and collided with it at spawn.) The shelf underside sits ~0.40 m above
+         the table top (z = 1.10), directly over BOTH cylinders, forming a
+         ceiling that blocks the vertical top-grasp corridor, so the operator
+         must grasp the cylinders from the SIDE. Matches config/worlds/
+         rack_world.yaml's rack_* entries exactly (absolute poses; the model
+         pose below is the world origin so every sub-pose is absolute).
     ================================================================ -->
     <model name="storage_rack">
       <static>true</static>
@@ -205,6 +206,21 @@
         <visual name="leg_br_vis">
           <pose>1.30 0.42 0.55 0 0 0</pose>
           <geometry><box><size>0.05 0.05 1.10</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+
+        <!-- Front-center support post: stands ON THE TABLE (base at the table top
+             z=0.70) at the front edge, centered between the two cylinders (y=0),
+             so the table carries it. Props up the front of the cantilevered shelf.
+             Front face flush with the table edge (x=0.70); footprint fully on the
+             table (x in [0.70,0.75]). Height 0.40 (table top z=0.70 -> shelf z=1.10). -->
+        <collision name="leg_fc_col">
+          <pose>0.725 0.0 0.90 0 0 0</pose>
+          <geometry><box><size>0.05 0.05 0.40</size></box></geometry>
+        </collision>
+        <visual name="leg_fc_vis">
+          <pose>0.725 0.0 0.90 0 0 0</pose>
+          <geometry><box><size>0.05 0.05 0.40</size></box></geometry>
           <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
         </visual>
 
