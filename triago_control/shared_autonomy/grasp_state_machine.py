@@ -129,7 +129,15 @@ class GraspStateMachine:
     GRASP_CONTACT_DEPTH_SIDE = -0.05
     APPROACH_ANG_TOL = 0.135         # rad — approach-axis alignment at end of insertion (was 0.15, ~10% tighter)
     APPROACH_POS_TOL = 0.009         # m — position-reached fallback (was 0.01, ~10% tighter)
-    GRASP_INSERTION_TRAVEL = 0.09    # m, straight-line advance from standoff along approach axis (DEPTH knob)
+    # Straight-line advance from the standoff along the approach axis (the DEPTH knob),
+    # PER GRASP TYPE. The gripper drives this far from the standoff toward/into the
+    # cylinder before closing; selected via _insertion_travel().
+    #   - TOP  (0.09): vertical insertion depth — works well, leave as-is.
+    #   - SIDE (0.072): 20% shallower than top. The deeper side insertion was shoving the
+    #     cylinder sideways before the fingers closed/lifted; a shallower reach still lets
+    #     the fingers bracket the wall but stops pushing the object.
+    GRASP_INSERTION_TRAVEL_TOP = 0.09
+    GRASP_INSERTION_TRAVEL_SIDE = 0.072
     GRASP_FORCE_THRESHOLD = 2.0
     GRASP_CLOSE_HOLD_S = 4.0
     GRASP_APPROACH_TIMEOUT_S = 30.0  # increased from 20s — approach can be slow with relaxed CBF
@@ -238,6 +246,17 @@ class GraspStateMachine:
         parts = goal_key.split('_')
         gtype = parts[1] if len(parts) == 2 else ''
         return self.GRASP_CONTACT_DEPTH_TOP if gtype == 'Top' else self.GRASP_CONTACT_DEPTH_SIDE
+
+    def _insertion_travel(self, goal_key: str) -> float:
+        """Straight-line insertion depth for the active grasp type ('Color_Top'/'Color_Side').
+
+        Top uses the full depth; side is 20% shallower so the fingers don't shove
+        the cylinder sideways before closing. Defaults to the (shallower) side value
+        for anything unexpected.
+        """
+        parts = goal_key.split('_')
+        gtype = parts[1] if len(parts) == 2 else ''
+        return self.GRASP_INSERTION_TRAVEL_TOP if gtype == 'Top' else self.GRASP_INSERTION_TRAVEL_SIDE
 
     def step(self, inp: TickInput) -> TickOutput:
         """Evaluates the active goal's transition guard, then dispatches to the handler.
@@ -442,7 +461,7 @@ class GraspStateMachine:
             approach_axis = R_base[:, 0]
             locked = np.eye(4)
             locked[:3, :3] = R_base
-            locked[:3, 3] = T_base[:3, 3] + approach_axis * self.GRASP_INSERTION_TRAVEL
+            locked[:3, 3] = T_base[:3, 3] + approach_axis * self._insertion_travel(inp.active_goal_key)
             self.locked_grasp_pose = locked
             self._transition("GRASP_APPROACH")
             self.grasp_timer = time.time()
