@@ -116,12 +116,17 @@ class GraspStateMachine:
     # We have NO force/torque sensing on the real hardware (joint pos/vel + camera
     # only), so contact must be confirmed purely geometrically — tightening these
     # gates is the correct, sensor-realistic way to reduce false positives.
-    GRASP_CONTACT_DEPTH = -0.03      # gripper-box<->cylinder overlap to trigger close.
-    #   contact_ok = (contact_d <= GRASP_CONTACT_DEPTH) and contact_d is NEGATIVE for
-    #   overlap, so a LESS-negative threshold demands LESS overlap = EASIER to satisfy.
-    #   Relaxed -0.05 -> -0.03: a -0.0365 m reading (which timed out against -0.05) now
-    #   succeeds. Targets top-grasp timeouts where the arm cannot seat the fingers deeply
-    #   enough on a vertical approach to reach the old, stricter overlap.
+    # Gripper-box<->cylinder overlap required to trigger finger closure, PER GRASP TYPE.
+    #   contact_ok = (contact_d <= threshold) and contact_d is NEGATIVE for overlap, so a
+    #   LESS-negative threshold demands LESS overlap = EASIER to satisfy.
+    #   - TOP  (-0.03): vertical approach; the arm can't seat the fingers deeply, so accept
+    #     shallow overlap (a -0.0365 m reading now succeeds).
+    #   - SIDE (-0.045): horizontal approach lets the fingers bracket the cylinder wall, so
+    #     require deeper seating for a firmer, less slip-prone grasp.
+    #   Both are reachable within the relaxed gripper<->cylinder CBF (GRASP_CBF_MARGIN=-0.08).
+    #   Selected by grasp type via _contact_depth_threshold().
+    GRASP_CONTACT_DEPTH_TOP = -0.03
+    GRASP_CONTACT_DEPTH_SIDE = -0.045
     APPROACH_ANG_TOL = 0.135         # rad — approach-axis alignment at end of insertion (was 0.15, ~10% tighter)
     APPROACH_POS_TOL = 0.009         # m — position-reached fallback (was 0.01, ~10% tighter)
     GRASP_INSERTION_TRAVEL = 0.09    # m, straight-line advance from standoff along approach axis (DEPTH knob)
@@ -222,6 +227,17 @@ class GraspStateMachine:
         """
         parts = inp.active_goal_key.split('_')
         return len(parts) == 2 and parts[1] in self._GRASPABLE_TYPES
+
+    def _contact_depth_threshold(self, goal_key: str) -> float:
+        """Contact-overlap threshold for the active grasp type ('Color_Top'/'Color_Side').
+
+        Top grasps accept shallow overlap (arm can't seat fingers deeply on a
+        vertical approach); side grasps require deeper seating. Defaults to the
+        (stricter) side value for anything unexpected.
+        """
+        parts = goal_key.split('_')
+        gtype = parts[1] if len(parts) == 2 else ''
+        return self.GRASP_CONTACT_DEPTH_TOP if gtype == 'Top' else self.GRASP_CONTACT_DEPTH_SIDE
 
     def step(self, inp: TickInput) -> TickOutput:
         """Evaluates the active goal's transition guard, then dispatches to the handler.
@@ -502,12 +518,13 @@ class GraspStateMachine:
             np.cross(inp.current_T_EE[:3, :3][:, 0], self.locked_grasp_pose[:3, :3][:, 0]))
         ang_ok = ang_fwd_err < self.APPROACH_ANG_TOL
 
+        contact_threshold = self._contact_depth_threshold(inp.active_goal_key)
         contact_d = inp.grasp_contact.get(color.lower(), 1.0)
-        contact_ok = contact_d <= self.GRASP_CONTACT_DEPTH
+        contact_ok = contact_d <= contact_threshold
 
         # Position-reached fallback: with the straight-line locked target, the
         # advance is finished once the EE is within APPROACH_POS_TOL of it, even
-        # if the gripper-box contact distance never crosses GRASP_CONTACT_DEPTH.
+        # if the gripper-box contact distance never crosses the per-type contact threshold.
         pos_to_target = np.linalg.norm(
             inp.current_T_EE[:3, 3] - self.locked_grasp_pose[:3, 3])
         pos_reached = pos_to_target < self.APPROACH_POS_TOL
@@ -540,7 +557,7 @@ class GraspStateMachine:
         if time.time() - self.grasp_timer > self.GRASP_APPROACH_TIMEOUT_S:
             log_lines.append(
                 ("warn", f"[GRASP FAILED] Approach timed out after {self.GRASP_APPROACH_TIMEOUT_S:.0f}s — "
-                         f"contact depth {contact_d:.4f}m never reached the {self.GRASP_CONTACT_DEPTH}m "
+                         f"contact depth {contact_d:.4f}m never reached the {contact_threshold}m "
                          f"threshold (cylinder likely not seated between the fingers). Backing out along "
                          f"the reverse approach axis and restoring CBF."))
             self._abort_lift_start = None
