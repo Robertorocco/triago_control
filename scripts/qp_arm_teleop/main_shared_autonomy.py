@@ -852,6 +852,10 @@ class SharedControlNode(Node):
         # each arm keeps (and resumes from) its own frozen belief.
         self.pub_active_arm.publish(String(data=new_arm))
         self.plot_manager.push_arm_switch(new_arm)
+        # 4. Invalidate the blended reference latch so it re-anchors to the NEW
+        # arm's current_T_EE on the next blend tick (prevents the marker/reference
+        # from staying at the old arm's last position).
+        self._blend_ref_valid = False
         self.get_logger().info(
             f"\033[95m[ARM SWITCH] → {new_arm.upper()} | state={self.grasp_sm.state} "
             f"| holding={self.grasped_color}\033[0m")
