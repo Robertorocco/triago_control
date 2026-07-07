@@ -249,16 +249,19 @@ K_MAX_PAIRS = 60               # Max number of closest pairs fed into the SoftMi
 # over matching orientation when the two conflict near an obstacle.
 TASK_WEIGHTS_6D = np.array([1.0, 1.0, 1.0, 0.04, 0.04, 0.04]) * 10.0
 
-# Task weights used ONLY by the ACTIVE arm during autonomous grasp/release execution
-# (gated by grasp_active -> tracking_boost_arm in qp_formulator; covers GRASP_ALIGN/
-# APPROACH/CLOSE, LIFT and RELEASE_LIFT). Same POSITION weights as TASK_WEIGHTS_6D but
-# ORIENTATION is raised 0.4 -> 1.0 (25:1 -> 10:1), so the gripper's approach-axis aligns
-# more tightly at the grasp/release pose. The nominal 25:1 ratio is ideal for free-space
-# approach (position-first, orientation yields near obstacles) but leaves too much
-# residual orientation error once the gripper is on the object. This is a STATIC
-# per-phase swap (one discrete vector for the grasp phases, the nominal vector
-# otherwise) -- NOT a continuous / shadow-price-driven weight update.
-TASK_WEIGHTS_6D_GRASP = np.array([1.0, 1.0, 1.0, 0.1, 0.1, 0.1]) * 10.0
+# Task weights used by an arm doing PRECISION work with the object (qp_formulator
+# selects this per arm from orient_boost_arms). Applies to: the active arm during
+# autonomous grasp/release execution (grasp_active -> GRASP_ALIGN/APPROACH/CLOSE,
+# LIFT, RELEASE_LIFT) AND any arm currently CARRYING an attached object (the whole
+# HOLDING / placement-approach phase, so the release pose is aligned too). Same
+# POSITION weights as TASK_WEIGHTS_6D but ORIENTATION is raised 0.4 -> 2.0 (25:1 ->
+# 5:1), so the gripper's approach-axis / placement orientation converges tightly.
+# The nominal 25:1 ratio is ideal for free-space approach (position-first,
+# orientation yields near obstacles) but leaves too much residual orientation error
+# once the gripper is on / holding the object. STATIC per-phase swap (one discrete
+# vector when boosted, the nominal vector otherwise) -- NOT a continuous /
+# shadow-price-driven weight update.
+TASK_WEIGHTS_6D_GRASP = np.array([1.0, 1.0, 1.0, 0.2, 0.2, 0.2]) * 10.0
 
 # Mesh package search paths used to build the Meshcat visual model from the URDF.
 MESH_PATHS = ["/opt/pal/alum/share", "/opt/ros/humble/share", "/opt/pal/ferrum/share", "."]

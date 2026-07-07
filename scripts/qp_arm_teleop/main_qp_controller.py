@@ -694,13 +694,22 @@ class SafetyQPController(Node):
         # During an autonomous grasp the ACTIVE arm is boosted to the max dynamic
         # values (slack + gamma) so it converges tightly to the grasp reference.
         boost_arm = self.active_arm if self.grasp_active else None
+        # Orientation-weight boost applies to a SUPERSET of the slack/gamma boost:
+        # the active arm during autonomous grasp/release (grasp_active) AND any arm
+        # currently CARRYING an attached object (the HOLDING / placement-approach
+        # phase). This keeps the gripper's approach-axis / placement orientation
+        # tight whenever precision matters -- including steering the held object to
+        # its release pose -- without touching the slack/gamma tracking boost.
+        orient_boost_arms = set(self.hri.attached_object_arm.values())
+        if self.grasp_active:
+            orient_boost_arms.add(self.active_arm)
         q_dot_safe, slack_r, slack_l, b_col_pair, lambda_joints_total = self.qp.build_and_solve(
             self.kin, J_soft_r, h_soft_r, J_soft_l, h_soft_l,
             d_safe_dynamic_r, d_safe_dynamic_l,
             self.right_imposed_motion, self.left_imposed_motion,
             self.xdot_ref_right, self.xdot_ref_left, e_r, v_r, e_l, v_l, dt,
             right_frozen=self.right_frozen, left_frozen=self.left_frozen,
-            tracking_boost_arm=boost_arm)
+            tracking_boost_arm=boost_arm, orient_boost_arms=orient_boost_arms)
 
         self.publish_counter += 1
 

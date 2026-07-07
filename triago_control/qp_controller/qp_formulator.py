@@ -189,7 +189,7 @@ class QPFormulator:
                         d_safe_dynamic_r, d_safe_dynamic_l,
                         right_motion, left_motion, xdot_r, xdot_l,
                         e_r, v_r, e_l, v_l, dt, right_frozen=False, left_frozen=False,
-                        tracking_boost_arm=None):
+                        tracking_boost_arm=None, orient_boost_arms=()):
         """
         Build and solve the CLF-CBF-QP for this tick.
 
@@ -342,13 +342,14 @@ class QPFormulator:
                 # b = (W e)^T xdot_ref + gamma * V(e),  V(e) = 0.5 e^T W e
                 b_stack.append(np.dot(e_w, xdot_ref_vec) + 0.5 * gamma * np.dot(e_vec, e_w))
 
-        # Per-arm task weights: the arm under autonomous grasp/release control
-        # (tracking_boost_arm) uses the orientation-boosted grasp weights so its
-        # approach-axis aligns tightly at the grasp/release pose; the other arm
-        # keeps the nominal position-dominant weights. STATIC per-phase swap, no
-        # continuous adaptation.
-        W_task_r = cfg.TASK_WEIGHTS_6D_GRASP if tracking_boost_arm == 'right' else cfg.TASK_WEIGHTS_6D
-        W_task_l = cfg.TASK_WEIGHTS_6D_GRASP if tracking_boost_arm == 'left' else cfg.TASK_WEIGHTS_6D
+        # Per-arm task weights: an arm doing precision work with the object
+        # (orient_boost_arms -- grasp/release execution OR carrying an attached
+        # object) uses the orientation-boosted grasp weights so its approach-axis /
+        # placement orientation aligns tightly; other arms keep the nominal
+        # position-dominant weights. STATIC per-phase swap, no continuous adaptation.
+        # (Decoupled from tracking_boost_arm, which drives only the slack/gamma boost.)
+        W_task_r = cfg.TASK_WEIGHTS_6D_GRASP if 'right' in orient_boost_arms else cfg.TASK_WEIGHTS_6D
+        W_task_l = cfg.TASK_WEIGHTS_6D_GRASP if 'left' in orient_boost_arms else cfg.TASK_WEIGHTS_6D
 
         # Inject per-arm CLF rows only when that arm is tracking a reference.
         # The frozen arm uses GAMMA_MAX (gamma_r / gamma_l set above) so it holds
