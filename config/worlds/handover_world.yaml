@@ -1,0 +1,109 @@
+# =============================================================================
+# handover_world.yaml
+# -----------------------------------------------------------------------------
+# BIMANUAL HANDOVER scenario. Same main table + red/blue cylinders as
+# no_obstacle, PLUS:
+#   * a vertical DIVIDER that cuts the main table in half along y=0, separating
+#     the LEFT half (y>0, blue cylinder) from the RIGHT half (y<0, red cylinder);
+#   * a smaller SIDE TABLE to the right (y<0) carrying a FINAL placement disk.
+#
+# INTENDED TASK: the LEFT hand picks the blue cylinder, lifts it over the divider
+# and sets it on the HANDOVER platform on the right half of the main table; the
+# RIGHT hand then picks it up and places it on the FINAL platform on the side
+# table. The divider forces the handover: neither hand can reach across it.
+#
+# IMPORTANT -- SINGLE-PLATFORM LIMITATION (read before extending):
+#   The QP/belief/guidance stack currently supports exactly ONE functional
+#   Platform_Place goal (world_loader.WorldScene.platform is a single
+#   PlatformSpec; goal_set.py has one hard-coded PLATFORM_KEY='Platform_Place').
+#   So this world wires the single functional goal to the HANDOVER platform
+#   (the left-hand-guided placement). The FINAL platform on the side table is
+#   VISUAL-ONLY: it is declared as a no-collision disk (below) so it renders in
+#   RViz/Meshcat and Gazebo, but it is NOT a belief/guidance goal yet.
+#   Making BOTH platforms goals for BOTH hands needs a multi-platform feature
+#   (platforms list in the loader, multiple Platform_* keys, per-platform
+#   placement constraints + exclusion logic). NOT done here on purpose.
+#
+# GEOMETRY (axis-aligned boxes / disks):
+#   main table:  center [1.0, 0.0, 0.35], size [0.6,0.5,0.7]  (top z=0.70)
+#   divider:     center [1.0, 0.0, 0.85], size [0.6,0.03,0.30] (on table, top z=1.00)
+#   side table:  center [1.0,-0.45,0.35], size [0.4,0.4,0.7]  (top z=0.70)
+#   cylinders:   blue (LEFT)  [0.80,+0.20,0.775]; red (RIGHT) [0.80,-0.20,0.775]
+#   handover platform (functional goal): center [1.0,-0.12,0.701], r=0.09 (RIGHT half)
+#   final platform (visual only):        center [1.0,-0.45,0.701], r=0.15 (side table)
+#
+# Matches config/worlds/handover_world.world. Run with world_name:=handover_world.
+# See triago_control/qp_controller/world_loader.py for the full schema.
+# =============================================================================
+
+world_name: "handover_world"
+gazebo_world_file: "handover_world.world"
+
+static_obstacles:
+  - name: "work_table"
+    role: "table"
+    shape: "box"
+    pose: [1.0, 0.0, 0.35, 0.0, 0.0, 0.0]
+    size: [0.6, 0.5, 0.7]
+    color: [0.6, 0.4, 0.2, 0.8]
+    collision: true
+
+  - name: "red_cylinder"
+    role: "graspable"
+    shape: "cylinder"
+    pose: [0.800, -0.20, 0.775, 0.0, 0.0, 0.0]
+    size: [0.02, 0.15]          # [radius, length]
+    color: [1.0, 0.0, 0.0, 1.0]
+    collision: true
+
+  - name: "blue_cylinder"
+    role: "graspable"
+    shape: "cylinder"
+    pose: [0.800, 0.20, 0.775, 0.0, 0.0, 0.0]
+    size: [0.02, 0.15]
+    color: [0.0, 0.0, 1.0, 1.0]
+    collision: true
+
+  # --- Table divider: vertical wall on the main table at y=0 ---------------- #
+  # Splits LEFT (y>0, blue) from RIGHT (y<0, red). Forces the handover.
+  - name: "table_divider"
+    role: "obstacle"
+    shape: "box"
+    pose: [1.0, 0.0, 0.85, 0.0, 0.0, 0.0]
+    size: [0.6, 0.03, 0.30]
+    color: [0.5, 0.5, 0.55, 1.0]
+    collision: true
+
+  # --- Side table (smaller): to the right, carries the FINAL platform ------- #
+  - name: "side_table"
+    role: "obstacle"
+    shape: "box"
+    pose: [1.0, -0.45, 0.35, 0.0, 0.0, 0.0]
+    size: [0.4, 0.4, 0.7]
+    color: [0.6, 0.4, 0.2, 0.8]
+    collision: true
+
+  # --- FINAL platform: VISUAL ONLY (no collision, NOT a goal yet) ----------- #
+  # Declared as a thin no-collision disk so it renders in RViz/Meshcat next to
+  # the Gazebo green disk. Becomes a real goal only once multi-platform support
+  # exists (see the single-platform note in the header).
+  - name: "final_platform_visual"
+    role: "obstacle"
+    shape: "cylinder"
+    pose: [1.0, -0.45, 0.701, 0.0, 0.0, 0.0]
+    size: [0.15, 0.002]          # [radius, length]
+    color: [0.0, 0.8, 0.0, 0.6]
+    collision: false
+
+grasp_roles:
+  red: "red_cylinder"
+  blue: "blue_cylinder"
+
+# Single functional placement goal = the HANDOVER platform (right half of the
+# main table, just right of the divider). The left hand is guided here to set
+# the blue cylinder down for the right hand to pick up. Smaller disk (r=0.09).
+platform:
+  pose: [1.000, -0.12, 0.701]
+  radius: 0.09
+  thickness: 0.002
+  place_margin: 0.03
