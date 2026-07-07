@@ -35,7 +35,9 @@ triago_control/
 │   │   └── qp_head_visual_servo.py     ★ QP-based visual servoing for the head camera
 │   └── analysis/                       user-study data capture + offline analysis (§15)
 │       ├── study_config.py                 study/data settings (paths, topics, thresholds)
-│       └── study_recorder.py               Tkinter GUI wrapper around `ros2 bag record`
+│       ├── study_recorder.py               Tkinter GUI wrapper around `ros2 bag record`
+│       ├── study_metrics.py                bag reader + metric engine (numpy-only)
+│       └── analyze_trial.py                per-trial PNG dashboard + metrics summary
 ├── haption_teleoperation/              sibling package (haptic device interface)
 └── triago_control/                     importable Python library
     ├── qp_controller/                  QP safety math
@@ -332,8 +334,9 @@ DATA_ROOT/<participant>/<world_shortcut>_<condition_short>/   # = the `ros2 bag 
 
 ### 15.5 Offline Analysis
 
-- **`study_metrics.py`** — pure library (no ROS): given a trial's tidy `timeseries` DataFrame + `metadata`, computes the summary metrics (below).
-- **`build_master_table.py`** — walks `DATA_ROOT`; for each trial folder it **reads the bag, resamples the topics onto a common clock (`RESAMPLE_HZ`) into a tidy DataFrame** (optionally cached as `timeseries.<TIMESERIES_FORMAT>` beside the bag for figures), runs `study_metrics`, and writes the single `trials_summary.csv` (`MASTER_TABLE_NAME`): one row per `(participant, world, condition)` trial (overwrite semantics mean the latest recording of each triple is the one analysed), ready for pandas/R.
-- **`study_analysis.py`** — reads the master table and produces per-condition comparison figures + stats tables (saved locally).
+- **`study_metrics.py`** — numpy-only engine (no pandas, matching the repo stack): `load_bag()` reads a trial bag via `rosbag2_py` + `rclpy` deserialization into per-topic numpy `Series` (needs a sourced ROS 2 env); `compute_metrics()` returns a **flat dict** of the metrics below; `format_summary()` renders the human table; `sparc()` is the smoothness metric. All math is pure/unit-testable without ROS. Array layouts of the multi-array telemetry are pinned as topic constants at the top of the file.
+- **`analyze_trial.py`** — the runnable per-trial analyzer (`ros2 run triago_control analyze_trial.py [path…]`, or plain `python3`). With no argument it walks `DATA_ROOT` and analyzes every trial (a folder holding a rosbag `metadata.yaml`); given a folder it analyzes that trial (or all trials beneath it). For each trial it writes, **into the trial folder**: `plot_dashboard.png` (EE path/speed, obstacle clearance, CBF activity, haptic force + clutch shading, blending authority α with autonomous-grasp shading, goal beliefs, and a metrics text panel), `metrics_summary.txt`, and `metrics.json`. Matplotlib runs headless (`Agg`).
+- **`build_master_table.py`** (planned) — aggregate every trial's `metrics.json` into the single `trials_summary.csv` (`MASTER_TABLE_NAME`), one row per `(participant, world, condition)` (overwrite semantics ⇒ the latest recording of each triple is the analysed one). Pandas/pyarrow are acceptable here.
+- **`study_analysis.py`** (planned) — cross-condition comparison figures + stats tables from the master table.
 
 **Metric families**: (A) *effectiveness* — total/per-phase time (sliced by `/shared_autonomy/grasp_active`), manual success, #retries/#aborts; (B) *motion quality* — SPARC/normalized jerk on `/qp_debug/ee_real`, path efficiency, tracking error + slack; (C) *safety* — min/near-miss stats on `/qp_debug/min_distance`, λ_cbf active-time/integral; (D) *human effort* — clutch-press count/duty (`/virtuose/button_right`, VF/no_assist), force impulse from `/virtuose/force_cmd` (**not cross-mode comparable** — different force semantics per condition), handle excursion; (E) *assistance* — α stats and human–policy agreement from `/shared_autonomy/blend_debug`, belief-convergence time from `/shared_autonomy/goal_probabilities`; (F) *subjective* — questionnaire scores (NASA-TLX / trust / preference) stored into `metadata.json`.

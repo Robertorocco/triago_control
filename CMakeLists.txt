@@ -36,14 +36,16 @@ install(PROGRAMS
   scripts/head_controller/head_look_at_table.py
   scripts/head_controller/cloud_relay_node.py
   scripts/analysis/study_recorder.py
+  scripts/analysis/analyze_trial.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
 # --- ANALYSIS HELPER MODULES (imported by the analysis scripts, not nodes) ---
-# Installed alongside the executables so `import study_config` resolves at
-# runtime (the analysis scripts add their own dir to sys.path).
+# Installed alongside the executables so `import study_config` / `study_metrics`
+# resolve at runtime (the analysis scripts add their own dir to sys.path).
 install(FILES
   scripts/analysis/study_config.py
+  scripts/analysis/study_metrics.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
