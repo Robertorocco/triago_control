@@ -188,11 +188,7 @@ Two coupled objectives, both handled by the single 2.5D IBVS equality task on th
 - **Centering**: pixel error `[u−CX, v−CY]` → hand driven to image centre (`J_task = L_s · J_cam`).
 - **Stand-off**: depth error `Z − TARGET_DISTANCE` (`TARGET_DISTANCE = 0.5 m`, overridable via the `target_distance` ROS param) → camera translates to hold 50 cm.
 
-Falls back to PBVS rotational look-at when the hand is behind the lens / outside the FOV margin. FOV barriers (4 rows) apply to the single tracked hand; same velocity-aware joint-limit CBF buffers as the visual servo.
-
-**Horizon leveling** (roll about the optical axis): point tracking leaves camera roll in the null space (a centred point is invariant to optical-axis rotation), so without an extra task the head could drift to an upside-down view. A dedicated roll task fixes the up-vector: world-up in the camera frame (3rd row of `R_cam`) must point along `-Y_cam`, giving the signed roll error `phi = atan2(up_x, -up_y)` (0 = upright, ±π = inverted), regulated by `wz = K_ROLL·phi`. It is a 4th equality DOF in IBVS (`x = [dq_head(7), slack(4): u,v,Z,roll]`) and the roll component of the look-at twist in PBVS, disabled by a gimbal guard when the optical axis is near-vertical.
-
-A self-contained Matplotlib **plotting thread** (in the same file, guarded so a missing display never stalls control, disable with `-p plot:=false`) shows live centering error (pixel + angular) and the stand-off distance vs. the 0.5 m target. Telemetry also on `/head_active_tracking/{error,qdot,cartesian_cmd}`. Run: `ros2 run triago_control head_active_arm_tracking.py`.
+Falls back to PBVS rotational look-at when the hand is behind the lens / outside the FOV margin. FOV barriers (4 rows) apply to the single tracked hand; same velocity-aware joint-limit CBF buffers as the visual servo. A self-contained Matplotlib **plotting thread** (in the same file, guarded so a missing display never stalls control, disable with `-p plot:=false`) shows live centering error (pixel + angular) and the stand-off distance vs. the 0.5 m target. Telemetry also on `/head_active_tracking/{error,qdot,cartesian_cmd}`. Run: `ros2 run triago_control head_active_arm_tracking.py`.
 
 ## 8. Adaptive Scheduling (shadow-price feedback)
 
