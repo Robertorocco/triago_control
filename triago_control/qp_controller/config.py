@@ -71,13 +71,26 @@ JOYSTICK_NEUTRAL_ORIENTATION_XYZW = [-0.015140674076974392, 0.8170770406723022,
 # The commanded twist magnitude is STRICTLY PROPORTIONAL to the handle's distance
 # from home, past a deadband. Deadband: displacement below these -> zero twist
 # (and, in the arbitration, a zero user twist is treated as perfectly ALIGNED so
-# the autonomy leads the motion). 5 cm / 5 deg initial values -- to be tuned.
-JOYSTICK_DEADBAND_LIN = 0.12         # m   (12 cm) -- large: the spring can't settle to mm precision
-JOYSTICK_DEADBAND_ANG = 0.30         # rad (~17 deg) -- large: residual oscillation around home
+# the autonomy leads the motion). Reduced 20% from the original 12 cm / ~17 deg
+# (0.12 m / 0.30 rad) initial values for a more responsive handle -- to be tuned.
+JOYSTICK_DEADBAND_LIN = 0.096        # m   (9.6 cm) -- large: the spring can't settle to mm precision
+JOYSTICK_DEADBAND_ANG = 0.24         # rad (~13.7 deg) -- large: residual oscillation around home
 JOYSTICK_K_TRANS = 1.6               # (m/s) per m of handle linear displacement
 JOYSTICK_K_ROT = 1.5                 # (rad/s) per rad of handle angular displacement
 JOYSTICK_V_MAX_LIN = 0.10            # m/s   hard safety clamp on the commanded linear twist
 JOYSTICK_V_MAX_ANG = 0.50            # rad/s hard safety clamp on the commanded angular twist
+
+# --- Viscous damping on the commanded twist (_compute_user_twist) ----------
+# v_haption = K_TRANS * eff_lin - DAMP_LIN * handle_vel_lin   (mirrored for angular).
+# Dimensionless (fraction of the handle's own instantaneous velocity subtracted
+# from the command), applied ONLY outside the deadband so a still/settling handle
+# still commands exactly zero (the deadband guarantee is untouched -- see the
+# "inside deadband -> zero (no damping)" branches in _compute_user_twist).
+# Purpose: attenuate fast, jittery handle motion (tremor, spring-settle ringing)
+# without fighting deliberate, sustained motion. Keep well below 1.0 -- this
+# directly subtracts from the commanded velocity, not a physical damper.
+JOYSTICK_DAMP_LIN = 0.225            # unitless fraction of handle linear velocity
+JOYSTICK_DAMP_ANG = 0.075            # unitless fraction of handle angular velocity
 
 # --- Home-orientation rebasing scale ---------------------------------------
 # The gripper's rotation away from its startup reference is scaled DOWN by this
