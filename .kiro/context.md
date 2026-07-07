@@ -249,10 +249,15 @@ export GAZEBO_PLUGIN_PATH=$GAZEBO_PLUGIN_PATH:~/exchange/ros2-ws/install/ros2_li
 - No `_refactored`/`_v2`/`_new` suffixes in filenames — git history is for that.
 - Entry points are `main_*.py` in `scripts/`; library modules never contain `if __name__ == '__main__'`.
 
-## 13. Git Workflow
+## 13. User Workspace Paths
+
+- **Colcon workspace**: `~/exchange/ros2-ws/`
+- **This repo clone location**: `~/exchange/ros2-ws/src/triago_control`
+
+## 14. Git Workflow
 
 - Push directly to `main` (no feature branches / PRs for this repo).
-- **After every push**, run for the user on their local machine:
+- **After every push**, ALWAYS provide the user with the exact commands to sync their local machine:
 
 ```bash
 cd ~/exchange/ros2-ws/src/triago_control
