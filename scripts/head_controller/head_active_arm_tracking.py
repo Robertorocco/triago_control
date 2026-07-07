@@ -34,7 +34,7 @@ head chain is NOT part of the arm decision vector). The differences:
 
 CONTROL (2.5D visual servoing, kinematic target)
 ------------------------------------------------
-Decision vector: x = [dq_head (7), slack (3)].
+Decision vector: x = [dq_head (7), slack (4)].
 
 Two-stage state machine (identical philosophy to qp_head_visual_servo.py):
   * PBVS (Look-At): hand behind camera / outside FOV -> 3D rotational servoing,
@@ -42,6 +42,18 @@ Two-stage state machine (identical philosophy to qp_head_visual_servo.py):
   * IBVS (2.5D):    hand inside FOV -> interaction matrix maps pixel + depth
     error to a camera twist. This channel simultaneously centres the hand
     (u,v -> image centre) AND regulates the stand-off (Z -> TARGET_DISTANCE).
+
+HORIZON LEVELING (roll about the optical axis)
+----------------------------------------------
+Point tracking alone leaves the camera roll unconstrained (rotating a centred
+point about the optical axis is in the null space of the u,v,Z task), so the
+head could drift to any roll — including a fully inverted, upside-down view.
+A dedicated roll task removes that freedom: world-up expressed in the camera
+frame must point along -Y_cam (image "up"). The signed roll error is
+`phi = atan2(up_cam_x, -up_cam_y)` (0 = upright, +/-pi = inverted); it is
+regulated by commanding `wz = K_ROLL * phi` about the optical axis — a 4th
+equality DOF in IBVS and the roll component of the look-at twist in PBVS. A
+gimbal guard disables it when the optical axis is near-vertical (roll undefined).
 
 RUN:
     ros2 run triago_control head_active_arm_tracking.py
@@ -103,12 +115,20 @@ TARGET_DISTANCE = 0.5   # [m] desired stand-off from the active hand (50 cm)
 # QP gains
 LAMBDA_VISUAL = 1.0     # CLF tracking gain (pixel + depth convergence rate)
 GAMMA_FOV = 5.0         # FOV barrier (CBF) gain
+K_ROLL = 1.0            # horizon-leveling servo gain (roll about the optical axis)
 MAX_VELOCITY = 0.15     # [rad/s] per-head-joint velocity cap (slow & safe)
+
+# Below this in-plane magnitude of world-up, the optical axis is ~vertical and
+# roll is geometrically ill-defined -> the leveling task is disabled (gimbal).
+ROLL_GIMBAL_EPS = 0.1
 
 # Slack weights: pixels are O(100), metres are O(0.1). Scale the depth slack up
 # so a 1 cm depth error is treated comparably to a ~100 px image error.
 W_SLACK_PIXELS = 1.0
 W_SLACK_DEPTH = W_SLACK_PIXELS * 1e4
+# Roll (rad/s) is a firm secondary task: heavy enough that the QP levels the
+# horizon using the null-space DOF, but the pixel/depth centering stays primary.
+W_SLACK_ROLL = 100.0
 
 FOV_MARGIN = 50.0       # [px] distance from the image edge that triggers the CBF
 
@@ -149,6 +169,7 @@ class HeadActiveArmTracker(Node):
         self.buf_u_err = deque(maxlen=maxlen)      # [px] u - TARGET_U
         self.buf_v_err = deque(maxlen=maxlen)      # [px] v - TARGET_V
         self.buf_ang_err = deque(maxlen=maxlen)    # [deg] optical-axis vs hand
+        self.buf_roll_err = deque(maxlen=maxlen)   # [deg] camera roll (horizon)
         self.buf_dist = deque(maxlen=maxlen)       # [m] camera->hand distance
         self.buf_in_fov = deque(maxlen=maxlen)     # 1.0 IBVS / 0.0 PBVS
         self.buf_active = deque(maxlen=maxlen)     # 1.0 right / 0.0 left
@@ -342,9 +363,24 @@ class HeadActiveArmTracker(Node):
         else:
             ang_err_deg = 0.0
 
+        # Horizon-leveling (roll about the optical axis). World-up expressed in
+        # the camera frame is the 3rd row of R_cam. For an upright image it must
+        # point along -Y_cam, i.e. phi = atan2(up_x, -up_y) -> 0. wz = K_ROLL*phi
+        # rolls the camera back to level. Disabled when the optical axis is
+        # near-vertical (in-plane component of world-up vanishes -> roll undefined).
+        up_cam = np.asarray(T_cam.rotation[2, :]).flatten()
+        in_plane = float(np.hypot(up_cam[0], up_cam[1]))
+        if in_plane > ROLL_GIMBAL_EPS:
+            phi_roll = float(np.arctan2(up_cam[0], -up_cam[1]))
+            wz_desired = K_ROLL * phi_roll
+        else:
+            phi_roll = 0.0
+            wz_desired = 0.0
+        roll_err_deg = float(np.degrees(phi_roll))
+
         self.get_logger().info(
             f"[{self.active_arm.upper()}] hand_in_cam={np.round(P_cam, 2)} "
-            f"dist={dist:.2f}m ang_err={ang_err_deg:.1f}deg",
+            f"dist={dist:.2f}m ang_err={ang_err_deg:.1f}deg roll_err={roll_err_deg:.1f}deg",
             throttle_duration_sec=2.0)
 
         # 3. FOV state (hand physically in front of the lens)
@@ -361,12 +397,13 @@ class HeadActiveArmTracker(Node):
             self.model, self.data, self.q_real, fid_cam, pin.ReferenceFrame.LOCAL)
         J_cam = J_cam_full[:, self.head_v_idx]
 
-        n_vars = self.nq_head + 3   # [dq_head(7), slack(3)]
+        n_vars = self.nq_head + 4   # [dq_head(7), slack(4): u, v, Z, roll]
         H = np.eye(n_vars)
         H[:7, :7] = np.diag(JOINT_WEIGHTS)
         H[7, 7] = W_SLACK_PIXELS     # u slack
         H[8, 8] = W_SLACK_PIXELS     # v slack
         H[9, 9] = W_SLACK_DEPTH      # depth slack
+        H[10, 10] = W_SLACK_ROLL     # roll (horizon) slack
         g = np.zeros(n_vars)
 
         # Secondary postural centering spring (null-space)
@@ -398,18 +435,23 @@ class HeadActiveArmTracker(Node):
             Ls = self.get_interaction_matrix(u_h, v_h, P_cam[2])
             J_task = Ls @ J_cam
 
-            A_eq = np.zeros((3, n_vars))
-            A_eq[:, :7] = J_task
-            A_eq[:, 7:] = -np.eye(3)
-            b_eq = -LAMBDA_VISUAL * e_visual
+            # 4 equality rows: [u, v, Z] centering/stand-off + roll leveling.
+            # The roll row directly commands wz (angular-Z of the camera twist,
+            # row 5 of the LOCAL frame Jacobian) to the leveling velocity.
+            A_eq = np.zeros((4, n_vars))
+            A_eq[:3, :7] = J_task
+            A_eq[3, :7] = J_cam[5, :]
+            A_eq[:3, 7:10] = -np.eye(3)   # u, v, Z slacks
+            A_eq[3, 10] = -1.0            # roll slack
+            b_eq = np.concatenate([-LAMBDA_VISUAL * e_visual, [wz_desired]])
 
             # FOV barriers on the tracked hand (keep it inside the frame)
             grad_u = Ls[0, :] @ J_cam
             grad_v = Ls[1, :] @ J_cam
-            C.append(np.concatenate([grad_u, np.zeros(3)])); b.append(-GAMMA_FOV * (u_h - FOV_MARGIN))
-            C.append(np.concatenate([-grad_u, np.zeros(3)])); b.append(-GAMMA_FOV * ((CAM_W - FOV_MARGIN) - u_h))
-            C.append(np.concatenate([grad_v, np.zeros(3)])); b.append(-GAMMA_FOV * (v_h - FOV_MARGIN))
-            C.append(np.concatenate([-grad_v, np.zeros(3)])); b.append(-GAMMA_FOV * ((CAM_H - FOV_MARGIN) - v_h))
+            C.append(np.concatenate([grad_u, np.zeros(4)])); b.append(-GAMMA_FOV * (u_h - FOV_MARGIN))
+            C.append(np.concatenate([-grad_u, np.zeros(4)])); b.append(-GAMMA_FOV * ((CAM_W - FOV_MARGIN) - u_h))
+            C.append(np.concatenate([grad_v, np.zeros(4)])); b.append(-GAMMA_FOV * (v_h - FOV_MARGIN))
+            C.append(np.concatenate([-grad_v, np.zeros(4)])); b.append(-GAMMA_FOV * ((CAM_H - FOV_MARGIN) - v_h))
 
             pub_error = e_visual
         else:
@@ -423,11 +465,15 @@ class HeadActiveArmTracker(Node):
             omega_des = LAMBDA_VISUAL * np.cross(z_axis, dir_vec)
             if dir_vec[2] < -0.95:   # hand directly behind: break the singularity
                 omega_des[1] = LAMBDA_VISUAL
+            # cross(z_axis, dir) has no roll component -> inject the horizon
+            # leveling command directly on the optical-axis rotation, so the
+            # image is already upright when the hand re-enters the FOV.
+            omega_des[2] = wz_desired
 
             J_rot = J_cam[3:, :]
             A_eq = np.zeros((3, n_vars))
             A_eq[:, :7] = J_rot
-            A_eq[:, 7:] = -np.eye(3)
+            A_eq[:, 7:10] = -np.eye(3)   # wx, wy, wz slacks (roll slack unused here)
             b_eq = omega_des
             pub_error = omega_des
 
@@ -468,7 +514,7 @@ class HeadActiveArmTracker(Node):
         # 7. Solve
         try:
             res = quadprog.solve_qp(H, g, np.hstack((A_eq.T, C_mat)),
-                                    np.hstack((b_eq, b_vec)), meq=3)
+                                    np.hstack((b_eq, b_vec)), meq=A_eq.shape[0])
             dq_opt = res[0][:7]
         except ValueError:
             self.get_logger().warn("[QP] Infeasible! Commanding zero velocity.",
@@ -497,6 +543,7 @@ class HeadActiveArmTracker(Node):
             self.buf_u_err.append((u_h - TARGET_U) if u_h is not None else np.nan)
             self.buf_v_err.append((v_h - TARGET_V) if v_h is not None else np.nan)
             self.buf_ang_err.append(ang_err_deg)
+            self.buf_roll_err.append(roll_err_deg)
             self.buf_dist.append(dist)
             self.buf_in_fov.append(1.0 if in_fov else 0.0)
             self.buf_active.append(1.0 if self.active_arm == 'right' else 0.0)
@@ -565,11 +612,12 @@ def plotting_thread(node: HeadActiveArmTracker, stop_event: threading.Event):
         line_v, = ax_px.plot([], [], "r-", linewidth=1.5, label="v error")
         ax_px.legend(loc="upper right", fontsize=8)
 
-        ax_ang.set_title("Centering — Angular Error (optical axis vs hand)")
+        ax_ang.set_title("Angular Errors — pointing (centering) + roll (horizon)")
         ax_ang.set_ylabel("Error [deg]"); ax_ang.set_xlabel("Time [s]")
         ax_ang.grid(True, alpha=0.3)
         ax_ang.axhline(0.0, color="gray", linestyle="--", linewidth=1)
-        line_ang, = ax_ang.plot([], [], "m-", linewidth=1.5, label="angle error")
+        line_ang, = ax_ang.plot([], [], "m-", linewidth=1.5, label="pointing error")
+        line_roll, = ax_ang.plot([], [], "orange", linewidth=1.5, label="roll error (0=upright)")
         ax_ang.legend(loc="upper right", fontsize=8)
 
         ax_dist.set_title(f"Stand-off Distance vs Target ({node.target_distance:.2f} m)")
@@ -595,6 +643,7 @@ def plotting_thread(node: HeadActiveArmTracker, stop_event: threading.Event):
                 ue = list(node.buf_u_err)
                 ve = list(node.buf_v_err)
                 ang = list(node.buf_ang_err)
+                roll = list(node.buf_roll_err)
                 dist = list(node.buf_dist)
                 in_fov = list(node.buf_in_fov)
 
@@ -602,6 +651,7 @@ def plotting_thread(node: HeadActiveArmTracker, stop_event: threading.Event):
                 line_u.set_data(t, ue)
                 line_v.set_data(t, ve)
                 line_ang.set_data(t, ang)
+                line_roll.set_data(t, roll)
                 line_dist.set_data(t, dist)
                 disterr = [(d - node.target_distance) * 100.0 for d in dist]
                 line_disterr.set_data(t, disterr)
