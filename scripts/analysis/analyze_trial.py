@@ -89,34 +89,36 @@ def make_dashboard(series: dict, metrics: dict, metadata: dict, out_path: str):
     else:
         _no_data(ax, "EE path")
 
-    # 2) EE speed
+    # 2) EE speed -- from POSITION differentiation (sim joint velocities read ~0)
     ax = fig.add_subplot(gs[0, 1])
-    V = sm._stack(ee, sm._EE_IDX[active]["vel"]) if ee else None
-    if V is not None and len(V):
-        ax.plot(ee.t, np.linalg.norm(V, axis=1), color="#1f77b4", lw=1.0)
+    ts, speed = sm.ee_speed_profile(ee, active) if ee else (None, None)
+    if speed is not None and speed.size:
+        ax.plot(ts, speed, color="#1f77b4", lw=1.0)
         ax.set_xlabel("t [s]"); ax.set_ylabel("speed [m/s]")
-        ax.set_title(f"EE speed (SPARC={metrics.get('ee_sparc')})")
+        ax.set_title(f"EE speed (from position)   SPARC={metrics.get('ee_sparc')}")
         ax.grid(alpha=0.3)
     else:
         _no_data(ax, "EE speed")
 
-    # 3) Safety: min distance + margin
+    # 3) Safety: signed min pair distance + CBF margin (grasp window shaded)
     ax = fig.add_subplot(gs[1, 0])
     t, d = _series_xy(series, sm.T_MINDIST, "value")
     if t is not None:
-        ax.plot(t, d, color="#2ca02c", lw=1.0, label="min distance")
+        ax.plot(t, d, color="#2ca02c", lw=1.0, label="min pair dist (signed)")
+        ts2, ds = _series_xy(series, sm.T_SAFETY, "value")
+        if ts2 is not None:
+            ax.plot(ts2, ds, color="#888", lw=0.8, alpha=0.8, label="CBF margin (d - d_safe)")
         ax.axhline(sc.NEAR_MISS_DISTANCE_M, color="red", ls="--", lw=1,
                    label=f"near-miss {sc.NEAR_MISS_DISTANCE_M} m")
-        ts, ds = _series_xy(series, sm.T_SAFETY, "value")
-        if ts is not None:
-            ax.plot(ts, ds, color="#888", lw=0.8, alpha=0.7, label="safety margin")
+        ax.axhline(0.0, color="#333", ls=":", lw=0.8)
+        _shade_grasp(ax, series)
         ax.set_xlabel("t [s]"); ax.set_ylabel("distance [m]")
-        ax.set_title("Safety: obstacle clearance")
-        ax.legend(loc="best", fontsize=8); ax.grid(alpha=0.3)
+        ax.set_title("Safety: obstacle clearance (grasp shaded)")
+        ax.legend(loc="best", fontsize=7); ax.grid(alpha=0.3)
     else:
         _no_data(ax, "Safety")
 
-    # 4) CBF shadow prices
+    # 4) CBF shadow prices (grasp window shaded)
     ax = fig.add_subplot(gs[1, 1])
     lam = series.get(sm.T_LAMBDA_CBF)
     L = sm._stack(lam, (0, 1)) if lam else None
@@ -124,8 +126,9 @@ def make_dashboard(series: dict, metrics: dict, metadata: dict, out_path: str):
         ax.plot(lam.t, L[:, 0], lw=1.0, label="lambda R")
         ax.plot(lam.t, L[:, 1], lw=1.0, label="lambda L")
         ax.axhline(sc.CBF_ACTIVE_LAMBDA, color="red", ls="--", lw=1, label="active")
+        _shade_grasp(ax, series)
         ax.set_xlabel("t [s]"); ax.set_ylabel("lambda_cbf")
-        ax.set_title("CBF activity (shadow prices)")
+        ax.set_title("CBF activity (shadow prices, grasp shaded)")
         ax.legend(loc="best", fontsize=8); ax.grid(alpha=0.3)
     else:
         _no_data(ax, "CBF activity")
@@ -208,6 +211,14 @@ def _shade_true(ax, t, mask, color, label):
         ax.axvspan(t[s], t[e], color=color, alpha=0.3,
                    label=label if first else None)
         first = False
+
+
+def _shade_grasp(ax, series):
+    """Shade the autonomous-grasp window(s) (/shared_autonomy/grasp_active True)."""
+    ga = series.get(sm.T_GRASP_ACTIVE)
+    if ga and ga.col("value") is not None and len(ga):
+        _shade_true(ax, ga.t, np.asarray(ga.col("value")) > 0.5,
+                    "#cce5ff", "autonomous grasp")
 
 
 # ---------------------------------------------------------------- driver

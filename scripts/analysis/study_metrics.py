@@ -186,6 +186,33 @@ def _fs_of(t: np.ndarray) -> float:
     return 1.0 / dt if dt > 0 else 0.0
 
 
+def _zoh(t_target: np.ndarray, t_src: np.ndarray, v_src) -> np.ndarray:
+    """Zero-order-hold resample of a step signal v_src(t_src) onto t_target."""
+    v_src = np.asarray(v_src)
+    if len(t_src) == 0:
+        return np.zeros(len(t_target), dtype=v_src.dtype)
+    idx = np.searchsorted(t_src, t_target, side="right") - 1
+    idx = np.clip(idx, 0, len(v_src) - 1)
+    return v_src[idx]
+
+
+def ee_speed_profile(ee: Series, active: str):
+    """EE speed from POSITION differentiation (robust: FK position is always
+    valid, unlike the Gazebo joint-velocity signal). Returns (t_mid, speed)."""
+    P = _stack(ee, _EE_IDX[active]["pos"]) if ee else None
+    if P is None or len(P) < 3:
+        return None, None
+    t = ee.t
+    dt = np.diff(t)
+    dist = np.linalg.norm(np.diff(P, axis=0), axis=1)
+    speed = np.full(dist.shape, np.nan)
+    good = dt > 1e-6
+    speed[good] = dist[good] / dt[good]
+    t_mid = 0.5 * (t[:-1] + t[1:])
+    keep = np.isfinite(speed)
+    return t_mid[keep], speed[keep]
+
+
 def _rising_edges(binary) -> int:
     b = np.asarray(binary, dtype=float) > 0.5
     if b.size < 2:
@@ -246,7 +273,6 @@ def compute_metrics(series: dict, metadata: dict | None = None) -> dict:
     # --- EE motion (active arm) ---
     ee = series.get(T_EE)
     P = _stack(ee, _EE_IDX[active]["pos"]) if ee else None
-    V = _stack(ee, _EE_IDX[active]["vel"]) if ee else None
     if P is not None and len(P) > 1:
         steps = np.linalg.norm(np.diff(P, axis=0), axis=1)
         path_len = float(np.sum(steps))
@@ -257,27 +283,44 @@ def compute_metrics(series: dict, metadata: dict | None = None) -> dict:
     else:
         m["ee_path_len_m"] = m["ee_straight_len_m"] = m["ee_path_efficiency"] = nan
 
-    if V is not None and len(V):
-        speed = np.linalg.norm(V, axis=1)
+    # Speed from POSITION differentiation (Gazebo joint velocities are unreliable
+    # / read ~0, so the published EE velocity slots cannot be trusted -- §10).
+    ts, speed = ee_speed_profile(ee, active)
+    if speed is not None and speed.size:
         m["ee_speed_mean_mps"] = round(float(np.nanmean(speed)), 4)
         m["ee_speed_max_mps"] = round(float(np.nanmax(speed)), 4)
-        m["ee_sparc"] = round(sparc(speed, _fs_of(ee.t)), 4)
+        m["ee_sparc"] = round(sparc(speed, _fs_of(ts)), 4)
     else:
         m["ee_speed_mean_mps"] = m["ee_speed_max_mps"] = m["ee_sparc"] = nan
 
     # --- safety ---
     md = series.get(T_MINDIST)
+    ga = series.get(T_GRASP_ACTIVE)
     if md and md.col("value") is not None and len(md):
-        d = md.col("value")
+        d = np.asarray(md.col("value"), dtype=float)
         thr = sc.NEAR_MISS_DISTANCE_M
-        m["safety_min_dist_m"] = round(float(np.nanmin(d)), 4)
-        m["safety_mean_dist_m"] = round(float(np.nanmean(d)), 4)
-        m["safety_nearmiss_frac"] = round(float(np.nanmean(d < thr)), 4)
-        m["safety_nearmiss_episodes"] = _rising_edges(d < thr)
+        # Exclude the autonomous-grasp window from the safety metrics: the
+        # graspable cylinder IS in the collision set and /qp_debug/min_distance
+        # is the raw signed distance over ALL pairs BEFORE the grasp CBF-bypass,
+        # so the intentional gripper<->cylinder overlap drives it negative during
+        # the grasp. Safety must reflect ENVIRONMENT proximity, not the grasp.
+        teleop = np.ones(len(d), dtype=bool)
+        if ga and ga.col("value") is not None and len(ga):
+            g = _zoh(md.t, ga.t, np.asarray(ga.col("value")) > 0.5)
+            teleop = ~g.astype(bool)
+        if not np.any(teleop):          # whole trial flagged grasp -> don't drop it
+            teleop = np.ones(len(d), dtype=bool)
+        below = (d < thr) & teleop
+        m["safety_min_dist_m"] = round(float(np.nanmin(d[teleop])), 4)
+        m["safety_mean_dist_m"] = round(float(np.nanmean(d[teleop])), 4)
+        m["safety_nearmiss_frac"] = round(float(np.sum(below) / max(int(np.sum(teleop)), 1)), 4)
+        m["safety_nearmiss_episodes"] = _rising_edges(below)
+        m["safety_min_dist_graspincl_m"] = round(float(np.nanmin(d)), 4)
     else:
         m["safety_min_dist_m"] = m["safety_mean_dist_m"] = nan
         m["safety_nearmiss_frac"] = nan
         m["safety_nearmiss_episodes"] = 0
+        m["safety_min_dist_graspincl_m"] = nan
 
     lam = series.get(T_LAMBDA_CBF)
     L = _stack(lam, (0, 1)) if lam else None
@@ -415,8 +458,9 @@ _SUMMARY_LAYOUT = [
                        ("ee_speed_mean_mps", "mean EE speed", "m/s"),
                        ("ee_speed_max_mps", "max EE speed", "m/s"),
                        ("ee_sparc", "smoothness (SPARC)", "")]),
-    ("Safety", [("safety_min_dist_m", "min obstacle dist", "m"),
-                ("safety_mean_dist_m", "mean obstacle dist", "m"),
+    ("Safety", [("safety_min_dist_m", "min obst dist (excl grasp)", "m"),
+                ("safety_min_dist_graspincl_m", "min dist (incl grasp)", "m"),
+                ("safety_mean_dist_m", "mean obst dist (excl grasp)", "m"),
                 ("safety_nearmiss_frac", "time in near-miss", "frac"),
                 ("safety_nearmiss_episodes", "near-miss episodes", ""),
                 ("cbf_lambda_peak", "CBF lambda peak", ""),
