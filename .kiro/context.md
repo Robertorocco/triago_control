@@ -306,18 +306,19 @@ Canonical labels (used in trial-folder names and the master table):
 1. reads `PARTICIPANT_ID` (constant in `study_config.py`, set once per participant session; overridable via env var / ROS param),
 2. **prompts** for `world` and `condition`, and sanity-checks `condition` against `cfg.BLENDING`,
 3. **auto-derives the repetition number** by scanning `DATA_ROOT` for existing folders matching `participant + condition + world`,
-4. **ENTER → start** (`t=0`; rosbag + tidy-timeseries capture begin),
+4. **ENTER → start** (`t=0`; rosbag capture begins),
 5. **ENTER → stop**,
 6. **prompts** manual `success (y/n)` + free-text notes, writes the trial, exits.
 
 **Success is always the experimenter's manual call** (no Gazebo ground-truth is read; correct-placement verification is explicitly out of scope for this study).
 
-### 15.3 Two-Layer Capture (capture only — no live metrics)
+### 15.3 Capture — rosbag only (post-processed offline)
 
-The recorder **only captures**; it never computes metrics live (a metric bug must never crash a recording). Per trial it writes, into one timestamped folder `DATA_ROOT/<participant>_<condition>_<world>_r<NN>_<ts>/`:
-- **`trial.bag/`** — `ros2 bag record` of a **curated topic allowlist** (`BAG_TOPICS`; `/joint_states` + `/tf` included for standalone replay, head-camera point clouds excluded to bound size). Full-fidelity archive for the future.
-- **`timeseries.parquet`** — study topics resampled onto a common clock (`RESAMPLE_HZ`) for comfortable analysis.
+Chosen design: **the recorder captures a rosbag and nothing else** during a trial (no live subscription, no live resampling, no live metrics — a bug in analysis can never corrupt or crash a live recording, and the bag is the single authoritative raw record). Per trial it writes, into one timestamped folder `DATA_ROOT/<participant>_<condition>_<world>_r<NN>_<ts>/`:
+- **`trial.bag/`** — `ros2 bag record` of a **curated topic allowlist** (`BAG_TOPICS`; `/joint_states` + `/tf` included for standalone replay, head-camera point clouds excluded to bound size). Storage backend `BAG_STORAGE_ID` (default `sqlite3`). Full-fidelity archive for the future.
 - **`metadata.json`** — provenance: participant, condition, world, repetition, presentation order, timestamps, success flag, notes, and a snapshot of relevant `cfg` values.
+
+The tidy, time-aligned time-series is **derived offline from the bag** (§15.5), not written live.
 
 ### 15.4 Storage Split
 
@@ -325,8 +326,8 @@ The recorder **only captures**; it never computes metrics live (a metric bug mus
 
 ### 15.5 Offline Analysis
 
-- **`study_metrics.py`** — pure library (no ROS): given a trial's `timeseries` + `metadata`, computes the summary metrics (below).
-- **`build_master_table.py`** — walks `DATA_ROOT`, runs `study_metrics` on every trial, groups by `PARTICIPANT_ID`, and writes the single `trials_summary.csv` (`MASTER_TABLE_NAME`): one row per `participant × condition × world × repetition`, ready for pandas/R.
+- **`study_metrics.py`** — pure library (no ROS): given a trial's tidy `timeseries` DataFrame + `metadata`, computes the summary metrics (below).
+- **`build_master_table.py`** — walks `DATA_ROOT`; for each trial it **reads `trial.bag/`, resamples the topics onto a common clock (`RESAMPLE_HZ`) into a tidy DataFrame** (optionally cached as `timeseries.<TIMESERIES_FORMAT>` beside the bag for figures), runs `study_metrics`, groups by `PARTICIPANT_ID`, and writes the single `trials_summary.csv` (`MASTER_TABLE_NAME`): one row per `participant × condition × world × repetition`, ready for pandas/R.
 - **`study_analysis.py`** — reads the master table and produces per-condition comparison figures + stats tables (saved locally).
 
 **Metric families**: (A) *effectiveness* — total/per-phase time (sliced by `/shared_autonomy/grasp_active`), manual success, #retries/#aborts; (B) *motion quality* — SPARC/normalized jerk on `/qp_debug/ee_real`, path efficiency, tracking error + slack; (C) *safety* — min/near-miss stats on `/qp_debug/min_distance`, λ_cbf active-time/integral; (D) *human effort* — clutch-press count/duty (`virtuose/button`, VF/no_assist), force impulse from `virtuose/force_cmd` (**not cross-mode comparable** — different force semantics per condition), handle excursion; (E) *assistance* — α stats and human–policy agreement from `/shared_autonomy/blend_debug`, belief-convergence time from `/shared_autonomy/goal_probabilities`; (F) *subjective* — questionnaire scores (NASA-TLX / trust / preference) stored into `metadata.json`.

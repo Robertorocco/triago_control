@@ -142,13 +142,22 @@ BAG_TOPICS = [
     "/shared_autonomy/gripper_cmd",
 
     # --- Haption device (haption_teleoperation) ---
-    "virtuose/pose",
-    "virtuose/velocity",
-    "virtuose/button",
-    "virtuose/articular_position",
-    "virtuose/force_cmd",
+    # virtuose_server_node has no namespace, so its relative topics resolve to
+    # the absolute names below. The right button is the clutch (effort metric
+    # for virtual_fixture / no_assist); the left button is the grasp trigger.
+    "/virtuose/pose",
+    "/virtuose/velocity",
+    "/virtuose/button_right",
+    "/virtuose/button_left",
+    "/virtuose/articular_position",
+    "/virtuose/force_cmd",
     "/joystick/home_pose",                   # Joystick mode only
 ]
+
+# rosbag2 storage backend. "sqlite3" is the ROS 2 Humble default and always
+# available (produces a .db3). "mcap" is more portable/robust for long-term
+# archival but requires the rosbag2_storage_mcap package.
+BAG_STORAGE_ID = "sqlite3"
 
 
 # ---------------------------------------------------------------------------
