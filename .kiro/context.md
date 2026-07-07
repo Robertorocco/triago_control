@@ -282,3 +282,51 @@ cd ~/exchange/ros2-ws
 colcon build --packages-select triago_control
 source install/setup.bash
 ```
+
+
+## 15. User Study / Analysis Subsystem (`scripts/analysis/`)
+
+Self-contained tooling to run and record a **human-subject study** comparing feedback strategies on a **cylinder pick-and-place** task, across the declarative worlds (§6), for publication. Lives entirely under `scripts/analysis/` — never mixed with the controller code. Its parameters live in `scripts/analysis/study_config.py`, deliberately **separate** from `qp_controller/config.py` (§12): these are experiment/data-management settings — participant identity, storage paths, topic allowlists, resampling, offline-metric thresholds — not controller gains. Controller behaviour is never tuned here.
+
+### 15.1 Independent Variable — Feedback Conditions
+
+Canonical labels (used in trial-folder names and the master table):
+
+| Condition | `cfg.BLENDING` | Teleop / force nodes | Assistance rendered |
+|---|---|---|---|
+| `virtual_fixture` | `False` | `teleop_triago_clutch.py` + `haptic_force_manager_tutorial.py` | Full haptic guidance (F_guide + F_fixture + F_sync + F_cbf …) |
+| `blending` | `True` | `teleop_triago_joystick.py` + `haptic_force_manager_blending_tutorial.py` | Reference-level blending; handle feels only the centering spring |
+| `no_assist` | `False` | `teleop_triago_clutch.py` + (force manager with guidance OFF) | Baseline: clutch teleop, no guidance (optionally only `F_sync` kept) |
+
+`virtual_fixture` and `no_assist` **both run at `cfg.BLENDING=False`** and are indistinguishable at the flag level — the experimenter's declaration is the source of truth for those two; the recorder can only auto-verify `blending` against the flag.
+
+### 15.2 Recorder Lifecycle (`study_recorder.py`)
+
+**Relaunched fresh for every trial** (Gazebo and all nodes are restarted between trials, so a long-lived recorder is not assumed). The node is therefore **stateless** — all cross-trial bookkeeping is derived from disk, never memory. Per launch it:
+1. reads `PARTICIPANT_ID` (constant in `study_config.py`, set once per participant session; overridable via env var / ROS param),
+2. **prompts** for `world` and `condition`, and sanity-checks `condition` against `cfg.BLENDING`,
+3. **auto-derives the repetition number** by scanning `DATA_ROOT` for existing folders matching `participant + condition + world`,
+4. **ENTER → start** (`t=0`; rosbag + tidy-timeseries capture begin),
+5. **ENTER → stop**,
+6. **prompts** manual `success (y/n)` + free-text notes, writes the trial, exits.
+
+**Success is always the experimenter's manual call** (no Gazebo ground-truth is read; correct-placement verification is explicitly out of scope for this study).
+
+### 15.3 Two-Layer Capture (capture only — no live metrics)
+
+The recorder **only captures**; it never computes metrics live (a metric bug must never crash a recording). Per trial it writes, into one timestamped folder `DATA_ROOT/<participant>_<condition>_<world>_r<NN>_<ts>/`:
+- **`trial.bag/`** — `ros2 bag record` of a **curated topic allowlist** (`BAG_TOPICS`; `/joint_states` + `/tf` included for standalone replay, head-camera point clouds excluded to bound size). Full-fidelity archive for the future.
+- **`timeseries.parquet`** — study topics resampled onto a common clock (`RESAMPLE_HZ`) for comfortable analysis.
+- **`metadata.json`** — provenance: participant, condition, world, repetition, presentation order, timestamps, success flag, notes, and a snapshot of relevant `cfg` values.
+
+### 15.4 Storage Split
+
+**Code lives in the git repo; all heavy data lives locally, never on GitHub.** `DATA_ROOT` defaults to `~/exchange/triago_study_data/` (outside the repo); rosbags, timeseries, and figures are written there. A `.gitignore` guard covers the case of pointing the root inside the repo.
+
+### 15.5 Offline Analysis
+
+- **`study_metrics.py`** — pure library (no ROS): given a trial's `timeseries` + `metadata`, computes the summary metrics (below).
+- **`build_master_table.py`** — walks `DATA_ROOT`, runs `study_metrics` on every trial, groups by `PARTICIPANT_ID`, and writes the single `trials_summary.csv` (`MASTER_TABLE_NAME`): one row per `participant × condition × world × repetition`, ready for pandas/R.
+- **`study_analysis.py`** — reads the master table and produces per-condition comparison figures + stats tables (saved locally).
+
+**Metric families**: (A) *effectiveness* — total/per-phase time (sliced by `/shared_autonomy/grasp_active`), manual success, #retries/#aborts; (B) *motion quality* — SPARC/normalized jerk on `/qp_debug/ee_real`, path efficiency, tracking error + slack; (C) *safety* — min/near-miss stats on `/qp_debug/min_distance`, λ_cbf active-time/integral; (D) *human effort* — clutch-press count/duty (`virtuose/button`, VF/no_assist), force impulse from `virtuose/force_cmd` (**not cross-mode comparable** — different force semantics per condition), handle excursion; (E) *assistance* — α stats and human–policy agreement from `/shared_autonomy/blend_debug`, belief-convergence time from `/shared_autonomy/goal_probabilities`; (F) *subjective* — questionnaire scores (NASA-TLX / trust / preference) stored into `metadata.json`.

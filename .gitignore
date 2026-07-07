@@ -1,2 +1,11 @@
 __pycache__/
 *.pyc
+
+# User-study data (rosbags, per-trial timeseries, figures) must stay local,
+# never committed. See scripts/analysis/study_config.py (DATA_ROOT). Guard in
+# case the data root is ever pointed inside the repo.
+triago_study_data/
+*.bag
+*.db3
+*.mcap
+*.parquet
