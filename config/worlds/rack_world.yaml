@@ -1,0 +1,136 @@
+# =============================================================================
+# rack_world.yaml
+# -----------------------------------------------------------------------------
+# World 3 of the user-study set: same table + red/blue graspable cylinders +
+# platform as no_obstacle.yaml, PLUS a STORAGE RACK: an open shelving frame
+# that straddles the work table with a horizontal shelf ~0.50 m above the table
+# surface, directly over BOTH cylinders. Goal poses (cylinders, platform) are
+# UNCHANGED from no_obstacle -- this is purely an added structure.
+#
+# WHY THIS WORLD (the point of the task): the shelf forms a CEILING over the
+# cylinders, so the vertical top-grasp corridor is blocked -- the QP-CLF-CBF
+# will keep the arm from reaching over the top of a cylinder -- and the operator
+# is forced into a SIDE grasp. This makes the pick-and-place task materially
+# harder than no_obstacle / shield_world.
+#
+# GEOMETRY (a frame straddling the table, all axis-aligned boxes):
+#   work table:   top at z = 0.70, x in [0.70,1.30], y in [-0.25,0.25]
+#   cylinders:    x = 0.80, y = +-0.20, z_center = 0.775 (top ~0.85)
+#   rack shelf:   center [1.00, 0.0, 1.22], size [0.66,0.94,0.04]
+#                 -> underside at z = 1.20 (= 0.50 m above the table top),
+#                    x in [0.67,1.33], y in [-0.47,0.47] -> covers both cylinders.
+#   4 legs:       size [0.05,0.05,1.20], centers z = 0.60 (floor z=0 -> shelf z=1.20)
+#                 at the table corners x in {0.70,1.30}, y in {-0.42,+0.42}
+#                 -> OUTSIDE the table footprint (|y|<=0.25) and the cylinder
+#                    line (|y|=0.20), so the front/side reach to the cylinders
+#                    stays clear; the legs only fence the corners.
+#
+# The legs + shelf are ordinary collision boxes (role: "obstacle"), so
+# CollisionManager (CBF), VisualizationEngine (RViz + Meshcat) and GoalSet
+# consume them generically -- NO code changes were needed to add this world,
+# exactly like shield_world (any role other than "wall"/"table" falls into the
+# same generic collision + RViz/Meshcat marker path the table/cylinders use).
+#
+# Matches the Gazebo world launched via:
+#   ros2 launch triago_gazebo triago_gazebo.launch.py ... world_name:=rack_world
+#
+# Run the controllers with:
+#   ros2 run triago_control main_qp_controller.py  --ros-args -p world_name:=rack_world
+#   ros2 run triago_control main_shared_autonomy.py --ros-args -p world_name:=rack_world
+#
+# See triago_control/qp_controller/world_loader.py for the full schema.
+# =============================================================================
+
+world_name: "rack_world"
+gazebo_world_file: "rack_world.world"
+
+static_obstacles:
+  - name: "work_table"
+    role: "table"
+    shape: "box"
+    pose: [1.0, 0.0, 0.35, 0.0, 0.0, 0.0]
+    size: [0.6, 0.5, 0.7]
+    color: [0.6, 0.4, 0.2, 0.8]
+    collision: true
+
+  - name: "red_cylinder"
+    role: "graspable"
+    shape: "cylinder"
+    pose: [0.800, -0.20, 0.775, 0.0, 0.0, 0.0]
+    size: [0.02, 0.15]          # [radius, length]
+    color: [1.0, 0.0, 0.0, 1.0]
+    collision: true
+
+  - name: "blue_cylinder"
+    role: "graspable"
+    shape: "cylinder"
+    pose: [0.800, 0.20, 0.775, 0.0, 0.0, 0.0]
+    size: [0.02, 0.15]
+    color: [0.0, 0.0, 1.0, 1.0]
+    collision: true
+
+  # --- Storage rack: horizontal shelf (ceiling over the cylinders) ---------- #
+  # Underside at z = 1.20 (0.50 m above the table top), spanning over BOTH
+  # cylinders -> blocks the top-grasp approach, forcing a side grasp.
+  - name: "rack_shelf"
+    role: "obstacle"
+    shape: "box"
+    pose: [1.00, 0.0, 1.22, 0.0, 0.0, 0.0]
+    size: [0.66, 0.94, 0.04]
+    color: [0.55, 0.55, 0.58, 1.0]
+    collision: true
+
+  # --- Storage rack: four vertical legs (floor -> shelf) -------------------- #
+  # At the table corners, y = +-0.42 (outside the |y|<=0.25 table and the
+  # |y|=0.20 cylinder line), so they fence the corners without blocking the
+  # front/side reach to the cylinders.
+  - name: "rack_leg_front_left"
+    role: "obstacle"
+    shape: "box"
+    pose: [0.70, -0.42, 0.60, 0.0, 0.0, 0.0]
+    size: [0.05, 0.05, 1.20]
+    color: [0.40, 0.40, 0.42, 1.0]
+    collision: true
+
+  - name: "rack_leg_front_right"
+    role: "obstacle"
+    shape: "box"
+    pose: [0.70, 0.42, 0.60, 0.0, 0.0, 0.0]
+    size: [0.05, 0.05, 1.20]
+    color: [0.40, 0.40, 0.42, 1.0]
+    collision: true
+
+  - name: "rack_leg_back_left"
+    role: "obstacle"
+    shape: "box"
+    pose: [1.30, -0.42, 0.60, 0.0, 0.0, 0.0]
+    size: [0.05, 0.05, 1.20]
+    color: [0.40, 0.40, 0.42, 1.0]
+    collision: true
+
+  - name: "rack_leg_back_right"
+    role: "obstacle"
+    shape: "box"
+    pose: [1.30, 0.42, 0.60, 0.0, 0.0, 0.0]
+    size: [0.05, 0.05, 1.20]
+    color: [0.40, 0.40, 0.42, 1.0]
+    collision: true
+
+  # Virtual wall: OFF by default (mirrors the old WALL_COLLIDER=False flag).
+  - name: "virtual_wall"
+    role: "wall"
+    shape: "box"
+    pose: [0.5, 0.0, 0.5, 0.0, 0.0, 0.0]
+    size: [1.0, 0.02, 1.0]
+    color: [1.0, 0.5, 0.0, 0.5]
+    collision: false
+
+grasp_roles:
+  red: "red_cylinder"
+  blue: "blue_cylinder"
+
+platform:
+  pose: [1.000, 0.0, 0.701]
+  radius: 0.15
+  thickness: 0.002
+  place_margin: 0.03
