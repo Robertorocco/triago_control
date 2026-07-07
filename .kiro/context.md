@@ -180,6 +180,16 @@ Decision vector: `x = [dq_head (7), slack (3)]`.
 
 Hand positions are currently obtained via Pinocchio FK (kinematic tracking), not image-based detection — this is the acknowledged starting point for future perception work. A separate lightweight collision model (capsules + boxes, head-vs-body/head-vs-wall) exists but its distance constraints are not yet wired into this QP as CBF inequalities.
 
+### 7.1 Active-Arm Tracking (`head_active_arm_tracking.py`)
+
+Teleoperation-specific sibling of the visual servo (same independent-QP / IBVS-PBVS structure, `x = [dq_head (7), slack (3)]`, own velocity controller, head chain not in any arm decision vector). Assumes the teleop invariant that **exactly one arm is active at a time**: it subscribes to `/shared_autonomy/active_arm` (`std_msgs/String` "right"/"left", published by `main_shared_autonomy.py`) and points the camera at that arm's `arm_{side}_tool_link`, tracked purely by FK (no vision).
+
+Two coupled objectives, both handled by the single 2.5D IBVS equality task on the *active hand* (not a two-hand centroid):
+- **Centering**: pixel error `[u−CX, v−CY]` → hand driven to image centre (`J_task = L_s · J_cam`).
+- **Stand-off**: depth error `Z − TARGET_DISTANCE` (`TARGET_DISTANCE = 0.5 m`, overridable via the `target_distance` ROS param) → camera translates to hold 50 cm.
+
+Falls back to PBVS rotational look-at when the hand is behind the lens / outside the FOV margin. FOV barriers (4 rows) apply to the single tracked hand; same velocity-aware joint-limit CBF buffers as the visual servo. A self-contained Matplotlib **plotting thread** (in the same file, guarded so a missing display never stalls control, disable with `-p plot:=false`) shows live centering error (pixel + angular) and the stand-off distance vs. the 0.5 m target. Telemetry also on `/head_active_tracking/{error,qdot,cartesian_cmd}`. Run: `ros2 run triago_control head_active_arm_tracking.py`.
+
 ## 8. Adaptive Scheduling (shadow-price feedback)
 
 - **Decoupled slack weighting**: each arm's CLF slack weight drops toward `BASE_WEIGHT_SLACK` as its own shadow price grows (letting slack absorb tracking error near obstacles), and rises toward `MAX_WEIGHT_SLACK` in free space (tighter tracking).
@@ -207,6 +217,7 @@ source install/setup.bash
 ros2 run triago_control main_qp_controller.py --ros-args -p world_name:=no_obstacle
 ros2 run triago_control main_shared_autonomy.py --ros-args -p world_name:=no_obstacle
 ros2 run triago_control qp_head_visual_servo.py     # independent, can run alongside
+ros2 run triago_control head_active_arm_tracking.py # teleop: head follows the active arm (-p plot:=false to disable dashboard)
 ros2 run triago_control trajectory_generator.py     # open-loop test source
 ros2 run triago_control plotter.py                  # live dashboard
 ros2 run triago_control offline_plotter.py          # static, publication-quality figures
