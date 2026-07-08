@@ -37,20 +37,80 @@ SIMULATE_IDEAL_KINEMATICS = False  # True = pure math digital twin, False = real
 ORIENTATION_CTRL = True         # True = control Pos+Ori (6DOF), False = Pos only (3DOF)
 
 # =============================================================================
-# 1b. SHARED-AUTONOMY BLENDING -- "JOYSTICK MODE"
+# 1b. EXPERIMENT CONDITION SELECTOR (fair 2x3 teleoperation study design)
 # =============================================================================
-# Master switch. False = legacy Virtual-Fixture teleop: teleop_triago_clutch.py
-# drives /arm_*/cartesian_reference directly; main_shared_autonomy.py only takes
-# over during autonomous grasp execution / POLICY_BELIEF_TEST. True = JOYSTICK
-# MODE: teleop_triago_joystick.py maps the Haption handle's displacement-from-home
-# into a pure Cartesian twist on /arm_*/user_cartesian_reference, and
-# main_shared_autonomy.py arbitrates that user twist against the belief-weighted
-# optimal policy (computed from the TRUE EE pose) and is the sole writer of
-# /arm_*/cartesian_reference. This replaces the deprecated "combine F_sync force
-# feedback with a direct user/policy twist blend" design, whose force-into-handle
-# path created an unstable feedback loop. See teleop_triago_joystick.py's module
-# docstring for the full rationale.
-BLENDING = True
+# The user study compares TWO control modes, each at THREE assistance levels.
+# Historically this was governed by the single boolean `BLENDING`, which
+# conflated three independent things (which teleop node, which haptic force
+# manager, and whether main_shared_autonomy blends the reference). That made the
+# clutch vs joystick comparison UNFAIR: the clutch condition only ever closed an
+# assistive-FEEDBACK loop (guidance forces on the handle) while the joystick
+# condition only ever closed an assistive-ACTION loop (reference blending).
+#
+# The design now exposes TWO ORTHOGONAL assistance channels so any combination
+# can be selected independently of the control mode:
+#   * ASSIST_FEEDBACK  (channel F) -- assistive haptic FORCES on the handle
+#                                      (F_guide velocity field + F_fixture funnel),
+#                                      on top of the always-present F_sync tether.
+#   * ASSIST_BLENDING  (channel B) -- reference-level ACTION arbitration of the
+#                                      user twist with the belief-weighted policy
+#                                      in main_shared_autonomy (sole writer of
+#                                      /arm_*/cartesian_reference).
+#
+# The resulting fair 2x3 matrix (see .kiro/context.md for the authoritative table):
+#
+#   CONTROL_MODE  ASSIST_FEEDBACK  ASSIST_BLENDING   condition              force manager
+#   ------------  ---------------  ---------------   --------------------   ----------------------------------------
+#   CLUTCH        False            False             Sync only              haptic_force_manager_noguidance_tutorial
+#   CLUTCH        True             False             Guided feedback (VF)   haptic_force_manager_tutorial
+#   CLUTCH        True             True              Full guidance          haptic_force_manager_full_tutorial (NEW)
+#   JOYSTICK      False            False             Sync only              (joystick sync manager)   [other agent]
+#   JOYSTICK      False            True              Guided blending        haptic_force_manager_blending_tutorial
+#   JOYSTICK      True             True              Full guidance          (joystick full manager)   [other agent]
+#
+# Each teleop / force-manager node calls cfg.validate_condition(...) at startup
+# and HARD-ERRORS if the launched node does not match the selected condition, so
+# a mis-launched experiment fails loudly instead of silently running the wrong
+# strategy.
+CLUTCH = "CLUTCH"
+JOYSTICK = "JOYSTICK"
+
+# --- Active experiment condition (edit these three to select a study cell) ---
+CONTROL_MODE   = JOYSTICK    # CLUTCH (position control) | JOYSTICK (velocity control)
+ASSIST_FEEDBACK = False      # channel F: assistive guidance forces on the handle
+ASSIST_BLENDING = True       # channel B: reference-level user<->policy blending
+
+# --- Backward-compatibility alias -------------------------------------------
+# Legacy code (teleop topic routing, main_shared_autonomy) reads cfg.BLENDING to
+# decide whether main_shared_autonomy owns /arm_*/cartesian_reference. Blending
+# is ON in exactly the ASSIST_BLENDING conditions, so BLENDING mirrors it.
+BLENDING = ASSIST_BLENDING
+
+
+def validate_condition(node_name, control_mode=None, feedback=None, blending=None):
+    """Startup guard: assert the launched node matches the selected study cell.
+
+    Each node passes ONLY the constraints it cares about (a teleop node fixes the
+    control mode; a force manager fixes the full triple). Any provided constraint
+    that disagrees with the active config raises RuntimeError with a clear message
+    so a mis-launched condition fails loudly. Returns None on success.
+    """
+    errors = []
+    if control_mode is not None and CONTROL_MODE != control_mode:
+        errors.append(f"requires CONTROL_MODE == {control_mode!r}, but config has {CONTROL_MODE!r}")
+    if feedback is not None and ASSIST_FEEDBACK != feedback:
+        errors.append(f"requires ASSIST_FEEDBACK == {feedback}, but config has {ASSIST_FEEDBACK}")
+    if blending is not None and ASSIST_BLENDING != blending:
+        errors.append(f"requires ASSIST_BLENDING == {blending}, but config has {ASSIST_BLENDING}")
+    if errors:
+        raise RuntimeError(
+            f"[CONDITION GUARD] Node '{node_name}' cannot run under the current "
+            f"config.py experiment condition "
+            f"(CONTROL_MODE={CONTROL_MODE!r}, ASSIST_FEEDBACK={ASSIST_FEEDBACK}, "
+            f"ASSIST_BLENDING={ASSIST_BLENDING}):\n  - "
+            + "\n  - ".join(errors)
+            + "\nEdit the condition selector in config.py (section 1b) to match, "
+            "or launch the correct node for this condition.")
 
 # --- Joystick home pose (Haption base frame) -------------------------------
 # The handle is spring-centered to this pose; its displacement from it IS the

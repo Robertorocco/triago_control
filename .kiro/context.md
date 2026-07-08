@@ -99,9 +99,32 @@ An intermediate filter between the raw Cartesian reference (from teleop / trajec
 
 Exits on error recovery (`< LME_ERROR_RECOVERED`) or a max duration timeout, whichever comes first.
 
-## 5. Shared Autonomy & Joystick-Mode Blending (`main_shared_autonomy.py`)
+## 5. Shared Autonomy & Reference-Level Blending (`main_shared_autonomy.py`)
 
-Implements Bayesian belief estimation over a discrete goal set, a local QP policy per goal, a grasp state machine, and (when `cfg.BLENDING`) reference-level blending of the human twist with the autonomous policy. The human side is "Joystick Mode" (`haption_teleoperation`'s context.md §3.2): the Haption handle is spring-centered and its displacement from home is the pure user twist.
+Implements Bayesian belief estimation over a discrete goal set, a local QP policy per goal, a grasp state machine, and (when `cfg.ASSIST_BLENDING`) reference-level blending of the human twist with the autonomous policy. The human side is either "Joystick Mode" (velocity control, `haption_teleoperation`'s context.md §3.2: spring-centered handle, displacement → twist) or "Clutch Mode" (position control, integrates handle twist into a pose reference).
+
+### 5.0 Experiment Condition Selector (fair 2×3 study) — `config.py` §1b
+
+The study is a **fair 2×3 matrix**: two control modes × three assistance levels, selected by three **orthogonal** flags in `config.py` (§1b):
+
+- `CONTROL_MODE ∈ {CLUTCH, JOYSTICK}` — position control (clutch integrates the handle twist to a pose reference) vs velocity control (spring-centered joystick, displacement → twist).
+- `ASSIST_FEEDBACK` (bool) — **channel F**: assistive haptic FORCES on the handle (`F_guide` velocity field + `F_fixture` funnel) on top of the always-present `F_sync` tether.
+- `ASSIST_BLENDING` (bool) — **channel B**: reference-level arbitration of the user twist with the belief-weighted policy in `main_shared_autonomy` (sole writer of `/arm_*/cartesian_reference`). `cfg.BLENDING` is a backward-compat alias equal to `ASSIST_BLENDING`.
+
+Exposing the two channels independently fixes the previous **unfairness** (the clutch condition only ever closed an assistive-*feedback* loop; the joystick condition only ever closed an assistive-*action/blend* loop).
+
+| CONTROL_MODE | ASSIST_FEEDBACK | ASSIST_BLENDING | Condition | Teleop + force manager |
+|---|---|---|---|---|
+| CLUTCH | False | False | Sync only (baseline) | `teleop_triago_clutch` + `haptic_force_manager_noguidance_tutorial` |
+| CLUTCH | True | False | Guided feedback (VF) | `teleop_triago_clutch` + `haptic_force_manager_tutorial` |
+| CLUTCH | True | True | Full guidance | `teleop_triago_clutch` + `haptic_force_manager_full_tutorial` (NEW) |
+| JOYSTICK | False | False | Sync only | `teleop_triago_joystick` + (joystick sync manager, NEW) |
+| JOYSTICK | False | True | Guided blending | `teleop_triago_joystick` + `haptic_force_manager_blending_tutorial` |
+| JOYSTICK | True | True | Full guidance | `teleop_triago_joystick` + (joystick full manager, NEW) |
+
+Every teleop / force-manager node calls `cfg.validate_condition(node_name, control_mode=…, feedback=…, blending=…)` at startup and **HARD-ERRORS on mismatch** (teleop nodes constrain only the control mode since they serve all three of their column's cells; force managers pin the full triple), so a mis-launched condition fails loudly instead of silently running the wrong strategy.
+
+> **Ownership**: the CLUTCH column (position control) + this selector/`validate_condition` live with one agent; the JOYSTICK column (velocity control) with another. Both edit `config.py` and `main_shared_autonomy.py`, so pull → edit → push tightly.
 
 ### 5.1 Belief & Policy
 
@@ -109,7 +132,7 @@ Implements Bayesian belief estimation over a discrete goal set, a local QP polic
 - **Belief estimator**: Bayesian update over goals with goal *exclusion* support (a goal held by either arm, or not currently graspable, is pinned to probability 0). The observed action driving the update is the **user's commanded twist** (`current_v_h`, the user/joystick gripper intent) compared against the **user-frame policies** — so intent reflects what the operator is trying to do, and the autonomy→EE→belief self-confirmation loop is broken (this loop made goals like Side→Top sticky to switch). The twist cost matrix is `W = diag([10,10,10, 2,2,2])`. `pos_costs` (10% tie-breaker) are anchored at `current_T_user` (== `current_T_EE` in joystick mode). (`POLICY_BELIEF_TEST` injects a fake human twist through the same pairing.)
 - **Policy blend**: `pi_policy = Σ_k belief(k) · pi_k` (convex combination, smooth in belief) — this is the single optimal twist passed into the arbitration.
 
-### 5.2 Joystick-Mode Arbitration (`cfg.BLENDING = True`)
+### 5.2 Reference-Level Arbitration (`cfg.ASSIST_BLENDING = True`)
 
 The Cartesian reference sent to the QP is a blend of the user twist and the belief-weighted policy, integrated persistently every tick into a latched reference (`T_blend_ref` via `integrate_twist`, so an idle user yields an absolute hold rather than a reference that chases the drifting EE). `main_shared_autonomy.py` is the sole publisher of `/arm_*/cartesian_reference` while blending is active.
 
@@ -242,12 +265,20 @@ ros2 run triago_control main_qp_controller.py
 ros2 run triago_control main_shared_autonomy.py
 ros2 launch triago_control visualize.launch.py
 
-# teleoperation side (haption_teleoperation package) -- teleop + force node pair per cfg.BLENDING:
+# teleoperation side (haption_teleoperation) -- launch the teleop + force manager
+# pair for the condition selected in config.py §1b (see §5.0). Each node hard-errors
+# at startup if it does not match CONTROL_MODE / ASSIST_FEEDBACK / ASSIST_BLENDING.
 ros2 run haption_teleoperation virtuose_server_node
-#   BLENDING=False (Virtual Fixture):
+#   CLUTCH, sync only        (F=0, B=0):
+ros2 run haption_teleoperation teleop_triago_clutch.py
+ros2 run haption_teleoperation haptic_force_manager_noguidance_tutorial.py
+#   CLUTCH, guided feedback  (F=1, B=0):
 ros2 run haption_teleoperation teleop_triago_clutch.py
 ros2 run haption_teleoperation haptic_force_manager_tutorial.py
-#   BLENDING=True (Joystick Mode):
+#   CLUTCH, full guidance    (F=1, B=1):
+ros2 run haption_teleoperation teleop_triago_clutch.py
+ros2 run haption_teleoperation haptic_force_manager_full_tutorial.py   # (NEW)
+#   JOYSTICK, guided blending (F=0, B=1):
 ros2 run haption_teleoperation teleop_triago_joystick.py
 ros2 run haption_teleoperation haptic_force_manager_blending_tutorial.py
 ```
@@ -295,15 +326,9 @@ Self-contained tooling to run and record a **human-subject study** comparing fee
 
 ### 15.1 Independent Variable — Feedback Conditions
 
-Canonical labels (used in trial-folder names and the master table):
+The independent variable is the **fair 2×3 condition matrix** defined authoritatively in §5.0 — a `(CONTROL_MODE, ASSIST_FEEDBACK, ASSIST_BLENDING)` triple, not the single legacy `cfg.BLENDING`. Each cell is a `(control_mode, assist_level)` pair used in trial-folder names and the master table (e.g. `clutch_sync`, `clutch_feedback`, `clutch_full`, `joystick_sync`, `joystick_blend`, `joystick_full`). The recorder snapshots the full triple from `cfg` into `metadata.json` and verifies the launched condition against it (nodes also hard-error on mismatch via `cfg.validate_condition`, §5.0). The experimenter's declaration remains the source of truth for the manual success call; the flag triple resolves the condition unambiguously (unlike the old scheme where `virtual_fixture` and `no_assist` were indistinguishable at `cfg.BLENDING=False`).
 
-| Condition | `cfg.BLENDING` | Teleop / force nodes | Assistance rendered |
-|---|---|---|---|
-| `virtual_fixture` | `False` | `teleop_triago_clutch.py` + `haptic_force_manager_tutorial.py` | Full haptic guidance (F_guide + F_fixture + F_sync + F_cbf …) |
-| `blending` | `True` | `teleop_triago_joystick.py` + `haptic_force_manager_blending_tutorial.py` | Reference-level blending; handle feels only the centering spring |
-| `no_assist` | `False` | `teleop_triago_clutch.py` + (force manager with guidance OFF) | Baseline: clutch teleop, no guidance (optionally only `F_sync` kept) |
-
-`virtual_fixture` and `no_assist` **both run at `cfg.BLENDING=False`** and are indistinguishable at the flag level — the experimenter's declaration is the source of truth for those two; the recorder can only auto-verify `blending` against the flag.
+> The analysis condition labels/short-codes here are being migrated to the 2×3 scheme; `study_config.py` (analysis agent) owns the canonical label strings.
 
 ### 15.2 Recorder — GUI, one launch per trial (`study_recorder.py`)
 
