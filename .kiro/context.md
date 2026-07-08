@@ -118,7 +118,7 @@ Exposing the two channels independently fixes the previous **unfairness** (the c
 | CLUTCH | False | False | Sync only (baseline) | `teleop_triago_clutch` + `haptic_force_manager_noguidance_tutorial` |
 | CLUTCH | True | False | Guided feedback (VF) | `teleop_triago_clutch` + `haptic_force_manager_tutorial` |
 | CLUTCH | True | True | Full guidance | `teleop_triago_clutch` + `haptic_force_manager_full_tutorial` (NEW) |
-| JOYSTICK | False | False | Sync only | `teleop_triago_joystick` + (joystick sync manager, NEW) |
+| JOYSTICK | False | False | Sync only | `teleop_triago_joystick` + `haptic_force_manager_joystick_sync_tutorial` (NEW) |
 | JOYSTICK | False | True | Guided blending | `teleop_triago_joystick` + `haptic_force_manager_blending_tutorial` |
 | JOYSTICK | True | True | Full guidance | `teleop_triago_joystick` + (joystick full manager, NEW) |
 
