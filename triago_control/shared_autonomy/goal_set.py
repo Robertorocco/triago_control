@@ -89,7 +89,7 @@ class GoalSet:
     # hard-coded Red/Blue behavior exactly.
     _DEFAULT_GRASP_TYPES = ('Top', 'Side')
 
-    def __init__(self, cylinders=None, target_keys=None, platform=None):
+    def __init__(self, cylinders=None, target_keys=None, platform=None, platforms=None):
         """Initializes the cylinder geometry table and the set of valid goal keys.
 
         Args:
@@ -125,14 +125,46 @@ class GoalSet:
                        values, so this stays backward compatible for any caller
                        that doesn't pass a world scene.
         """
-        if platform is not None:
-            self.PLATFORM_POSE = np.asarray(platform.pose, dtype=float)
-            self.PLATFORM_RADIUS = float(platform.radius)
-            self.PLATFORM_THICKNESS = float(platform.thickness)
-            self.PLATFORM_PLACE_MARGIN = float(platform.place_margin)
-        # else: fall through to the class-level defaults declared above
-        # (PLATFORM_POSE etc.), unchanged -- self.PLATFORM_POSE still resolves
-        # to them via normal attribute lookup.
+        # --- Placement platform(s) --------------------------------------------
+        # Supports ONE or MANY placement disks, fully backward compatible:
+        #   * a single `platform` (world_loader.PlatformSpec), or NEITHER arg (the
+        #     class-level defaults) -> exactly one goal 'Platform_Place' with the
+        #     original constants (name defaults to 'Place'); byte-for-byte
+        #     unchanged for every existing single-platform world.
+        #   * a `platforms` list -> one goal 'Platform_<name>' per entry.
+        # Every consumer reads self.platform_keys / self._platform_params (below),
+        # so ONLY the number of platform goals changes, never the single-platform
+        # math. The legacy scalar attrs (PLATFORM_KEY/POSE/RADIUS/THICKNESS/
+        # PLACE_MARGIN) are kept pointing at the FIRST (primary) platform.
+        specs = (list(platforms) if platforms
+                 else ([platform] if platform is not None else []))
+        self._platform_params = {}
+        if specs:
+            for spec in specs:
+                name = getattr(spec, 'name', None) or 'Place'
+                self._platform_params[f'Platform_{name}'] = {
+                    'pose': np.asarray(spec.pose, dtype=float),
+                    'radius': float(spec.radius),
+                    'thickness': float(spec.thickness),
+                    'place_margin': float(spec.place_margin),
+                }
+        else:
+            # No world platform supplied: keep the original class-level defaults.
+            self._platform_params[self.PLATFORM_KEY] = {
+                'pose': self.PLATFORM_POSE, 'radius': self.PLATFORM_RADIUS,
+                'thickness': self.PLATFORM_THICKNESS,
+                'place_margin': self.PLATFORM_PLACE_MARGIN,
+            }
+        self.platform_keys = list(self._platform_params.keys())
+        # Primary platform = first key; keep the legacy scalar attrs pointing at it
+        # so get_platform_goal_pose's default and any external reader resolve
+        # identically to the pre-multi-platform behavior.
+        self.PLATFORM_KEY = self.platform_keys[0]
+        _p0 = self._platform_params[self.PLATFORM_KEY]
+        self.PLATFORM_POSE = _p0['pose']
+        self.PLATFORM_RADIUS = _p0['radius']
+        self.PLATFORM_THICKNESS = _p0['thickness']
+        self.PLATFORM_PLACE_MARGIN = _p0['place_margin']
 
         if cylinders is None:
             cylinders = {
@@ -148,7 +180,7 @@ class GoalSet:
             for color, spec in self.cylinders.items():
                 for grasp_type in spec.get('grasp_types', self._DEFAULT_GRASP_TYPES):
                     target_keys.append(f'{color}_{grasp_type}')
-            target_keys.append(self.PLATFORM_KEY)
+            target_keys.extend(self.platform_keys)   # one key per placement disk
         self.target_keys = target_keys
 
         # Sticky orientation memory, per goal key: None until the first time
@@ -238,7 +270,7 @@ class GoalSet:
         half_h = self.cylinders[color.capitalize()]['height'] / 2.0
         return float(TABLE_TOP_Z + half_h)
 
-    def get_platform_goal_pose(self, T_anchor, approach_offset=0.05):
+    def get_platform_goal_pose(self, T_anchor, approach_offset=0.05, goal_key=None):
         """SE(3) placement goal on the platform disk, as a perpendicularity manifold.
 
         Position: the anchor's XY projected onto the disk (clamped to stay
@@ -254,14 +286,22 @@ class GoalSet:
         leaves the yaw about vertical free, anchored to the current gripper yaw
         so there is no wrist flip while hovering.
         """
-        center = self.PLATFORM_POSE
+        # Resolve WHICH platform this goal key refers to (multi-platform). Default
+        # to the primary (PLATFORM_KEY) so a None / unknown key behaves exactly
+        # like the original single-platform case.
+        params = self._platform_params.get(goal_key, self._platform_params[self.PLATFORM_KEY])
+        center = params['pose']
+        platform_radius = params['radius']
+        platform_thickness = params['thickness']
+        platform_place_margin = params['place_margin']
+
         p_anchor = np.asarray(T_anchor, dtype=float)[:3, 3]
         R_anchor = np.asarray(T_anchor, dtype=float)[:3, :3]
 
         # --- Position: project onto the disk, clamp inside the rim ---
         dxy = p_anchor[:2] - center[:2]
         r = float(np.linalg.norm(dxy))
-        max_r = max(self.PLATFORM_RADIUS - self.PLATFORM_PLACE_MARGIN, 0.0)
+        max_r = max(platform_radius - platform_place_margin, 0.0)
         if r > max_r and r > 1e-9:
             dxy = dxy / r * max_r
         p_xy = center[:2] + dxy
@@ -271,7 +311,7 @@ class GoalSet:
             half_h = self.cylinders[self.grasped_color]['height'] / 2.0
         else:
             half_h = 0.075  # sane default (15 cm cylinder)
-        platform_top = center[2] + self.PLATFORM_THICKNESS / 2.0
+        platform_top = center[2] + platform_thickness / 2.0
         z_target = platform_top + half_h + self.grasped_z_offset + approach_offset
         p_target = np.array([p_xy[0], p_xy[1], z_target])
 
@@ -415,11 +455,13 @@ class GoalSet:
         Top grasp ignored R_anchor entirely and always returned a fixed
         R.from_euler('y', 90 deg)).
         """
-        if goal_key == self.PLATFORM_KEY or goal_key.startswith('Platform'):
+        if goal_key.startswith('Platform'):
             # Placement goal is a perpendicularity manifold over the disk, not a
-            # cylinder grasp — delegate. (update_memory is irrelevant here since
-            # the orientation is derived directly from the anchor each tick.)
-            return self.get_platform_goal_pose(T_anchor, approach_offset=approach_offset)
+            # cylinder grasp — delegate to the matching platform (multi-platform).
+            # (update_memory is irrelevant here since the orientation is derived
+            # directly from the anchor each tick.)
+            return self.get_platform_goal_pose(T_anchor, approach_offset=approach_offset,
+                                               goal_key=goal_key)
 
         color, grasp_type = goal_key.split('_')
         cyl = self.cylinders[color]

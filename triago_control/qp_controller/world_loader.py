@@ -76,6 +76,17 @@ platform: (optional)                -- NOT an obstacle (no collision geometry, n
     thickness: float                 -- [m] disk thickness
     place_margin: float (optional, default 0.03)  -- [m] keep the placed
                                           footprint this far inside the rim
+    name: str (optional, default "Place")  -- goal-key suffix; the single
+                                          `platform:` form defaults to "Place"
+                                          -> the legacy 'Platform_Place' goal.
+platforms: (optional, MULTI-platform)  -- a LIST of the same mapping as
+                                          `platform:` above, one per placement
+                                          disk; each SHOULD set a unique `name`
+                                          (-> goal keys 'Platform_<name>'). Use
+                                          EITHER `platform:` (one disk) OR
+                                          `platforms:` (many). Both feed
+                                          WorldScene.platforms; `platform:` also
+                                          feeds WorldScene.platform (the first).
 """
 
 import os
@@ -123,6 +134,8 @@ class PlatformSpec:
     radius: float                   # [m] disk radius
     thickness: float                # [m] disk thickness
     place_margin: float = 0.03      # [m] keep the placed footprint this far inside the rim
+    name: str = "Place"             # goal-key suffix -> 'Platform_<name>' (default keeps
+                                    # the legacy single-platform key 'Platform_Place')
 
 
 @dataclass
@@ -132,7 +145,11 @@ class WorldScene:
     gazebo_world_file: str
     static_obstacles: List[ObstacleSpec] = field(default_factory=list)
     grasp_roles: Dict[str, str] = field(default_factory=dict)
+    # `platform` = the FIRST placement disk (kept for legacy readers / single-
+    # platform worlds); `platforms` = the full list (one entry per disk). A world
+    # that declares the old single `platform:` mapping yields platforms=[that one].
     platform: Optional[PlatformSpec] = None
+    platforms: List[PlatformSpec] = field(default_factory=list)
 
     def get_obstacle(self, name) -> Optional[ObstacleSpec]:
         for obs in self.static_obstacles:
@@ -213,15 +230,27 @@ def load_world(world_name) -> WorldScene:
             collision=bool(o.get('collision', True)),
         ))
 
-    platform = None
-    p_raw = raw.get('platform')
-    if p_raw is not None:
-        platform = PlatformSpec(
-            pose=np.array(p_raw['pose'], dtype=float),
-            radius=float(p_raw['radius']),
-            thickness=float(p_raw['thickness']),
-            place_margin=float(p_raw.get('place_margin', 0.03)),
+    # Placement platform(s). Backward compatible:
+    #   * a single top-level `platform:` mapping -> exactly one platform whose
+    #     name defaults to "Place" (goal key 'Platform_Place'), unchanged;
+    #   * a `platforms:` list -> one PlatformSpec per entry (each may set `name`).
+    # `platform` (singular) is kept pointing at the FIRST entry for legacy readers.
+    def _parse_platform(pd, default_name):
+        return PlatformSpec(
+            pose=np.array(pd['pose'], dtype=float),
+            radius=float(pd['radius']),
+            thickness=float(pd['thickness']),
+            place_margin=float(pd.get('place_margin', 0.03)),
+            name=str(pd.get('name', default_name)),
         )
+
+    platforms = []
+    if raw.get('platforms'):
+        for i, pd in enumerate(raw['platforms']):
+            platforms.append(_parse_platform(pd, default_name=f"P{i}"))
+    elif raw.get('platform') is not None:
+        platforms.append(_parse_platform(raw['platform'], default_name="Place"))
+    platform = platforms[0] if platforms else None
 
     return WorldScene(
         world_name=raw.get('world_name', world_name),
@@ -229,4 +258,5 @@ def load_world(world_name) -> WorldScene:
         static_obstacles=obstacles,
         grasp_roles={k.lower(): v for k, v in raw.get('grasp_roles', {}).items()},
         platform=platform,
+        platforms=platforms,
     )

@@ -39,12 +39,11 @@
          platform on the right half; the RIGHT hand then picks it up and places
          it on the FINAL platform on a separate smaller side table to the right.
 
-         NOTE (single-platform stack): the QP/belief/guidance side currently
-         supports ONE functional Platform_Place goal. The YAML wires that goal
-         to the HANDOVER platform (yellow). The FINAL platform (green, on the
-         side table) is VISUAL-ONLY for now (rendered here in Gazebo and as a
-         no-collision RViz/Meshcat disk) until multi-platform goal support is
-         added.
+         Both the HANDOVER platform (yellow) and the FINAL platform (green, on the
+         side table) are REAL Platform_* goals on the QP/belief/guidance side (see
+         handover_world.yaml's `platforms:` list): each is demandable by either
+         arm while it holds a cylinder. These Gazebo disks are the operator's
+         visual aids for those goals.
     ================================================================ -->
 
     <!-- Main work table: same pose/size/material as the other worlds. -->
@@ -106,14 +105,14 @@
       </link>
     </model>
 
-    <!-- Side table (new, smaller): to the RIGHT of the main table (y<0). Carries
-         the FINAL placement platform for the right hand. -->
+    <!-- Side table (smaller, further right): RIGHT of the main table (y=-0.65).
+         Carries the FINAL placement platform for the right hand. -->
     <model name="side_table">
       <static>true</static>
-      <pose>1.000 -0.45 0.35 0 0 0</pose>
+      <pose>1.000 -0.65 0.35 0 0 0</pose>
       <link name="link">
         <collision name="col">
-          <geometry><box><size>0.4 0.4 0.7</size></box></geometry>
+          <geometry><box><size>0.3 0.3 0.7</size></box></geometry>
           <surface>
             <contact>
               <ode>
@@ -127,7 +126,7 @@
           </surface>
         </collision>
         <visual name="vis">
-          <geometry><box><size>0.4 0.4 0.7</size></box></geometry>
+          <geometry><box><size>0.3 0.3 0.7</size></box></geometry>
           <material>
             <script>
               <uri>file://media/materials/scripts/gazebo.material</uri>
@@ -153,15 +152,15 @@
       </link>
     </model>
 
-    <!-- FINAL platform (green): on the side table, r=0.15 (same as the original
-         placement disk). Where the RIGHT hand ultimately places the cylinder.
-         VISUAL ONLY for now (not yet a belief/guidance goal). -->
+    <!-- FINAL platform (green): on the side table (y=-0.65), r=0.10. Where the
+         RIGHT hand ultimately places the cylinder. Real Platform_Final goal (see
+         handover_world.yaml's `platforms:` list). -->
     <model name="placement_area_final">
       <static>true</static>
-      <pose>1.000 -0.45 0.701 0 0 0</pose>
+      <pose>1.000 -0.65 0.701 0 0 0</pose>
       <link name="link">
         <visual name="vis">
-          <geometry><cylinder><radius>0.15</radius><length>0.002</length></cylinder></geometry>
+          <geometry><cylinder><radius>0.10</radius><length>0.002</length></cylinder></geometry>
           <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Green</name></script></material>
         </visual>
       </link>

@@ -187,7 +187,8 @@ class SharedControlNode(Node):
         # original hard-coded table) if the world scene is missing either role,
         # so behavior is unchanged for a world YAML that doesn't define them.
         cylinders = self._cylinders_from_world_scene(self.world_scene)
-        self.goal_set = GoalSet(cylinders=cylinders, platform=self.world_scene.platform)
+        self.goal_set = GoalSet(cylinders=cylinders, platform=self.world_scene.platform,
+                                platforms=self.world_scene.platforms)
         self.target_keys = self.goal_set.target_keys
 
         # Default active/test goal key. 'Red_Side' is only valid for a world
@@ -210,9 +211,9 @@ class SharedControlNode(Node):
         self.plot_lock = threading.Lock()
         self.belief_estimator = BeliefEstimator(
             target_keys=self.target_keys, W=self.W, beta=0.04, ema_alpha=0.995)
-        # The Platform placement goal only becomes demandable once something is
-        # actually held — exclude it while the gripper is empty.
-        self.belief_estimator.set_excluded_goals({self.goal_set.PLATFORM_KEY})
+        # The Platform placement goal(s) only become demandable once something is
+        # actually held — exclude ALL of them while the gripper is empty.
+        self.belief_estimator.set_excluded_goals(set(self.goal_set.platform_keys))
         # Color of the currently-held cylinder ('Red'/'Blue'), or None when empty.
         self.grasped_color = None
 
@@ -259,7 +260,7 @@ class SharedControlNode(Node):
             'left': BeliefEstimator(
                 target_keys=self.target_keys, W=self.W, beta=0.04, ema_alpha=0.995),
         }
-        self._be['left'].set_excluded_goals({self.goal_set.PLATFORM_KEY})
+        self._be['left'].set_excluded_goals(set(self.goal_set.platform_keys))
         self._ctx_grasped = {'right': None, 'left': None}
         self._ctx_active_goal = {'right': self.active_goal_key, 'left': self.active_goal_key}
         self._ctx_goalset = {'right': (None, None, 0.0), 'left': (None, None, 0.0)}
@@ -805,8 +806,9 @@ class SharedControlNode(Node):
         """UNION goal exclusions applied to BOTH arms' belief estimators.
 
         A cylinder held by EITHER arm is un-graspable by both (its Top/Side goals
-        excluded everywhere). The Platform placement goal is demandable for an arm
-        only if THAT arm is currently holding something.
+        excluded everywhere). The Platform placement goal(s) are demandable for an
+        arm only if THAT arm is currently holding something — when it holds, ALL
+        platforms become demandable (both hands, both platforms).
         """
         held = set()
         for a in ('right', 'left'):
@@ -819,7 +821,7 @@ class SharedControlNode(Node):
                 excl.add(f"{color}_Top")
                 excl.add(f"{color}_Side")
             if not self._arm_grasped(arm):
-                excl.add(self.goal_set.PLATFORM_KEY)
+                excl.update(self.goal_set.platform_keys)
             self._be[arm].set_excluded_goals(excl)
 
     def _switch_active_arm(self, new_arm):
