@@ -115,12 +115,14 @@ Exposing the two channels independently fixes the previous **unfairness** (the c
 
 | CONTROL_MODE | ASSIST_FEEDBACK | ASSIST_BLENDING | Condition | Teleop + force manager |
 |---|---|---|---|---|
-| CLUTCH | False | False | Sync only (baseline) | `teleop_triago_clutch` + `haptic_force_manager_noguidance_tutorial` |
-| CLUTCH | True | False | Guided feedback (VF) | `teleop_triago_clutch` + `haptic_force_manager_tutorial` |
-| CLUTCH | True | True | Full guidance | `teleop_triago_clutch` + `haptic_force_manager_full_tutorial` (NEW) |
-| JOYSTICK | False | False | Sync only | `teleop_triago_joystick` + `haptic_force_manager_joystick_sync_tutorial` (NEW) |
-| JOYSTICK | False | True | Guided blending | `teleop_triago_joystick` + `haptic_force_manager_blending_tutorial` |
-| JOYSTICK | True | True | Full guidance | `teleop_triago_joystick` + (joystick full manager, NEW) |
+| CLUTCH | False | False | Sync only (baseline) | `teleop_triago_clutch` + `haptic_force_manager_C` |
+| CLUTCH | True | False | Guided feedback (VF) | `teleop_triago_clutch` + `haptic_force_manager_CF` |
+| CLUTCH | True | True | Full guidance | `teleop_triago_clutch` + `haptic_force_manager_CFB` |
+| JOYSTICK | False | False | Sync only | `teleop_triago_joystick` + `haptic_force_manager_J` |
+| JOYSTICK | False | True | Guided blending | `teleop_triago_joystick` + `haptic_force_manager_JB` |
+| JOYSTICK | True | True | Full guidance | `teleop_triago_joystick` + `haptic_force_manager_JFB` *(not yet implemented)* |
+
+**Force-manager naming convention.** Every force manager is `haptic_force_manager_<CELL>`, where `<CELL>` encodes the active study condition as letters: **C** = CLUTCH or **J** = JOYSTICK (the control mode, always first), then **F** if `ASSIST_FEEDBACK` is on, then **B** if `ASSIST_BLENDING` is on. The no-assist baseline is just the mode letter, so the six cells are `C / CF / CFB` (clutch) and `J / JB / JFB` (joystick). The `_tutorial` suffix was dropped in this rename, and the demo/legacy scripts (`haptic_force_manager_battery`, `teleop_demo_integrator`, `teleop_triago`) were removed from the package.
 
 Every teleop / force-manager node calls `cfg.validate_condition(node_name, control_mode=…, feedback=…, blending=…)` at startup and **HARD-ERRORS on mismatch** (teleop nodes constrain only the control mode since they serve all three of their column's cells; force managers pin the full triple), so a mis-launched condition fails loudly instead of silently running the wrong strategy.
 
@@ -275,16 +277,16 @@ ros2 launch triago_control visualize.launch.py
 ros2 run haption_teleoperation virtuose_server_node
 #   CLUTCH, sync only        (F=0, B=0):
 ros2 run haption_teleoperation teleop_triago_clutch.py
-ros2 run haption_teleoperation haptic_force_manager_noguidance_tutorial.py
+ros2 run haption_teleoperation haptic_force_manager_C.py
 #   CLUTCH, guided feedback  (F=1, B=0):
 ros2 run haption_teleoperation teleop_triago_clutch.py
-ros2 run haption_teleoperation haptic_force_manager_tutorial.py
+ros2 run haption_teleoperation haptic_force_manager_CF.py
 #   CLUTCH, full guidance    (F=1, B=1):
 ros2 run haption_teleoperation teleop_triago_clutch.py
-ros2 run haption_teleoperation haptic_force_manager_full_tutorial.py   # (NEW)
+ros2 run haption_teleoperation haptic_force_manager_CFB.py   # (NEW)
 #   JOYSTICK, guided blending (F=0, B=1):
 ros2 run haption_teleoperation teleop_triago_joystick.py
-ros2 run haption_teleoperation haptic_force_manager_blending_tutorial.py
+ros2 run haption_teleoperation haptic_force_manager_JB.py
 ```
 
 **Gazebo Link Attacher** (external dependency, kinematic attach/detach during grasping — not part of this repo):

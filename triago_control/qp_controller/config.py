@@ -61,12 +61,17 @@ ORIENTATION_CTRL = True         # True = control Pos+Ori (6DOF), False = Pos onl
 #
 #   CONTROL_MODE  ASSIST_FEEDBACK  ASSIST_BLENDING   condition              force manager
 #   ------------  ---------------  ---------------   --------------------   ----------------------------------------
-#   CLUTCH        False            False             Sync only              haptic_force_manager_noguidance_tutorial
-#   CLUTCH        True             False             Guided feedback (VF)   haptic_force_manager_tutorial
-#   CLUTCH        True             True              Full guidance          haptic_force_manager_full_tutorial (NEW)
-#   JOYSTICK      False            False             Sync only              haptic_force_manager_joystick_sync_tutorial (NEW)
-#   JOYSTICK      False            True              Guided blending        haptic_force_manager_blending_tutorial
-#   JOYSTICK      True             True              Full guidance          (joystick full manager)   [other agent]
+#   CLUTCH        False            False             Sync only              haptic_force_manager_C
+#   CLUTCH        True             False             Guided feedback (VF)   haptic_force_manager_CF
+#   CLUTCH        True             True              Full guidance          haptic_force_manager_CFB
+#   JOYSTICK      False            False             Sync only              haptic_force_manager_J
+#   JOYSTICK      False            True              Guided blending        haptic_force_manager_JB
+#   JOYSTICK      True             True              Full guidance          haptic_force_manager_JFB (not yet implemented)
+#
+# Force-manager naming: every file is haptic_force_manager_<CELL>, where <CELL>
+# encodes the active study condition -- C=CLUTCH / J=JOYSTICK (control mode,
+# always first), then F if ASSIST_FEEDBACK and B if ASSIST_BLENDING. Baseline
+# (no assist) is just the mode letter. So C/CF/CFB (clutch) and J/JB/JFB (joystick).
 #
 # Each teleop / force-manager node calls cfg.validate_condition(...) at startup
 # and HARD-ERRORS if the launched node does not match the selected condition, so
@@ -173,7 +178,7 @@ JOYSTICK_DAMP_ANG = 0.075            # unitless fraction of handle angular veloc
 # commanded twist. LOWER -> stronger sync (1.0 = 1:1); higher -> looser.
 JOYSTICK_ROT_HOME_SCALE = 1.3
 
-# --- Restorative centering spring (haptic_force_manager_blending_tutorial.py) --
+# --- Restorative centering spring (haptic_force_manager_JB.py) --
 # The ONLY haptic force rendered in joystick mode: a virtual spring-damper pulling
 # the handle back to the (dynamic) home pose. No F_guide / F_fixture / F_sync.
 JOYSTICK_SPRING_KP_LIN = 60.0        # N/m        (stiffer: resists driving far from home)
@@ -182,7 +187,7 @@ JOYSTICK_SPRING_KP_ANG = 1.5         # Nm/rad
 JOYSTICK_SPRING_KD_ANG = 0.15        # Nm/(rad/s)
 
 # Topic carrying the live joystick home pose (teleop_triago_joystick.py ->
-# haptic_force_manager_blending_tutorial.py) so both nodes agree on the SAME
+# haptic_force_manager_JB.py) so both nodes agree on the SAME
 # dynamic home (single source of truth -- the teleop node owns it). Layout:
 #   [pos_x, pos_y, pos_z, quat_x, quat_y, quat_z, quat_w] in the Haption base frame.
 JOYSTICK_HOME_POSE_TOPIC = "/joystick/home_pose"

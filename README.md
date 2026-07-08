@@ -153,10 +153,21 @@ ros2 run haption_teleoperation virtuose_server_node
 ros2 run haption_teleoperation teleop_triago_clutch.py
 
 # 8. Force feedback to the operator (Virtual-Fixture guidance)
-ros2 run haption_teleoperation haptic_force_manager_tutorial.py
+ros2 run haption_teleoperation haptic_force_manager_CF.py
 ```
 
-> The active force-feedback node is `haptic_force_manager_tutorial.py`. It consumes `/shared_autonomy/{goal_names, goal_probabilities, user_policy, active_goal_pose, grasp_active}` published by `main_shared_autonomy.py` to compute the guidance wrench sent to the Haption device.
+> The active force-feedback node above is `haptic_force_manager_CF.py`. It consumes `/shared_autonomy/{goal_names, goal_probabilities, user_policy, active_goal_pose, grasp_active}` published by `main_shared_autonomy.py` to compute the guidance wrench sent to the Haption device.
+>
+> **Force-manager naming convention.** Every force manager is `haptic_force_manager_<CELL>`, where `<CELL>` encodes the active study condition as letters: **C** = CLUTCH or **J** = JOYSTICK (the control mode, always first), then **F** if `ASSIST_FEEDBACK` is on, then **B** if `ASSIST_BLENDING` is on. The no-assist baseline is just the mode letter. The six study cells are therefore:
+>
+> | File | CONTROL_MODE | ASSIST_FEEDBACK | ASSIST_BLENDING | Condition |
+> |---|---|---|---|---|
+> | `haptic_force_manager_C` | CLUTCH | False | False | Sync only (baseline) |
+> | `haptic_force_manager_CF` | CLUTCH | True | False | Guided feedback (VF) |
+> | `haptic_force_manager_CFB` | CLUTCH | True | True | Full guidance |
+> | `haptic_force_manager_J` | JOYSTICK | False | False | Sync only (baseline) |
+> | `haptic_force_manager_JB` | JOYSTICK | False | True | Guided blending |
+> | `haptic_force_manager_JFB` | JOYSTICK | True | True | Full guidance *(not yet implemented)* |
 
 ### QP Safety Controller (bimanual arms)
 
