@@ -142,11 +142,11 @@ JOYSTICK_NEUTRAL_ORIENTATION_XYZW = [-0.015140674076974392, 0.8170770406723022,
 # The commanded twist magnitude is STRICTLY PROPORTIONAL to the handle's distance
 # from home, past a deadband. Deadband: displacement below these -> zero twist
 # (and, in the arbitration, a zero user twist is treated as perfectly ALIGNED so
-# the autonomy leads the motion). Both reduced 10% (LIN 0.096 -> 0.0864,
-# ANG 0.288 -> 0.2592) for a slightly more responsive handle while still rejecting
-# the centering spring's residual settle-oscillation near home -- to be tuned.
-JOYSTICK_DEADBAND_LIN = 0.0864       # m   (8.64 cm) -- large: the spring can't settle to mm precision
-JOYSTICK_DEADBAND_ANG = 0.2592       # rad (~14.85 deg) -- large: residual oscillation around home
+# the autonomy leads the motion). Shrunk further for a more responsive handle:
+# LIN -20% (0.0864 -> 0.06912), ANG -10% (0.2592 -> 0.23328) -- still large enough
+# to reject the centering spring's residual settle-oscillation near home.
+JOYSTICK_DEADBAND_LIN = 0.06912      # m   (6.91 cm) -- large: the spring can't settle to mm precision
+JOYSTICK_DEADBAND_ANG = 0.23328      # rad (~13.37 deg) -- large: residual oscillation around home
 JOYSTICK_K_TRANS = 1.6               # (m/s) per m of handle linear displacement
 JOYSTICK_K_ROT = 1.5                 # (rad/s) per rad of handle angular displacement
 JOYSTICK_V_MAX_LIN = 0.10            # m/s   hard safety clamp on the commanded linear twist
