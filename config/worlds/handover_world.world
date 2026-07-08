@@ -109,7 +109,7 @@
          Carries the FINAL placement platform for the right hand. -->
     <model name="side_table">
       <static>true</static>
-      <pose>1.000 -0.85 0.35 0 0 0</pose>
+      <pose>0.900 -0.85 0.35 0 0 0</pose>
       <link name="link">
         <collision name="col">
           <geometry><box><size>0.3 0.3 0.7</size></box></geometry>
@@ -157,7 +157,7 @@
          handover_world.yaml's `platforms:` list). -->
     <model name="placement_area_final">
       <static>true</static>
-      <pose>1.000 -0.85 0.701 0 0 0</pose>
+      <pose>0.900 -0.85 0.701 0 0 0</pose>
       <link name="link">
         <visual name="vis">
           <geometry><cylinder><radius>0.10</radius><length>0.002</length></cylinder></geometry>
