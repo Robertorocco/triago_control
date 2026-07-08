@@ -78,14 +78,14 @@
     </model>
 
     <!-- Table divider: a vertical wall standing on the main table at y=0,
-         spanning the table's x extent, 0.30 m tall (top at z=1.00). Splits the
+         spanning the table's x extent, 0.20 m tall (top at z=0.90). Splits the
          table into a LEFT half (y>0) and a RIGHT half (y<0). -->
     <model name="table_divider">
       <static>true</static>
-      <pose>1.000 0.0 0.85 0 0 0</pose>
+      <pose>1.000 0.0 0.80 0 0 0</pose>
       <link name="link">
         <collision name="col">
-          <geometry><box><size>0.6 0.03 0.30</size></box></geometry>
+          <geometry><box><size>0.6 0.03 0.20</size></box></geometry>
           <surface>
             <contact>
               <ode>
@@ -99,17 +99,17 @@
           </surface>
         </collision>
         <visual name="vis">
-          <geometry><box><size>0.6 0.03 0.30</size></box></geometry>
+          <geometry><box><size>0.6 0.03 0.20</size></box></geometry>
           <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
         </visual>
       </link>
     </model>
 
-    <!-- Side table (smaller, further right): RIGHT of the main table (y=-0.65).
+    <!-- Side table (smaller, further right): RIGHT of the main table (y=-0.85).
          Carries the FINAL placement platform for the right hand. -->
     <model name="side_table">
       <static>true</static>
-      <pose>1.000 -0.65 0.35 0 0 0</pose>
+      <pose>1.000 -0.85 0.35 0 0 0</pose>
       <link name="link">
         <collision name="col">
           <geometry><box><size>0.3 0.3 0.7</size></box></geometry>
@@ -152,12 +152,12 @@
       </link>
     </model>
 
-    <!-- FINAL platform (green): on the side table (y=-0.65), r=0.10. Where the
+    <!-- FINAL platform (green): on the side table (y=-0.85), r=0.10. Where the
          RIGHT hand ultimately places the cylinder. Real Platform_Final goal (see
          handover_world.yaml's `platforms:` list). -->
     <model name="placement_area_final">
       <static>true</static>
-      <pose>1.000 -0.65 0.701 0 0 0</pose>
+      <pose>1.000 -0.85 0.701 0 0 0</pose>
       <link name="link">
         <visual name="vis">
           <geometry><cylinder><radius>0.10</radius><length>0.002</length></cylinder></geometry>

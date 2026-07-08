@@ -72,7 +72,8 @@ class VisualizationEngine:
         self._q_provider = None  # callable returning the live joint configuration
 
         # Optional external telemetry visualizer (debug tethers etc.)
-        self.qp_viz = QPVisualizer(self.node, ref_frame=cfg.REF_FRAME) if _HAS_QP_VISUALIZER else None
+        self.qp_viz = QPVisualizer(self.node, ref_frame=cfg.REF_FRAME,
+                                   world_scene=self.world_scene) if _HAS_QP_VISUALIZER else None
 
         # --- RViz MARKER PUBLISHERS ---
         self.pub_wall_marker = self.node.create_publisher(Marker, '/qp_debug/virtual_wall_marker', 10)

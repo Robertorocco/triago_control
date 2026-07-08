@@ -24,11 +24,11 @@
 #
 # GEOMETRY (axis-aligned boxes / disks):
 #   main table:  center [1.0, 0.0, 0.35], size [0.6,0.5,0.7]  (top z=0.70)
-#   divider:     center [1.0, 0.0, 0.85], size [0.6,0.03,0.30] (on table, top z=1.00)
-#   side table:  center [1.0,-0.65,0.35], size [0.3,0.3,0.7]  (top z=0.70)
+#   divider:     center [1.0, 0.0, 0.80], size [0.6,0.03,0.20] (on table, top z=0.90)
+#   side table:  center [1.0,-0.85,0.35], size [0.3,0.3,0.7]  (top z=0.70)
 #   cylinders:   blue (LEFT)  [0.80,+0.20,0.775]; red (RIGHT) [0.80,-0.20,0.775]
 #   HANDOVER platform: center [1.0,-0.12,0.701], r=0.09 (right half of main table)
-#   FINAL platform:    center [1.0,-0.65,0.701], r=0.10 (on the side table)
+#   FINAL platform:    center [1.0,-0.85,0.701], r=0.10 (on the side table)
 #
 # Matches config/worlds/handover_world.world. Run with world_name:=handover_world.
 # See triago_control/qp_controller/world_loader.py for the full schema.
@@ -67,8 +67,8 @@ static_obstacles:
   - name: "table_divider"
     role: "obstacle"
     shape: "box"
-    pose: [1.0, 0.0, 0.85, 0.0, 0.0, 0.0]
-    size: [0.6, 0.03, 0.30]
+    pose: [1.0, 0.0, 0.80, 0.0, 0.0, 0.0]
+    size: [0.6, 0.03, 0.20]
     color: [0.5, 0.5, 0.55, 1.0]
     collision: true
 
@@ -77,7 +77,7 @@ static_obstacles:
   - name: "side_table"
     role: "obstacle"
     shape: "box"
-    pose: [1.0, -0.65, 0.35, 0.0, 0.0, 0.0]
+    pose: [1.0, -0.85, 0.35, 0.0, 0.0, 0.0]
     size: [0.3, 0.3, 0.7]
     color: [0.6, 0.4, 0.2, 0.8]
     collision: true
@@ -100,7 +100,7 @@ platforms:
     thickness: 0.002
     place_margin: 0.03
   - name: "Final"
-    pose: [1.000, -0.65, 0.701]
+    pose: [1.000, -0.85, 0.701]
     radius: 0.10
     thickness: 0.002
     place_margin: 0.03

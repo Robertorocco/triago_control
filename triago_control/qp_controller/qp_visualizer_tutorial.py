@@ -7,9 +7,14 @@ import numpy as np
 from scipy.spatial.transform import Rotation as R # NEW IMPORT
 
 class QPVisualizer:
-    def __init__(self, node, ref_frame='base_link'):
+    def __init__(self, node, ref_frame='base_link', world_scene=None):
         self.node = node
         self.ref_frame = ref_frame
+        # Loaded world scene (world_loader.WorldScene, optional): drives the
+        # placement-disk marker(s) below so RViz shows the CURRENT world's
+        # platform(s) at their real poses/radii instead of a hard-coded default
+        # center disk. None -> legacy single centered yellow disk.
+        self.world_scene = world_scene
         self.pub = node.create_publisher(MarkerArray, '/qp_debug_visualization', 10)
 
         #  Dedicated channel for Teleoperation graphics
@@ -482,14 +487,32 @@ class QPVisualizer:
         # --- 3. Blue Cylinder (Left Hand Manipulandum) ---
         # REMOVED: same reason as above.
 
-        # --- 4. Target Placement Area (Yellow Manifold on Table) ---
-        # Represented as a very flat cylinder slightly elevated above the table surface
-        markers.markers.append(create_cylinder_marker(
-            idx, 
-            [1.000, 0.0, 0.701], 
-            0.15, 0.002, 
-            ColorRGBA(r=1.0, g=1.0, b=0.0, a=0.6)
-        ))
-        idx += 1
+        # --- 4. Target Placement Area(s) (flat disks on the table) ---
+        # Draw EVERY platform of the loaded world (multi-platform), each a very
+        # flat cylinder slightly above the table. Colors cycle so distinct disks
+        # are distinguishable and match the Gazebo scheme (1st yellow, 2nd green,
+        # ...). Falls back to the legacy single centered yellow disk when no world
+        # scene was provided. (The periodic DELETEALL sweep clears any stale disk
+        # from a previous world, so switching worlds never leaves an orphan.)
+        _platform_rgba = [
+            ColorRGBA(r=1.0, g=1.0, b=0.0, a=0.6),   # yellow
+            ColorRGBA(r=0.0, g=0.8, b=0.0, a=0.6),   # green
+            ColorRGBA(r=0.0, g=0.8, b=0.8, a=0.6),   # cyan
+            ColorRGBA(r=0.8, g=0.0, b=0.8, a=0.6),   # magenta
+        ]
+        _platforms = (self.world_scene.platforms
+                      if (self.world_scene is not None
+                          and getattr(self.world_scene, 'platforms', None))
+                      else None)
+        if _platforms:
+            for pi, p in enumerate(_platforms):
+                markers.markers.append(create_cylinder_marker(
+                    idx, p.pose, float(p.radius), max(float(p.thickness), 0.004),
+                    _platform_rgba[pi % len(_platform_rgba)]))
+                idx += 1
+        else:
+            markers.markers.append(create_cylinder_marker(
+                idx, [1.000, 0.0, 0.701], 0.15, 0.002, _platform_rgba[0]))
+            idx += 1
 
         self.pub.publish(markers)
