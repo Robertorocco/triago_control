@@ -1036,6 +1036,21 @@ class SharedControlNode(Node):
         if self.POLICY_BELIEF_TEST:
             self.current_T_user = self.current_T_EE.copy()
 
+        # --- Belief anchor: the pose the intent inference reasons FROM ----------
+        # The user-policies (the twist the operator is scored against) are
+        # evaluated STARTING FROM this pose. In the CLUTCH full-guidance cell
+        # (CONTROL_MODE=CLUTCH + ASSIST_BLENDING) the operator teleoperates by
+        # WATCHING THE BLENDED REFERENCE GRIPPER (self.T_blend_ref) and shapes
+        # their twist relative to IT — the clutch's own integrated pose
+        # (current_T_user) is not what they look at and is meaningless as an
+        # anchor here. So anchor the belief at the blended gripper. Every OTHER
+        # cell is unchanged: joystick already puts the live EE in current_T_user,
+        # and the non-blend clutch tracks the user's integrated pose directly.
+        belief_anchor = self.current_T_user
+        if (cfg.CONTROL_MODE == cfg.CLUTCH and cfg.ASSIST_BLENDING
+                and self._blend_ref_valid):
+            belief_anchor = self.T_blend_ref
+
         # 1. Evaluate Optimal Policies (Dual Evaluation)
         ee_policies = {}
         user_policies = {}
@@ -1087,7 +1102,7 @@ class SharedControlNode(Node):
                     # Uses the lower teleop-aware velocity limits so the guidance
                     # field doesn't demand speeds the hand can't comfortably track.
                     v_geo_user = self.compute_v_geo(
-                        self.current_T_user, T_goal,
+                        belief_anchor, T_goal,
                         v_max_lin=self.v_max_lin_user,
                         w_max_ang=self.w_max_ang_user)
                     user_policies[key] = self.solve_local_policy(v_geo_user, self.J_c, self.h_c)
@@ -1474,7 +1489,7 @@ class SharedControlNode(Node):
                     if pi_blend_user is not None:
                         guidance_markers = MarkerArray()
                         guid_now = self.get_clock().now().to_msg()
-                        T_guid_1 = self.integrate_twist(self.current_T_user, pi_blend_user, 0.5)
+                        T_guid_1 = self.integrate_twist(belief_anchor, pi_blend_user, 0.5)
                         guidance_markers.markers.extend(
                             self.create_gripper_markers(
                                 T_guid_1, 0.85, 0, guid_now,
