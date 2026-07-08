@@ -120,7 +120,7 @@ Exposing the two channels independently fixes the previous **unfairness** (the c
 | CLUTCH | True | True | Full guidance | `teleop_triago_clutch` + `haptic_force_manager_CFB` |
 | JOYSTICK | False | False | Sync only | `teleop_triago_joystick` + `haptic_force_manager_J` |
 | JOYSTICK | False | True | Guided blending | `teleop_triago_joystick` + `haptic_force_manager_JB` |
-| JOYSTICK | True | True | Full guidance | `teleop_triago_joystick` + `haptic_force_manager_JFB` *(not yet implemented)* |
+| JOYSTICK | True | True | Full guidance | `teleop_triago_joystick` + `haptic_force_manager_JFB` (centering spring + F_guide, guide calibrated to the deadzone-exit force) |
 
 **Force-manager naming convention.** Every force manager is `haptic_force_manager_<CELL>`, where `<CELL>` encodes the active study condition as letters: **C** = CLUTCH or **J** = JOYSTICK (the control mode, always first), then **F** if `ASSIST_FEEDBACK` is on, then **B** if `ASSIST_BLENDING` is on. The no-assist baseline is just the mode letter, so the six cells are `C / CF / CFB` (clutch) and `J / JB / JFB` (joystick). The `_tutorial` suffix was dropped in this rename, and the demo/legacy scripts (`haptic_force_manager_battery`, `teleop_demo_integrator`, `teleop_triago`) were removed from the package.
 
