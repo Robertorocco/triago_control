@@ -139,17 +139,15 @@ class SharedControlNode(Node):
         self.alpha_lpf = 0.0
         self.last_alpha = 0.0   # most recent alpha actually applied (for telemetry)
 
-        # --- Option A: CLUTCH idle-crawl hold (2026-07-08) --------------------
-        # In the CLUTCH cell, when the operator is momentarily STILL but the robot
-        # has NOT yet caught up to the pose they steered the blended gripper to,
-        # the idle crawl is SUPPRESSED (held) so it cannot drag the reference back
-        # toward the goal — whose Side azimuth is pinned to the LAGGING EE, which
-        # is what undoes the side the operator just commanded. The crawl resumes
-        # once the tracking lead drops below CLUTCH_CRAWL_HOLD_LEAD (robot arrived,
-        # goal azimuth refreshed). Only affects the CLUTCH control mode.
-        self.CLUTCH_CRAWL_HOLD_LEAD = 0.03   # m    tracking lead above which we hold
-        self.CLUTCH_CRAWL_STILL_LIN = 0.005  # m/s  below this -> user "still" (linear)
-        self.CLUTCH_CRAWL_STILL_ANG = 0.05   # rad/s below this -> user "still" (angular)
+        # --- Option A: CLUTCH "still -> hold" (2026-07-08) --------------------
+        # In the CLUTCH cell the autonomy must NOT drive the robot while the
+        # operator holds the handle still: whenever the commanded user twist is
+        # below these thresholds, blending is suspended (alpha=0) and the
+        # reference is held, so the idle crawl can never creep the arm toward the
+        # goal on its own. Blending (assist) only acts WHILE the operator is
+        # actively moving. Only affects the CLUTCH control mode.
+        self.CLUTCH_STILL_LIN = 0.005  # m/s   below this -> user "still" (linear)
+        self.CLUTCH_STILL_ANG = 0.05   # rad/s below this -> user "still" (angular)
         # Actual EE twist (finite-difference + EMA) -- the observed action for the
         # EE-based belief inference used in joystick mode. See _update_ee_twist.
         self._ee_twist = np.zeros(6)
@@ -591,25 +589,18 @@ class SharedControlNode(Node):
         """Tracks the clutch (right button) state for CLUTCH-mode blend suspension."""
         self.clutch_engaged = bool(msg.data)
 
-    def _clutch_crawl_hold(self, v_user):
-        """Option A gate (CLUTCH only): True when the operator is STILL AND the
-        robot has not yet caught up to the commanded blended reference.
+    def _clutch_user_still(self, v_user):
+        """Option A gate (CLUTCH only): True when the operator's commanded twist is
+        below the 'still' thresholds.
 
-        In that state the idle crawl would drag the reference back toward the goal
-        whose Side azimuth is pinned to the lagging EE, undoing the side the
-        operator just steered to. So we HOLD (alpha=0) until the tracking lead
-        drops below CLUTCH_CRAWL_HOLD_LEAD, i.e. the robot has arrived and the
-        EE-derived goal azimuth has refreshed. See __init__ for the thresholds.
+        When the operator holds the handle still, the CLUTCH cell must NOT blend:
+        the reference is held (alpha=0) so the autonomy never creeps the robot
+        toward the goal on its own. No tracking-error / lead check — stillness
+        alone suspends the blend. See __init__ for the thresholds.
         """
-        if not self._blend_ref_valid:
-            return False
-        lin_still = float(np.linalg.norm(v_user[0:3])) < self.CLUTCH_CRAWL_STILL_LIN
-        ang_still = float(np.linalg.norm(v_user[3:6])) < self.CLUTCH_CRAWL_STILL_ANG
-        if not (lin_still and ang_still):
-            return False
-        lead = float(np.linalg.norm(
-            self.T_blend_ref[:3, 3] - self.current_T_EE[:3, 3]))
-        return lead > self.CLUTCH_CRAWL_HOLD_LEAD
+        lin_still = float(np.linalg.norm(v_user[0:3])) < self.CLUTCH_STILL_LIN
+        ang_still = float(np.linalg.norm(v_user[3:6])) < self.CLUTCH_STILL_ANG
+        return lin_still and ang_still
 
     def grasp_contact_callback(self, msg):
         """Stores the signed gripper<->cylinder collision distance [red, blue] (m)."""
@@ -1368,16 +1359,14 @@ class SharedControlNode(Node):
                 alpha = 0.0
                 self.alpha_lpf = 0.0
                 target_twist = np.zeros(6)
-            elif cfg.CONTROL_MODE == cfg.CLUTCH and self._clutch_crawl_hold(v_user):
-                # OPTION A (CLUTCH only): the operator is momentarily STILL but the
-                # robot has NOT yet caught up to the pose they steered the blended
-                # gripper to (tracking lead > CLUTCH_CRAWL_HOLD_LEAD). The idle
-                # crawl here would drag the reference BACK toward the goal, whose
-                # Side azimuth is pinned to the LAGGING EE — undoing the side the
-                # operator just commanded. So HOLD (alpha=0, pure user twist): the
-                # QP still drives the robot to the commanded reference, the
-                # EE-derived goal azimuth refreshes as the EE arrives, and the
-                # crawl resumes only once the robot has caught up.
+            elif cfg.CONTROL_MODE == cfg.CLUTCH and self._clutch_user_still(v_user):
+                # OPTION A (CLUTCH only): the operator is holding the handle STILL,
+                # so DO NOT blend — the autonomy must not creep the robot toward
+                # the goal on its own. Force alpha=0 (pure user twist) and reset
+                # the alpha LPF so no residual crawl leaks through; the reference
+                # then holds. Blending/assist only acts while the operator is
+                # actively moving. (No tracking-error check: stillness alone
+                # suspends the blend.)
                 alpha = 0.0
                 self.alpha_lpf = 0.0
                 target_twist = v_user
