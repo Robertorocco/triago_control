@@ -56,6 +56,13 @@ T_ACTIVE_ARM = "/shared_autonomy/active_arm"
 T_ARM_FROZEN = "/qp_debug/arm_frozen"
 T_FORCE = "/virtuose/force_cmd"
 T_CLUTCH = "/virtuose/button_right"
+T_TRIGGER = "/virtuose/button_left"
+T_VIRT_POSE = "/virtuose/pose"
+T_VIRT_VEL = "/virtuose/velocity"
+T_ARTICULAR = "/virtuose/articular_position"
+T_HOME_POSE = "/joystick/home_pose"
+T_REF = {"right": "/arm_right/cartesian_reference",
+         "left":  "/arm_left/cartesian_reference"}
 
 # Per-arm column indices.
 _EE_IDX = {"right": {"pos": (0, 1, 2), "vel": (3, 4, 5)},
@@ -278,11 +285,26 @@ def _smooth(x: np.ndarray, win: int) -> np.ndarray:
 # EE speed (from PUBLISHED velocity -- /qp_debug/ee_real slots, ground truth)
 # =============================================================================
 def ee_speed_series(ee: Series, arm: str):
-    """EE linear speed for `arm` from the published v_real slots. (t, speed)."""
-    V = _stack(ee, _EE_IDX[arm]["vel"]) if ee else None
-    if V is None or len(V) == 0:
+    """EE linear speed for `arm`, DIFFERENTIATED from the published position.
+
+    NOTE: /qp_debug/ee_real's velocity slots read ~0 -- the controller's
+    forwardKinematics is called with position only (no joint velocity), so
+    pin.getFrameVelocity() returns a stale/zero twist. The POSITION slots are
+    correct, so we differentiate them and apply a light (~100 ms) smoothing to
+    tame publish jitter. Returns (t, speed) with speed the same length as t.
+    """
+    P = _stack(ee, _EE_IDX[arm]["pos"]) if ee else None
+    if ee is None or P is None or len(P) < 2:
         return None, None
-    return ee.t, np.linalg.norm(V, axis=1)
+    t = np.asarray(ee.t, dtype=float)
+    dt = np.diff(t)
+    dt[dt <= 1e-9] = np.nan                       # guard duplicate timestamps
+    v = np.diff(P, axis=0) / dt[:, None]
+    speed = np.linalg.norm(v, axis=1)
+    speed = np.concatenate([speed[:1], speed])    # pad back to len(t)
+    speed = np.nan_to_num(speed, nan=0.0, posinf=0.0, neginf=0.0)
+    win = max(1, int(0.1 * _fs_of(t)))
+    return t, _smooth(speed, win)
 
 
 # =============================================================================
