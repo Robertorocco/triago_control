@@ -27,7 +27,7 @@
 #   divider:     center [1.0, 0.0, 0.80], size [0.6,0.03,0.20] (on table, top z=0.90)
 #   side table:  center [0.9,-0.85,0.35], size [0.3,0.3,0.7]  (top z=0.70)
 #   cylinders:   blue (LEFT)  [0.80,+0.20,0.775]; red (RIGHT) [1.00,-0.12,0.775]
-#   HANDOVER platform: center [0.80,-0.20,0.701], r=0.09 (right half of main table)
+#   HANDOVER platform: center [0.80,-0.15,0.701], r=0.09 (right half of main table)
 #   FINAL platform:    center [0.9,-0.85,0.701], r=0.10 (on the side table)
 #
 # Matches config/worlds/handover_world.world. Run with world_name:=handover_world.
@@ -95,7 +95,7 @@ grasp_roles:
 #               placement.
 platforms:
   - name: "Handover"
-    pose: [0.800, -0.20, 0.701]   # took the red cylinder's former place (swapped)
+    pose: [0.800, -0.15, 0.701]   # nudged left (+y) so the r=0.09 disk fits inside the table (right edge y=-0.25)
     radius: 0.09
     thickness: 0.002
     place_margin: 0.03
