@@ -44,26 +44,72 @@ def resolve_participant_id(ros_param_value: str | None = None) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Independent variable: feedback conditions
+# Independent variable: study cell (AUTO-DERIVED from the controller config)
 # ---------------------------------------------------------------------------
-# Canonical labels used in trial-folder names and the master table. The recorder
-# validates the declared condition against ``cfg.BLENDING`` where it can.
+# The active study cell is identified AUTOMATICALLY from the three orthogonal
+# flags in triago_control.qp_controller.config -- CONTROL_MODE, ASSIST_FEEDBACK,
+# ASSIST_BLENDING -- so the experimenter never declares it. The cell CODE matches
+# the force-manager naming convention (haptic_force_manager_<CODE>):
+#   C = CLUTCH / J = JOYSTICK (control mode, always first),
+#   + F if ASSIST_FEEDBACK, + B if ASSIST_BLENDING.
 #
-#   virtual_fixture : cfg.BLENDING=False -- clutch teleop + full haptic guidance
-#                     (F_guide + F_fixture + F_sync + F_cbf ...)
-#   blending        : cfg.BLENDING=True  -- reference-level blending; the handle
-#                     feels only the centering spring
-#   no_assist       : cfg.BLENDING=False -- clutch teleop, guidance OFF
-#                     (baseline; optionally only F_sync kept)
-#
-# NOTE: 'virtual_fixture' and 'no_assist' BOTH run at cfg.BLENDING=False and are
-# indistinguishable at the flag level -> the experimenter's declaration is the
-# source of truth for those two; only 'blending' can be auto-verified.
-CONDITIONS = ("virtual_fixture", "blending", "no_assist")
+#   CONTROL_MODE  F  B   code   condition
+#   CLUTCH        0  0   C      Clutch / Sync-only (baseline)
+#   CLUTCH        1  0   CF     Clutch / Guided feedback (VF)
+#   CLUTCH        1  1   CFB    Clutch / Full guidance
+#   JOYSTICK      0  0   J      Joystick / Sync-only (baseline)
+#   JOYSTICK      0  1   JB     Joystick / Guided blending
+#   JOYSTICK      1  1   JFB    Joystick / Full guidance
+# (CLUTCH+B-only and JOYSTICK+F-only are NOT part of the fair 2x3 design.)
+VALID_CELLS = {
+    ("CLUTCH",   False, False): "C",
+    ("CLUTCH",   True,  False): "CF",
+    ("CLUTCH",   True,  True):  "CFB",
+    ("JOYSTICK", False, False): "J",
+    ("JOYSTICK", False, True):  "JB",
+    ("JOYSTICK", True,  True):  "JFB",
+}
+CELL_LABELS = {
+    "C":   "Clutch / Sync-only (baseline)",
+    "CF":  "Clutch / Guided feedback (VF)",
+    "CFB": "Clutch / Full guidance",
+    "J":   "Joystick / Sync-only (baseline)",
+    "JB":  "Joystick / Guided blending",
+    "JFB": "Joystick / Full guidance",
+}
 
-# Which conditions imply cfg.BLENDING == True (used only for the sanity-check
-# warning in the recorder; never to change behaviour).
-BLENDING_CONDITIONS = ("blending",)
+
+def derive_cell(cfg) -> dict:
+    """Identify the active study cell from the controller config flags.
+
+    Returns {code, label, control_mode, assist_feedback, assist_blending, valid,
+    warning}. ``code`` is the C/CF/CFB/J/JB/JFB tag used in trial-folder names and
+    the master table. ``valid`` is False for a flag combination outside the fair
+    2x3 design (the trial is still recorded, just flagged). Never raises: a missing
+    cfg yields a clearly-marked 'unknown' cell so the recorder can still capture
+    the bag.
+    """
+    if cfg is None:
+        return {"code": "unknown",
+                "label": "cfg unavailable (cell not auto-detected)",
+                "control_mode": None, "assist_feedback": None,
+                "assist_blending": None, "valid": False,
+                "warning": "triago_control.qp_controller.config not importable"}
+    mode = str(getattr(cfg, "CONTROL_MODE", "?"))
+    fb = bool(getattr(cfg, "ASSIST_FEEDBACK", False))
+    bl = bool(getattr(cfg, "ASSIST_BLENDING", False))
+    code = VALID_CELLS.get((mode, fb, bl))
+    if code is not None:
+        return {"code": code, "label": CELL_LABELS[code], "control_mode": mode,
+                "assist_feedback": fb, "assist_blending": bl, "valid": True,
+                "warning": None}
+    # Outside the 2x3 design -- still build a descriptive code so nothing crashes.
+    letter = "C" if mode == "CLUTCH" else ("J" if mode == "JOYSTICK" else "X")
+    code = letter + ("F" if fb else "") + ("B" if bl else "")
+    return {"code": code, "label": f"NON-STUDY cell ({mode}, F={fb}, B={bl})",
+            "control_mode": mode, "assist_feedback": fb, "assist_blending": bl,
+            "valid": False,
+            "warning": f"({mode}, F={fb}, B={bl}) is not one of the 6 fair 2x3 cells"}
 
 
 # ---------------------------------------------------------------------------
@@ -81,7 +127,7 @@ DATA_ROOT = os.path.expanduser(
 MASTER_TABLE_NAME = "trials_summary.csv"
 
 # --- Trial folder layout -------------------------------------------------
-# DATA_ROOT/<PARTICIPANT_ID>/<world_shortcut>_<condition_short>/
+# DATA_ROOT/<PARTICIPANT_ID>/<world_shortcut>_<cell_code>/   (e.g. shield_JB)
 #   The innermost folder IS the rosbag output directory (`ros2 bag record -o`),
 #   so it also holds rosbag2's own metadata.yaml and the .db3/.mcap file. Our
 #   metadata.json (METADATA_NAME) and the offline-cached timeseries
@@ -90,29 +136,21 @@ MASTER_TABLE_NAME = "trials_summary.csv"
 METADATA_NAME = "metadata.json"
 TIMESERIES_NAME = "timeseries"          # extension added per TIMESERIES_FORMAT
 
-# Short codes used in bag-folder names (terse, so folders are easy to eyeball).
-STRATEGY_SHORTCUTS = {
-    "virtual_fixture": "vf",
-    "blending": "bl",
-    "no_assist": "na",
-}
-
-
 def participant_dir(participant: str) -> str:
     """Absolute path of a participant's folder under DATA_ROOT."""
     return os.path.join(DATA_ROOT, participant)
 
 
-def bag_folder_name(world_shortcut: str, condition: str) -> str:
-    """Bag folder name '<world_shortcut>_<condition_short>' (e.g. 'shield_bl')."""
-    short = STRATEGY_SHORTCUTS.get(condition, condition)
-    return f"{world_shortcut}_{short}"
+def bag_folder_name(world_shortcut: str, cell_code: str) -> str:
+    """Bag folder name '<world_shortcut>_<cell_code>' (e.g. 'shield_JB'). The
+    cell_code is the auto-derived C/CF/CFB/J/JB/JFB tag (see derive_cell)."""
+    return f"{world_shortcut}_{cell_code}"
 
 
-def bag_path(participant: str, world_shortcut: str, condition: str) -> str:
+def bag_path(participant: str, world_shortcut: str, cell_code: str) -> str:
     """Absolute rosbag output directory for one trial (overwritten on re-record)."""
     return os.path.join(participant_dir(participant),
-                        bag_folder_name(world_shortcut, condition))
+                        bag_folder_name(world_shortcut, cell_code))
 
 
 # ---------------------------------------------------------------------------
@@ -144,6 +182,8 @@ BAG_TOPICS = [
     "/qp_debug/d_safe_dynamic",
     "/qp_debug/dynamic_weights",
     "/qp_debug/task_authority",
+    "/qp_debug/governor",        # reference-governor clamp telemetry (raw - governed)
+    "/qp_debug/arm_frozen",      # [right_frozen, left_frozen] -- ground-truth active arm
     "/qp_debug/loop_freq",
     "/collision_constraints",
 
@@ -205,6 +245,8 @@ BELIEF_CONFIDENCE = 0.80        # goal probability above this = "intent locked"
 # metadata.json for reproducibility. Missing attributes are silently skipped,
 # so this list can safely name more than any single cfg version defines.
 CFG_SNAPSHOT_KEYS = (
+    # The condition selector itself (identifies the study cell) -- captured first.
+    "CONTROL_MODE", "ASSIST_FEEDBACK", "ASSIST_BLENDING",
     "BLENDING",
     "ALIGN_ALPHA_IDLE", "ALIGN_ALPHA_MIN", "ALIGN_ALPHA_MAX", "ALIGN_ALPHA_LPF_COEFF",
     "JOYSTICK_DEADBAND_LIN", "JOYSTICK_DEADBAND_ANG",

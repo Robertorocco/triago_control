@@ -13,7 +13,9 @@ Design (see triago_control/.kiro/context.md §15):
     inside it. Re-recording the same (participant, world, condition) OVERWRITES.
 
 GUI workflow:
-  1. Fill Participant (prefilled), World shortcut, and Feedback strategy.
+  1. Fill Participant (prefilled) and World shortcut. The study cell
+     (C/CF/CFB/J/JB/JFB) is AUTO-DETECTED from the controller config
+     (CONTROL_MODE / ASSIST_FEEDBACK / ASSIST_BLENDING) and shown read-only.
   2. Press START  -> `ros2 bag record` begins; a timer runs.
   3. Press STOP   -> the bag is closed cleanly (SIGINT).
   4. Mark Success (Yes/No) + optional Notes, press SAVE -> metadata.json written,
@@ -62,13 +64,6 @@ except Exception as _exc:  # pragma: no cover - environment dependent
     tk = ttk = messagebox = None  # type: ignore
     _TK_IMPORT_ERROR = _exc
 
-
-# Human-readable labels for the three feedback conditions (canonical -> label).
-CONDITION_LABELS = {
-    "virtual_fixture": "Virtual Fixture (vf)",
-    "blending": "Blending / Joystick (bl)",
-    "no_assist": "No Assistance (na)",
-}
 
 # How long to wait for `ros2 bag record` to finalise after SIGINT before forcing.
 _STOP_GRACE_S = 15.0
@@ -124,16 +119,19 @@ class RecorderApp:
         root.protocol("WM_DELETE_WINDOW", self._on_close)
         root.resizable(False, False)
 
+        # Study cell is AUTO-DETECTED from the controller config -- never picked.
+        self.cell = sc.derive_cell(cfg)
+
         self.var_participant = tk.StringVar(value=sc.resolve_participant_id())
         self.var_world = tk.StringVar(value="")
-        self.var_condition = tk.StringVar(value=sc.CONDITIONS[0])
         self.var_success = tk.StringVar(value="")
         self.var_notes = tk.StringVar(value="")
         self.var_status = tk.StringVar(value="Idle - fill the fields and press START.")
-        self.var_cfgcheck = tk.StringVar(value="")
+        self.var_cell = tk.StringVar(value="")
+        self.var_cellnote = tk.StringVar(value="")
 
         self._build_widgets()
-        self._refresh_cfg_check()
+        self._refresh_cell_display()
         self._apply_state()
 
     # ------------------------------------------------------------------ UI
@@ -152,18 +150,12 @@ class RecorderApp:
         ttk.Label(frm, text="e.g. shield, movement, noobstacle",
                   foreground="#666").grid(row=1, column=2, sticky="w", **pad)
 
-        ttk.Label(frm, text="Feedback strategy").grid(row=2, column=0, sticky="nw", **pad)
-        cond_frame = ttk.Frame(frm)
-        cond_frame.grid(row=2, column=1, columnspan=2, sticky="w", **pad)
-        self.cond_radios = []
-        for cond in sc.CONDITIONS:
-            rb = ttk.Radiobutton(cond_frame, text=CONDITION_LABELS.get(cond, cond),
-                                 value=cond, variable=self.var_condition,
-                                 command=self._refresh_cfg_check)
-            rb.pack(anchor="w")
-            self.cond_radios.append(rb)
+        ttk.Label(frm, text="Study cell (auto)").grid(row=2, column=0, sticky="nw", **pad)
+        self.lbl_cell = ttk.Label(frm, textvariable=self.var_cell,
+                                  font=("TkDefaultFont", 11, "bold"))
+        self.lbl_cell.grid(row=2, column=1, columnspan=2, sticky="w", **pad)
 
-        self.lbl_cfgcheck = ttk.Label(frm, textvariable=self.var_cfgcheck)
+        self.lbl_cfgcheck = ttk.Label(frm, textvariable=self.var_cellnote)
         self.lbl_cfgcheck.grid(row=3, column=0, columnspan=3, sticky="w", **pad)
 
         ttk.Separator(frm, orient="horizontal").grid(
@@ -198,25 +190,21 @@ class RecorderApp:
         self.btn_save = ttk.Button(frm, text="SAVE TRIAL", command=self.on_save)
         self.btn_save.grid(row=10, column=1, sticky="w", **pad)
 
-    def _refresh_cfg_check(self):
-        cond = self.var_condition.get()
-        if cfg is None or not hasattr(cfg, "BLENDING"):
-            self.var_cfgcheck.set("cfg.BLENDING unavailable - condition not auto-verified.")
-            self.lbl_cfgcheck.configure(foreground="#996600")
-            return
-        want_blending = cond in sc.BLENDING_CONDITIONS
-        actual = bool(cfg.BLENDING)
-        if cond == "blending" and not actual:
-            self.var_cfgcheck.set("MISMATCH: 'blending' selected but cfg.BLENDING=False.")
-            self.lbl_cfgcheck.configure(foreground="#cc0000")
-        elif cond in ("virtual_fixture", "no_assist") and actual:
-            self.var_cfgcheck.set(
-                f"MISMATCH: '{cond}' needs cfg.BLENDING=False but it is True.")
-            self.lbl_cfgcheck.configure(foreground="#cc0000")
+    def _refresh_cell_display(self):
+        """Show the auto-detected study cell (read-only) + its config flags."""
+        c = self.cell
+        self.var_cell.set(f"{c.get('code', 'unknown')}   {c.get('label', '')}")
+        detail = (f"CONTROL_MODE={c.get('control_mode')}, "
+                  f"ASSIST_FEEDBACK={c.get('assist_feedback')}, "
+                  f"ASSIST_BLENDING={c.get('assist_blending')}")
+        if c.get("valid"):
+            self.var_cellnote.set(f"{detail}   \u2713 valid 2x3 cell")
+            colour = "#227722"
         else:
-            note = "" if cond != "no_assist" else "  (declared - not auto-distinguishable from VF)"
-            self.var_cfgcheck.set(f"cfg.BLENDING={actual}  \u2713 consistent{note}")
-            self.lbl_cfgcheck.configure(foreground="#227722")
+            self.var_cellnote.set(f"{detail}   \u26A0 {c.get('warning') or 'non-standard cell'}")
+            colour = "#cc0000"
+        self.lbl_cell.configure(foreground=colour)
+        self.lbl_cfgcheck.configure(foreground=colour)
 
     def _apply_state(self):
         rec = self.state == self.RECORDING
@@ -225,8 +213,6 @@ class RecorderApp:
         inputs = "normal" if idle else "disabled"
         for w in (self.e_participant, self.e_world, self.btn_start):
             w.configure(state=inputs)
-        for rb in self.cond_radios:
-            rb.configure(state=inputs)
         self.btn_stop.configure(state="normal" if rec else "disabled")
         save_state = "normal" if awaiting else "disabled"
         for w in (self.rb_succ_yes, self.rb_succ_no, self.e_notes, self.btn_save):
@@ -236,7 +222,7 @@ class RecorderApp:
     def on_start(self):
         participant = sanitize_token(self.var_participant.get())
         world = sanitize_token(self.var_world.get())
-        cond = self.var_condition.get()
+        cell_code = self.cell.get("code", "unknown")
         if not participant:
             messagebox.showerror("Missing field", "Participant ID is required.")
             return
@@ -244,7 +230,7 @@ class RecorderApp:
             messagebox.showerror("Missing field", "World shortcut is required.")
             return
 
-        bag_dir = sc.bag_path(participant, world, cond)
+        bag_dir = sc.bag_path(participant, world, cell_code)
         os.makedirs(sc.participant_dir(participant), exist_ok=True)
 
         if os.path.exists(bag_dir):
@@ -329,9 +315,15 @@ class RecorderApp:
         meta = {
             "participant": sanitize_token(self.var_participant.get()),
             "world_shortcut": sanitize_token(self.var_world.get()),
-            "condition": self.var_condition.get(),
-            "condition_short": sc.STRATEGY_SHORTCUTS.get(
-                self.var_condition.get(), self.var_condition.get()),
+            # Auto-detected study cell (from the controller config, not declared).
+            "cell_code": self.cell.get("code"),
+            "condition": self.cell.get("label"),        # human-readable (display)
+            "condition_short": self.cell.get("code"),   # compact tag (folder suffix)
+            "control_mode": self.cell.get("control_mode"),
+            "assist_feedback": self.cell.get("assist_feedback"),
+            "assist_blending": self.cell.get("assist_blending"),
+            "cell_valid": self.cell.get("valid"),
+            "cell_warning": self.cell.get("warning"),
             "bag_name": os.path.basename(self.bag_dir),
             "bag_path": os.path.abspath(self.bag_dir),
             "success": success,
@@ -357,7 +349,8 @@ class RecorderApp:
         print(f"[study_recorder] saved metadata -> {meta_path}")
         self.var_status.set(
             f"Saved '{meta['bag_name']}' (success={success}). Ready for next trial.")
-        # Reset for the next trial (keep participant/world/condition sticky).
+        # Reset for the next trial (keep participant/world sticky; the cell is
+        # auto-detected from config, so nothing to preserve there).
         self.proc = None
         self.bag_dir = None
         self.t_start = self.t_stop = None

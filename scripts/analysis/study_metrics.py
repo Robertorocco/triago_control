@@ -18,6 +18,7 @@ Message-array layouts consumed (confirmed against the publishing nodes):
   /qp_debug/qdot_measured(14): [R_joint(7) L_joint(7)] -- EMA-filtered ground truth
   /qp_debug/slacks (2)   : [|slack_R| |slack_L|]
   /qp_debug/lambda_cbf(2): [lambda_R lambda_L]
+  /qp_debug/arm_frozen(2): [right_frozen left_frozen]  (0/1; active arm = NOT frozen)
   /shared_autonomy/blend_debug (19): [alpha v_user(6) v_policy(6) v_blend(6)]
   /shared_autonomy/goal_probabilities (N): aligned with goal_names (CSV string)
 """
@@ -52,6 +53,7 @@ T_GOALPROB = "/shared_autonomy/goal_probabilities"
 T_GOALNAMES = "/shared_autonomy/goal_names"
 T_GRASP_ACTIVE = "/shared_autonomy/grasp_active"
 T_ACTIVE_ARM = "/shared_autonomy/active_arm"
+T_ARM_FROZEN = "/qp_debug/arm_frozen"
 T_FORCE = "/virtuose/force_cmd"
 T_CLUTCH = "/virtuose/button_right"
 
@@ -289,12 +291,32 @@ def ee_speed_series(ee: Series, arm: str):
 def resolve_active_arm(series: dict):
     """Return (t, right_active_bool, source).
 
-    Priority: the authoritative /shared_autonomy/active_arm topic when it carries
-    real data (VF / blending). Otherwise INFER from which arm is actually moving
-    (published EE speed), exploiting the one-arm-at-a-time invariant -- this makes
-    the active hand available even in `no_assist` where main_shared_autonomy is
-    not running. `right_active_bool[i]` is True when the right arm is active.
+    Priority chain (all exploit the one-arm-at-a-time study invariant):
+      1. /qp_debug/arm_frozen -- controller ground truth [right_frozen, left_frozen]:
+         the ACTIVE arm is the one NOT frozen (the QP watchdog freezes the arm with
+         no live reference). Preferred: it is the controller's own state and exists
+         in every cell.
+      2. /shared_autonomy/active_arm -- the shared-autonomy node's declared arm.
+      3. EE-speed inference -- whichever arm is actually moving (published v_real),
+         so the active hand is still recovered if neither topic is present.
+    `right_active_bool[i]` is True when the right arm is the active one.
     """
+    af = series.get(T_ARM_FROZEN)
+    if (af is not None and af.col("d0") is not None
+            and af.col("d1") is not None and len(af)):
+        rf = np.asarray(af.col("d0"), dtype=float) > 0.5   # right frozen
+        lf = np.asarray(af.col("d1"), dtype=float) > 0.5   # left frozen
+        right = np.ones(len(af.t), dtype=bool)
+        cur = True   # default to right until evidence says otherwise
+        for i in range(len(af.t)):
+            if (not rf[i]) and lf[i]:
+                cur = True          # right live, left held -> right active
+            elif rf[i] and (not lf[i]):
+                cur = False         # left live, right held -> left active
+            # both-frozen / both-live (idle between motions) -> hold last
+            right[i] = cur
+        return af.t, right, "arm_frozen_topic"
+
     aa = series.get(T_ACTIVE_ARM)
     if aa is not None and aa.col("value") is not None and len(aa):
         vals = aa.col("value")
