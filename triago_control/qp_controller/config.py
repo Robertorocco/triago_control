@@ -192,16 +192,21 @@ JOYSTICK_HOME_POSE_TOPIC = "/joystick/home_pose"
 #   v_blend = (1 - alpha) * v_user + alpha * pi_policy)
 # is a function ONLY of the ALIGNMENT s in [-1,1] between the user twist and the
 # policy twist (mean per-channel cosine over whichever channels the user is
-# actively commanding):
-#   alpha = ALIGN_ALPHA_MIN + (ALIGN_ALPHA_MAX - ALIGN_ALPHA_MIN) * clip(s, 0, 1)
-# Misaligned (s <= 0)  -> alpha = ALIGN_ALPHA_MIN  (policy 20%, USER 80%).
-# Aligned    (s  = 1)  -> alpha = ALIGN_ALPHA_MAX  (policy 80%, user 20%) -- fast,
-#                        but ONLY while the user is actively moving in agreement.
+# actively commanding). Two-sided ramp, continuous at s = 0 (alpha = ALIGN_ALPHA_MIN):
+#   s >= 0:  alpha = ALIGN_ALPHA_MIN + (ALIGN_ALPHA_MAX - ALIGN_ALPHA_MIN) * s
+#   s <  0:  alpha = ALIGN_ALPHA_MIN * (1 + s)
+# Aligned      (s =  1) -> ALIGN_ALPHA_MAX  (policy 80%, user 20%) -- fast, but ONLY
+#                          while the user actively moves in agreement.
+# Perpendicular(s =  0) -> ALIGN_ALPHA_MIN  (policy 20%, USER 80%).
+# Opposed  (s -> -1)    -> alpha -> 0: the autonomy authority ramps DOWN as the user
+#                          drives against the policy (e.g. s=-0.5 -> ALIGN_ALPHA_MIN/2,
+#                          s=-1 -> 0), so a deliberate counter-motion meets ZERO
+#                          resistance instead of a permanent ALIGN_ALPHA_MIN counter-pull.
 # No user input (handle inside the joystick deadband, v_user = 0) uses a REDUCED
 # idle authority ALIGN_ALPHA_IDLE, so the robot only GENTLY crawls toward the
 # inferred goal when the user is still; the instant the user pushes in a direction
 # the policy agrees with, alpha ramps up to ALIGN_ALPHA_MAX (fast).
-ALIGN_ALPHA_MIN = 0.2                # policy weight when fully misaligned (user prioritised)
+ALIGN_ALPHA_MIN = 0.2                # policy weight at perpendicular alignment (s=0); ramps to 0 as s->-1
 ALIGN_ALPHA_MAX = 0.8                # policy weight when aligned AND the user is moving in agreement
 ALIGN_ALPHA_IDLE = 0.35             # policy weight when the user is still (gentle autonomous crawl)
 ALIGN_ALPHA_LPF_COEFF = 0.1          # low-pass on alpha for C0-continuity of the blend

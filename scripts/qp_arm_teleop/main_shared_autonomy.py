@@ -2281,13 +2281,18 @@ class SharedControlNode(Node):
               alpha = ALIGN_ALPHA_IDLE -- a GENTLE crawl toward the inferred goal.
               (Previously the still case was treated as fully aligned and ran at
               ALIGN_ALPHA_MAX, which felt too fast when the user wasn't driving.)
-        - User ACTIVE:
-              alpha = ALIGN_ALPHA_MIN + (ALIGN_ALPHA_MAX - ALIGN_ALPHA_MIN)*clip(s, 0, 1)
-          where s in [-1, 1] is the twist alignment (see _twist_alignment).
-          Misaligned (s <= 0) -> ALIGN_ALPHA_MIN (policy 20%, the USER keeps 80%);
-          aligned (s -> 1) -> ALIGN_ALPHA_MAX (policy 80%, fast) -- so the robot
-          only moves fast once the user is actively pushing in a direction the
-          policy agrees with.
+        - User ACTIVE: a two-sided ramp in the alignment s in [-1, 1]
+          (see _twist_alignment), continuous at s = 0 where alpha = ALIGN_ALPHA_MIN:
+              s >= 0:  alpha = ALIGN_ALPHA_MIN + (ALIGN_ALPHA_MAX - ALIGN_ALPHA_MIN)*s
+                       aligned (s -> 1) -> ALIGN_ALPHA_MAX (policy leads, fast).
+              s <  0:  alpha = ALIGN_ALPHA_MIN * (1 + s)
+                       so the autonomy authority RAMPS DOWN as the user opposes the
+                       policy: perpendicular (s=0) -> ALIGN_ALPHA_MIN, diagonally
+                       opposed (s=-0.5) -> ALIGN_ALPHA_MIN/2, directly opposed
+                       (s=-1) -> 0 (autonomy FULLY yields; the operator's counter-
+                       motion meets zero resistance). Previously the misaligned
+                       half was clipped flat at ALIGN_ALPHA_MIN (a permanent 20%
+                       counter-pull even when the user drove straight against it).
 
         LPF'd (ALIGN_ALPHA_LPF_COEFF) so the blended reference stays C0-continuous.
         Belief still selects WHICH goal's policy is v_policy; alpha only arbitrates
@@ -2299,8 +2304,13 @@ class SharedControlNode(Node):
             alpha_raw = float(cfg.ALIGN_ALPHA_IDLE)
         else:
             s = self._twist_alignment(v_user, v_policy)
-            alpha_raw = float(cfg.ALIGN_ALPHA_MIN
-                              + (cfg.ALIGN_ALPHA_MAX - cfg.ALIGN_ALPHA_MIN) * np.clip(s, 0.0, 1.0))
+            if s >= 0.0:
+                alpha_raw = (cfg.ALIGN_ALPHA_MIN
+                             + (cfg.ALIGN_ALPHA_MAX - cfg.ALIGN_ALPHA_MIN) * s)
+            else:
+                # Opposing the policy ramps authority MIN -> 0 as s: 0 -> -1.
+                alpha_raw = cfg.ALIGN_ALPHA_MIN * (1.0 + s)
+            alpha_raw = float(np.clip(alpha_raw, 0.0, cfg.ALIGN_ALPHA_MAX))
         self.alpha_lpf = (cfg.ALIGN_ALPHA_LPF_COEFF * alpha_raw
                           + (1.0 - cfg.ALIGN_ALPHA_LPF_COEFF) * self.alpha_lpf)
         return self.alpha_lpf

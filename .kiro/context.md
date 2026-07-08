@@ -145,15 +145,17 @@ v_blend = (1 - alpha) * v_user + alpha * pi_policy
 ```
 user STILL (v_user == 0, inside the joystick deadband):
     alpha = ALIGN_ALPHA_IDLE                                    # gentle autonomous crawl
-user ACTIVE:
+user ACTIVE:  (two-sided ramp, continuous at s=0 where alpha = ALIGN_ALPHA_MIN)
     s     = mean per-channel cosine(v_user, pi_policy)  over whichever channel(s) the user commands
-    alpha = ALIGN_ALPHA_MIN + (ALIGN_ALPHA_MAX - ALIGN_ALPHA_MIN) · clip(s, 0, 1)
-                                                                # (both branches LPF'd, C0-continuous)
+    s ≥ 0:  alpha = ALIGN_ALPHA_MIN + (ALIGN_ALPHA_MAX - ALIGN_ALPHA_MIN) · s
+    s < 0:  alpha = ALIGN_ALPHA_MIN · (1 + s)                   # ramps MIN -> 0 as s: 0 -> -1
+                                                                # (LPF'd, C0-continuous)
 ```
 
 - User still → `alpha = ALIGN_ALPHA_IDLE = 0.35` → the robot only **gently crawls** toward the inferred goal (deliberately slow when the user isn't driving).
-- Misaligned (`s ≤ 0`) → `alpha = ALIGN_ALPHA_MIN = 0.2` → **user keeps 80%** (prioritised whenever they disagree with the policy).
-- Aligned and actively moving (`s → 1`) → `alpha = ALIGN_ALPHA_MAX = 0.8` → autonomy leads **fast** toward the goal — the robot only goes fast once the user pushes in a direction the policy agrees with.
+- Perpendicular (`s = 0`) → `alpha = ALIGN_ALPHA_MIN = 0.2` → **user keeps 80%**.
+- Aligned and actively moving (`s → 1`) → `alpha = ALIGN_ALPHA_MAX = 0.8` → autonomy leads **fast** toward the goal.
+- **Opposed** (`s < 0`) → authority ramps **down to 0**: diagonally opposed (`s = −0.5`) → `alpha = 0.1`, directly opposed (`s = −1`) → `alpha = 0` → the autonomy **fully yields**, so a deliberate counter-motion meets zero resistance (no permanent `ALIGN_ALPHA_MIN` counter-pull). Applies to both control modes.
 
 Belief still selects *which* goal's policy is `pi_policy`; `alpha` only arbitrates authority. The user twist arrives already deadbanded to zero inside the joystick's home deadband (done teleop-side), so residual handle noise can never creep the arm.
 
