@@ -139,15 +139,16 @@ class SharedControlNode(Node):
         self.alpha_lpf = 0.0
         self.last_alpha = 0.0   # most recent alpha actually applied (for telemetry)
 
-        # --- Option A: CLUTCH "still -> hold" (2026-07-08) --------------------
-        # In the CLUTCH cell the autonomy must NOT drive the robot while the
-        # operator holds the handle still: whenever the commanded user twist is
-        # below these thresholds, blending is suspended (alpha=0) and the
-        # reference is held, so the idle crawl can never creep the arm toward the
-        # goal on its own. Blending (assist) only acts WHILE the operator is
-        # actively moving. Only affects the CLUTCH control mode.
-        self.CLUTCH_STILL_LIN = 0.005  # m/s   below this -> user "still" (linear)
-        self.CLUTCH_STILL_ANG = 0.05   # rad/s below this -> user "still" (angular)
+        # --- "still -> suspend blending" (2026-07-08) -------------------------
+        # In ANY blending cell (CLUTCH or JOYSTICK) the autonomy must NOT drive the
+        # robot while the operator holds the handle still: whenever the commanded
+        # user twist is below these thresholds, blending is suspended (alpha=0) and
+        # the reference is held, so the arm cannot creep toward the goal on its own.
+        # Blending (assist) only acts WHILE the operator is actively moving. For the
+        # joystick, "still" is when the handle is inside the deadband (v_user=0);
+        # for the clutch, when the handle is not being moved.
+        self.STILL_LIN = 0.005  # m/s   below this -> user "still" (linear)
+        self.STILL_ANG = 0.05   # rad/s below this -> user "still" (angular)
         # Actual EE twist (finite-difference + EMA) -- the observed action for the
         # EE-based belief inference used in joystick mode. See _update_ee_twist.
         self._ee_twist = np.zeros(6)
@@ -589,17 +590,17 @@ class SharedControlNode(Node):
         """Tracks the clutch (right button) state for CLUTCH-mode blend suspension."""
         self.clutch_engaged = bool(msg.data)
 
-    def _clutch_user_still(self, v_user):
-        """Option A gate (CLUTCH only): True when the operator's commanded twist is
-        below the 'still' thresholds.
+    def _user_still(self, v_user):
+        """Blend-suspend gate (CLUTCH or JOYSTICK): True when the operator's
+        commanded twist is below the 'still' thresholds.
 
         When the operator holds the handle still, the CLUTCH cell must NOT blend:
         the reference is held (alpha=0) so the autonomy never creeps the robot
         toward the goal on its own. No tracking-error / lead check — stillness
         alone suspends the blend. See __init__ for the thresholds.
         """
-        lin_still = float(np.linalg.norm(v_user[0:3])) < self.CLUTCH_STILL_LIN
-        ang_still = float(np.linalg.norm(v_user[3:6])) < self.CLUTCH_STILL_ANG
+        lin_still = float(np.linalg.norm(v_user[0:3])) < self.STILL_LIN
+        ang_still = float(np.linalg.norm(v_user[3:6])) < self.STILL_ANG
         return lin_still and ang_still
 
     def grasp_contact_callback(self, msg):
@@ -1359,14 +1360,14 @@ class SharedControlNode(Node):
                 alpha = 0.0
                 self.alpha_lpf = 0.0
                 target_twist = np.zeros(6)
-            elif cfg.CONTROL_MODE == cfg.CLUTCH and self._clutch_user_still(v_user):
-                # OPTION A (CLUTCH only): the operator is holding the handle STILL,
-                # so DO NOT blend — the autonomy must not creep the robot toward
-                # the goal on its own. Force alpha=0 (pure user twist) and reset
-                # the alpha LPF so no residual crawl leaks through; the reference
-                # then holds. Blending/assist only acts while the operator is
-                # actively moving. (No tracking-error check: stillness alone
-                # suspends the blend.)
+            elif self._user_still(v_user):
+                # The operator is holding the handle STILL (BOTH modes: joystick
+                # inside the deadband, or clutch not moving), so DO NOT blend — the
+                # autonomy must not creep the robot toward the goal on its own.
+                # Force alpha=0 (pure user twist) and reset the alpha LPF so no
+                # residual crawl leaks through; the reference then holds. Blending/
+                # assist only acts while the operator is actively moving. (No
+                # tracking-error check: stillness alone suspends the blend.)
                 alpha = 0.0
                 self.alpha_lpf = 0.0
                 target_twist = v_user
