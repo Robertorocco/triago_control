@@ -341,6 +341,14 @@ class SharedControlNode(Node):
                 "[INIT] linkattacher_msgs not found — plugin grasp disabled.")
         self.sub_trigger = self.create_subscription(Bool, 'virtuose/button_left', self.trigger_callback, 10)
 
+        # Clutch button (right). Only meaningful in CLUTCH control mode: while the
+        # clutch is ENGAGED the operator is repositioning the handle (indexing), so
+        # blending is SUSPENDED and the latched reference holds still (see the
+        # blend arbitration in timer_callback). Harmless in JOYSTICK mode (unused).
+        self.clutch_engaged = False
+        self.sub_clutch = self.create_subscription(
+            Bool, 'virtuose/button_right', self.clutch_button_callback, 10)
+
         self.trigger_cmd = False  # consumed event flag
         self._grasp_cue_phase = 0.0  # pulsing animation counter for PRE_GRASP sphere
         self._grasp_cue_last_seen = 0.0  # latch timer for sphere visibility
@@ -493,13 +501,16 @@ class SharedControlNode(Node):
         self.get_logger().info("=========================================")
         self.get_logger().info(f" State:       {self.grasp_sm.state}")
         self.get_logger().info(f" Prediction:  {'ENABLED (Inferring Intent)' if self.PREDICTION else 'DISABLED (Fixed Goal)'}")
-        self.get_logger().info(f" Blending:    {'ENABLED (Mixing Commands)' if cfg.BLENDING else 'DISABLED (Strict Optimal Policy)'} [cfg.BLENDING]")
-        if cfg.BLENDING:
+        self.get_logger().info(f" Control mode: {cfg.CONTROL_MODE}  (ASSIST_FEEDBACK={cfg.ASSIST_FEEDBACK}, ASSIST_BLENDING={cfg.ASSIST_BLENDING})")
+        self.get_logger().info(f" Blending:    {'ENABLED (Mixing Commands)' if cfg.ASSIST_BLENDING else 'DISABLED (Strict Optimal Policy)'} [cfg.ASSIST_BLENDING]")
+        if cfg.ASSIST_BLENDING:
             self.get_logger().info(
-                f" Mode: JOYSTICK. alpha = alignment-weighted in "
+                f" alpha = alignment-weighted in "
                 f"[{cfg.ALIGN_ALPHA_MIN}, {cfg.ALIGN_ALPHA_MAX}] "
                 f"(misaligned -> user keeps {100*(1-cfg.ALIGN_ALPHA_MIN):.0f}%; "
-                f"aligned / no input -> autonomy leads).")
+                f"aligned / no input -> autonomy leads)."
+                + (f" CLUTCH mode: blending SUSPENDS while the clutch is engaged."
+                   if cfg.CONTROL_MODE == cfg.CLUTCH else ""))
         self.get_logger().info(f" Active Goal: {self.active_goal_key} (Used if Prediction is False)")
         self.get_logger().info(f" Total Goals: {len(self.target_keys)}")
         self.get_logger().info("=========================================")
@@ -563,6 +574,10 @@ class SharedControlNode(Node):
             self._btn_timer = None
         self._btn_first_press_time = None
         self.trigger_cmd = True
+
+    def clutch_button_callback(self, msg):
+        """Tracks the clutch (right button) state for CLUTCH-mode blend suspension."""
+        self.clutch_engaged = bool(msg.data)
 
     def grasp_contact_callback(self, msg):
         """Stores the signed gripper<->cylinder collision distance [red, blue] (m)."""
@@ -1287,7 +1302,7 @@ class SharedControlNode(Node):
         blend_active = cfg.BLENDING and tick_output.new_state in (
             "SHARED_AUTONOMY", "PRE_GRASP", "HOLDING")
         if blend_active:
-            # Joystick-mode arbitration (2026-07-06). The user twist arrives already
+            # Reference-level arbitration (2026-07-06). The user twist arrives already
             # deadbanded to zero inside the joystick's home deadband (done in
             # teleop_triago_joystick.py), so residual handle noise can never creep
             # the arm. It is blended with the belief-weighted optimal policy by an
@@ -1296,9 +1311,20 @@ class SharedControlNode(Node):
             # -> the autonomy leads toward the inferred goal. See compute_alpha.
             v_user = self.current_v_h.copy()
             pi_policy = tick_output.target_twist
-            alpha = self.compute_alpha(v_user, pi_policy)
+            if cfg.CONTROL_MODE == cfg.CLUTCH and self.clutch_engaged:
+                # CLUTCH mode, clutch ENGAGED: the operator is repositioning the
+                # handle (indexing) -> SUSPEND blending entirely. Force alpha=0 so
+                # the policy contributes nothing and reset the alpha LPF so no
+                # residual autonomous crawl leaks through; the clutch already sends
+                # v_user=0 while engaged, so target_twist=0 and the latched
+                # reference (T_blend_ref) holds absolutely still until release.
+                alpha = 0.0
+                self.alpha_lpf = 0.0
+                target_twist = np.zeros(6)
+            else:
+                alpha = self.compute_alpha(v_user, pi_policy)
+                target_twist = (1.0 - alpha) * v_user + alpha * pi_policy
             self.last_alpha = alpha
-            target_twist = (1.0 - alpha) * v_user + alpha * pi_policy
         else:
             alpha = 0.0
             self.last_alpha = 0.0
