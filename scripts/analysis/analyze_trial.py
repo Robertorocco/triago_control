@@ -18,8 +18,11 @@ plus the numeric summaries (unchanged):
 
 The Haption figure is CASE-ADAPTIVE from the trial's metadata flags
 (control_mode / assist_feedback / assist_blending):
-  * guidance FORCES shown only when ASSIST_FEEDBACK is True,
-  * authority alpha shown only when ASSIST_BLENDING is True,
+  * device force + torque (virtuose/force_cmd, 3 components each, with the
+    hardcoded ±limit dashed) are ALWAYS shown -- the handle always renders at
+    least the F_sync tether / centering spring,
+  * authority alpha AND the blended-action share (user vs policy) shown only
+    when ASSIST_BLENDING is True,
   * handle xyz + a light-blue clutch-engaged band shown in CLUTCH mode,
   * handle displacement-from-home (the velocity command) shown in JOYSTICK mode.
 
@@ -54,6 +57,10 @@ METRICS_NAME = "metrics.json"
 ARM_COLOR = {"right": "#d62728", "left": "#1f77b4"}   # red / blue
 JOINT_COLORS = plt.cm.jet(np.linspace(0, 1, 7))
 XYZ_COLORS = ("#d62728", "#2ca02c", "#1f77b4")        # x, y, z
+# Hardcoded Haption device wrench safety clips (the force managers' final
+# MAX_FORCE / MAX_TORQUE clip). Drawn as dashed reference lines on the wrench plots.
+MAX_DEVICE_FORCE = 10.0     # N
+MAX_DEVICE_TORQUE = 1.0     # Nm
 
 
 def _apply_style():
@@ -332,10 +339,12 @@ def make_haption_dashboard(series, metrics, metadata, arm, t_act, right_active, 
     rows = ["handle_pos", "handle_speed", "buttons"]
     if is_joystick:
         rows.append("joystick_disp")
-    if fb:
-        rows.append("force")
+    # The device wrench (/virtuose/force_cmd) is ALWAYS rendered -- at minimum the
+    # F_sync tether (clutch) or centering spring (joystick) -- so always plot the
+    # raw force + torque (3 components each) with the hardcoded ±limit dashed.
+    rows += ["force", "torque"]
     if bl:
-        rows.append("alpha")
+        rows += ["alpha", "blend_share"]
 
     n = len(rows)
     fig, axs = plt.subplots(n, 1, figsize=(13, 2.7 * n), squeeze=False)
@@ -429,14 +438,59 @@ def make_haption_dashboard(series, metrics, metadata, arm, t_act, right_active, 
             fr = series.get(sm.T_FORCE)
             F = sm._stack_named(fr, ("fx", "fy", "fz")) if fr else None
             if F is not None and len(F):
-                for k, lab in enumerate(("fx", "fy", "fz")):
-                    ax.plot(fr.t, F[:, k], lw=0.8, color=XYZ_COLORS[k], alpha=0.8, label=lab)
-                ax.plot(fr.t, np.linalg.norm(F, axis=1), color="#9467bd", lw=1.3, label="|F|")
+                for k, lab in enumerate(("Fx", "Fy", "Fz")):
+                    ax.plot(fr.t, F[:, k], lw=1.0, color=XYZ_COLORS[k], label=lab)
+                ax.axhline(MAX_DEVICE_FORCE, color="#333", ls="--", lw=1.0, alpha=0.7,
+                           label=f"\u00b1{MAX_DEVICE_FORCE:g} N limit")
+                ax.axhline(-MAX_DEVICE_FORCE, color="#333", ls="--", lw=1.0, alpha=0.7)
                 _clutch_band(ax)
-                ax.set_ylabel("force [N]"); ax.set_title("Guidance force on the handle")
+                ax.set_ylabel("force [N]")
+                ax.set_title("Device force on the handle (virtuose/force_cmd)")
                 _legend(ax, ncol=4)
             else:
-                _no_data(ax, "Guidance force")
+                _no_data(ax, "Device force")
+
+        elif key == "torque":
+            fr = series.get(sm.T_FORCE)
+            Tq = sm._stack_named(fr, ("tx", "ty", "tz")) if fr else None
+            if Tq is not None and len(Tq):
+                for k, lab in enumerate(("Tx", "Ty", "Tz")):
+                    ax.plot(fr.t, Tq[:, k], lw=1.0, color=XYZ_COLORS[k], label=lab)
+                ax.axhline(MAX_DEVICE_TORQUE, color="#333", ls="--", lw=1.0, alpha=0.7,
+                           label=f"\u00b1{MAX_DEVICE_TORQUE:g} Nm limit")
+                ax.axhline(-MAX_DEVICE_TORQUE, color="#333", ls="--", lw=1.0, alpha=0.7)
+                _clutch_band(ax)
+                ax.set_ylabel("torque [Nm]")
+                ax.set_title("Device torque on the handle (virtuose/force_cmd)")
+                _legend(ax, ncol=4)
+            else:
+                _no_data(ax, "Device torque")
+
+        elif key == "blend_share":
+            # Share of the final blended ACTION contributed by user vs policy:
+            # v_blend = (1-alpha)*v_user + alpha*v_policy, so the weighted
+            # contributions are ||(1-alpha)*v_user|| and ||alpha*v_policy||.
+            bd = series.get(sm.T_BLEND)
+            a = (np.asarray(bd.col("d0"), dtype=float)
+                 if (bd and bd.col("d0") is not None) else None)
+            vu = sm._stack(bd, range(1, 7)) if bd else None
+            vp = sm._stack(bd, range(7, 13)) if bd else None
+            if a is not None and vu is not None and vp is not None and len(bd):
+                u = (1.0 - a) * np.linalg.norm(vu, axis=1)
+                p = a * np.linalg.norm(vp, axis=1)
+                tot = u + p
+                good = tot > 1e-9
+                u_pct = np.full_like(a, np.nan)
+                p_pct = np.full_like(a, np.nan)
+                u_pct[good] = 100.0 * u[good] / tot[good]
+                p_pct[good] = 100.0 * p[good] / tot[good]
+                ax.plot(bd.t, u_pct, color="#1f77b4", lw=1.2, label="user %")
+                ax.plot(bd.t, p_pct, color="#ff7f0e", lw=1.2, label="policy %")
+                ax.set_ylim(-5, 105); ax.set_ylabel("share [%]")
+                ax.set_title("Blended-action share: (1-\u03b1)\u00b7v_user  vs  \u03b1\u00b7v_policy")
+                _legend(ax, ncol=2)
+            else:
+                _no_data(ax, "Blended-action share")
 
         elif key == "alpha":
             bd = series.get(sm.T_BLEND)
