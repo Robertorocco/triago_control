@@ -128,6 +128,8 @@ Exposing the two channels independently fixes the previous **unfairness** (the c
 
 Every teleop / force-manager node calls `cfg.validate_condition(node_name, control_mode=…, feedback=…, blending=…)` at startup and **HARD-ERRORS on mismatch** (teleop nodes constrain only the control mode since they serve all three of their column's cells; force managers pin the full triple), so a mis-launched condition fails loudly instead of silently running the wrong strategy.
 
+**Unified guidance gating (fairness across cells).** The assistive-force `F_guide` in every guidance cell (`JF/JFB/CF/CFB`, plus the dead copy in `CB`) uses ONE gate `gain = conf_gate × prox_gate` with identical margins: **proximity** full ≤ 0.10 m / dead > 0.60 m (ref→goal distance), **confidence** dead < 0.30 / full ≥ 0.90. The confidence signal was unified onto **`b_max`** = the max-posterior active-goal belief from `BeliefEstimator.get_active_goal()`, published in `/shared_autonomy/active_goal_pose[6]` (0 during grasp exec). The clutch managers formerly gated on `1 − normalised entropy` of the belief distribution (a different, goal-count-dependent, non-grasp-gated principle) — now dropped so both columns gate on the same belief function and thresholds. (The separate `F_fixture` position virtual fixture in CF/CFB keeps its own `FIX_CONF_*` gate.)
+
 > **Ownership**: the CLUTCH column (position control) + this selector/`validate_condition` live with one agent; the JOYSTICK column (velocity control) with another. Both edit `config.py` and `main_shared_autonomy.py`, so pull → edit → push tightly.
 
 ### 5.1 Belief & Policy
