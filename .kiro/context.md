@@ -236,6 +236,18 @@ Falls back to PBVS rotational look-at when the hand is behind the lens / outside
 
 A self-contained Matplotlib **plotting thread** (in the same file, guarded so a missing display never stalls control, disable with `-p plot:=false`) shows live centering error (pixel + angular), roll- and approach-alignment errors, and the stand-off distance vs. the 0.8 m target. Telemetry also on `/head_active_tracking/{error,qdot,cartesian_cmd}`. Run: `ros2 run triago_control head_active_arm_tracking.py`.
 
+### 7.2 AprilTag Pose Reconstruction (`head_april_main.py`)
+
+Alternative head-perception path (sibling of `main_head.py`, same look-at control reused verbatim: `HeadKinematics` + `LookAtController` + controller switching). Instead of the geometric RGB-D cylinder fit (which carries a few-cm extrinsic/depth error), it localizes ONE fiducial of known geometry and reconstructs every scene object from a known rigid transform relative to it:
+
+`base_M_obj_k = base_M_cam · c_M_tag · tag_M_obj_k`
+
+where `base_M_cam` is TF (`base_footprint` ← color optical frame at the detection stamp), `c_M_tag` comes from the external **`visp_apriltag`** ViSP node (ROS 2, publishes `visp_tracker_common/msg/AprilTagDetectionArray` on `/tracker_apriltag/tags_info`; each detection carries `id` + `pose` == camera-optical→tag), and `tag_M_obj_k = world_M_tag⁻¹ · world_M_obj_k` is derived ONCE at startup from `cfg.APRILTAG_SCENE` (config §15). The only image-estimated quantity is the tag pose; object geometry is a model prior. This is legitimate fiducial-based perception (NOT the forbidden ground-truth injection): the node never reads any object's absolute world pose at runtime — only its pose relative to a marker it must visually localize. The §14 `GT_*` constants stay diagnostic-only (head_plotter scores the reconstruction against them).
+
+**ViSP tag-frame convention** (verified empirically against the installed ViSP): default `align_z=false` gives `cMo = Rot_x(180°)` for a fronto-parallel view → Z out of the tag toward the camera, X=image-right, Y=image-up. With the tag flat/face-up and oriented image-right→world+X, image-up→world+Y, the ViSP tag frame coincides in orientation with the world (`cfg.APRILTAG_RPY_WORLD = [0,0,0]`). If the rendered/printed tag ends up rotated in-plane by a multiple of 90°, correct with a single yaw in `APRILTAG_RPY_WORLD` (or the world/model pose) — the math is otherwise convention-exact.
+
+Publishes the SAME topics `head_plotter.py` consumes (`/head_perception/markers`: red/blue cylinders `ns=objects`, table `ns=table_top`, tag `ns=apriltag`; `/head_perception/telemetry`: same 9-slot layout), so the existing dashboard shows reconstruction quality vs GT with no plotter change. Reconstructs `red_cylinder`, `blue_cylinder`, and `work_table`. Run alongside `visp_apriltag_node` (color image + color camera_info, `tag_family:=36h11`, `tag_size:=0.12`). Companion world `config/worlds/apriltag_world.world` = `no_obstacle` + a printable AprilTag 36h11 id-0 plate (model `config/models/apriltag36_11_00/`, texture is a genuine, ViSP-detectable, directly-printable tag) flat-centred on the table; the tag is visual-only so QP controllers still launch with `world_name:=no_obstacle`.
+
 ## 8. Adaptive Scheduling (shadow-price feedback)
 
 - **Decoupled slack weighting**: each arm's CLF slack weight drops toward `BASE_WEIGHT_SLACK` as its own shadow price grows (letting slack absorb tracking error near obstacles), and rises toward `MAX_WEIGHT_SLACK` in free space (tighter tracking).

@@ -406,3 +406,97 @@ GT_BLUE_RADIUS = 0.02                              # [m]
 GT_BLUE_HEIGHT = 0.15                              # [m]
 # GT_TABLE_TOP_Z intentionally NOT duplicated here — use TABLE_TOP_Z_WORLD
 # (§2 above), which is the same 0.70m derived from the same SDF pose.
+
+
+
+# =============================================================================
+# 15. APRILTAG-BASED PERCEPTION  (head_april_main.py)
+# =============================================================================
+# An alternative head perception path that reconstructs every object pose from
+# a SINGLE camera-estimated fiducial pose, instead of the geometric RGB-D
+# cylinder fit (main_head.py). The AprilTag is a fiducial of known geometry
+# rigidly placed in the scene; the ONLY thing estimated from the image is the
+# camera->tag transform (c_M_tag), produced by the external `visp_apriltag`
+# ROS 2 node (ViSP). Each object pose is then reconstructed as
+#
+#     base_M_obj = base_M_cam . c_M_tag . tag_M_obj
+#
+# where base_M_cam comes from TF (robot_state_publisher), c_M_tag from the
+# detection, and tag_M_obj is the KNOWN rigid transform of the object relative
+# to the tag.
+#
+# WHY THIS IS NOT "GROUND-TRUTH INJECTION" (cf. the project rule): the algorithm
+# never reads where anything actually IS in the world. It knows only the scene
+# STRUCTURE relative to a marker it must localize visually — the defining
+# paradigm of fiducial-based perception, and exactly what was requested
+# ("reconstruct each object pose knowing only its pose relative to the tag").
+# The absolute world coordinates in APRILTAG_SCENE below are the AUTHORING
+# SOURCE for the tag-relative transforms (they mirror config/worlds/
+# apriltag_world.world one-to-one) and the tag-relative transforms are derived
+# from them at startup; they are never used as a runtime input to the
+# perception output. This is the fiducial MODEL, not an empirical offset that
+# masks a calibration error. (The separate §14 GT_* constants remain
+# diagnostic-only, consumed by head_plotter.py to SCORE the reconstruction.)
+
+# --- visp_apriltag node interface -----------------------------------------
+# Topic on which the visp_apriltag node (node name "tracker_apriltag")
+# publishes visp_tracker_common/msg/AprilTagDetectionArray. Each detection
+# carries `id` and `pose` (geometry_msgs/Pose == c_M_tag, camera-optical->tag).
+APRILTAG_DETECTIONS_TOPIC = "/tracker_apriltag/tags_info"
+APRILTAG_ID = 0                 # tag id used as the scene reference fiducial
+APRILTAG_FAMILY = "36h11"       # must match the printed / spawned tag
+APRILTAG_SIZE = 0.12            # [m] black-border edge = ViSP tag_size (see model)
+APRILTAG_POSE_METHOD = "homography_virtual_vs"
+
+# The visp_apriltag node consumes the COLOR image + COLOR camera_info (AprilTag
+# detection runs on RGB, NOT the depth stream used by main_head.py).
+APRILTAG_IMAGE_TOPIC = "/gripper_head_camera_rgbd/color/image_raw"
+APRILTAG_CAMERA_INFO_TOPIC = "/gripper_head_camera_rgbd/color/camera_info"
+# Optical frame the color image (and therefore c_M_tag) lives in. TF base<-this
+# frame gives base_M_cam. (Same frame already used as CAMERA_OPTICAL_FRAME, §1.)
+APRILTAG_CAMERA_OPTICAL_FRAME = CAMERA_OPTICAL_FRAME
+
+# --- ViSP tag frame orientation in the world ------------------------------
+# The tag lies flat, face up (surface normal = world +Z). ViSP's DEFAULT frame
+# (align_z=false) has Z out of the tag toward the camera, X=image-right,
+# Y=image-up (verified: cMo == Rot_x(180deg) for a fronto-parallel view). With
+# the texture oriented image-right -> world +X and image-up -> world +Y, the
+# ViSP tag frame coincides in ORIENTATION with the world frame => identity.
+# If, on your Gazebo/OGRE build, the rendered tag turns out rotated in-plane by
+# a multiple of 90 deg (the reconstructed objects would appear rotated about
+# the tag centre in head_plotter), correct it here with a single yaw — nothing
+# else needs to change (the math stays convention-exact).
+APRILTAG_CENTER_WORLD = np.array([1.000, 0.0, 0.701])   # tag plate centre (world)
+APRILTAG_RPY_WORLD = np.array([0.0, 0.0, 0.0])          # ViSP tag frame RPY in world
+
+# --- Scene layout (authoring source for the tag-relative model) -----------
+# One entry per reconstructed object. `center`/`rpy` are the object frame pose
+# in the WORLD, matching config/worlds/apriltag_world.world exactly. At startup
+# head_april_main.py derives tag_M_obj = world_M_tag^-1 . world_M_obj from these
+# and thereafter uses ONLY tag_M_obj (never the absolute world pose).
+#   kind   : "cylinder" (upright, radius+height) or "table" (top-surface box)
+#   color  : "red"/"blue"/"table" -> marker colour + head_plotter classification
+APRILTAG_SCENE = {
+    "red_cylinder": {
+        "kind": "cylinder", "color": "red",
+        "center": np.array([0.800, -0.20, 0.775]),   # cylinder mid-height centre
+        "rpy": np.array([0.0, 0.0, 0.0]),
+        "radius": 0.02, "height": 0.15,
+    },
+    "blue_cylinder": {
+        "kind": "cylinder", "color": "blue",
+        "center": np.array([0.800, 0.20, 0.775]),
+        "rpy": np.array([0.0, 0.0, 0.0]),
+        "radius": 0.02, "height": 0.15,
+    },
+    "work_table": {
+        "kind": "table", "color": "table",
+        "center": np.array([1.000, 0.0, TABLE_TOP_Z_WORLD]),  # table TOP-surface centre
+        "rpy": np.array([0.0, 0.0, 0.0]),
+        "size_xy": np.array([0.6, 0.5]),   # table footprint (x, y) for the marker
+    },
+}
+
+# Consider a detection stale (drop its markers) if no fresh tag has been seen
+# for this long — so a lost fiducial doesn't leave a ghost pose on screen.
+APRILTAG_DETECTION_TIMEOUT_S = 1.0

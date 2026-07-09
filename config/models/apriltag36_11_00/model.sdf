@@ -1,0 +1,42 @@
+<?xml version="1.0"?>
+<sdf version="1.6">
+  <!--
+    Printable AprilTag 36h11 id 0 as a flat, visual-only plate.
+
+    FRAME / ORIENTATION (read before changing the pose):
+      * The plate is 0.15 x 0.15 m, 2 mm thick; the tag texture is on the top
+        (+Z) face. The black-bordered square that ViSP localizes is 0.12 m
+        (the PNG has a 1-cell white quiet zone => 0.8 * 0.15).
+      * Placed with identity orientation and lying flat, the tag surface normal
+        is world +Z (face up). ViSP's DEFAULT tag frame (align_z=false) has its
+        Z axis pointing OUT of the tag toward the camera, X along image-right,
+        Y along image-up (verified empirically: cMo = Rot_x(180) for a
+        fronto-parallel view). With the texture oriented image-right -> world
+        +X and image-up -> world +Y, the ViSP tag frame coincides in
+        ORIENTATION with the world frame (identity rotation). head_april_main.py
+        assumes exactly this (cfg.APRILTAG_RPY_WORLD = [0,0,0]); if the rendered
+        texture turns out rotated in-plane by a multiple of 90 deg on your
+        Gazebo/OGRE build, correct it with a single yaw here (or in
+        cfg.APRILTAG_RPY_WORLD) - the reconstruction is otherwise convention-
+        exact.
+      * Visual only (no collision): a printed tag adds no physical obstacle.
+  -->
+  <model name="apriltag36_11_00">
+    <static>true</static>
+    <link name="link">
+      <visual name="visual">
+        <cast_shadows>false</cast_shadows>
+        <geometry>
+          <box><size>0.15 0.15 0.002</size></box>
+        </geometry>
+        <material>
+          <script>
+            <uri>model://apriltag36_11_00/materials/scripts</uri>
+            <uri>model://apriltag36_11_00/materials/textures</uri>
+            <name>AprilTag36_11_00</name>
+          </script>
+        </material>
+      </visual>
+    </link>
+  </model>
+</sdf>

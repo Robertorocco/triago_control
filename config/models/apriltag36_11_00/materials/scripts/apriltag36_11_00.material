@@ -1,0 +1,18 @@
+// OGRE material for the AprilTag 36h11 id-0 plate.
+// `filtering none` keeps the black/white cells crisp (nearest-neighbour) so the
+// rendered tag stays sharp and reliably detectable by the ViSP detector.
+material AprilTag36_11_00
+{
+  technique
+  {
+    pass
+    {
+      lighting off
+      texture_unit
+      {
+        texture apriltag36_11_00.png
+        filtering none
+      }
+    }
+  }
+}
