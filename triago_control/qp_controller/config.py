@@ -64,7 +64,7 @@ ORIENTATION_CTRL = True         # True = control Pos+Ori (6DOF), False = Pos onl
 #   ------------  ---------------  ---------------   --------------------   ----------------------------------------
 #   CLUTCH        False            False             Sync only              haptic_force_manager_C
 #   CLUTCH        True             False             Guided feedback (VF)   haptic_force_manager_CF
-#   CLUTCH        False            True              Guided blending        haptic_force_manager_CB   (to implement)
+#   CLUTCH        False            True              Guided blending        haptic_force_manager_CB
 #   CLUTCH        True             True              Full guidance          haptic_force_manager_CFB
 #   JOYSTICK      False            False             Sync only              haptic_force_manager_J
 #   JOYSTICK      True             False             Guided feedback        haptic_force_manager_JF   (to implement)
