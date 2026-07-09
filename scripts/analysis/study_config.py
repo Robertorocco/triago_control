@@ -190,6 +190,7 @@ BAG_TOPICS = [
     # --- Cartesian references (both arms, both modes) ---
     "/arm_right/cartesian_reference",
     "/arm_left/cartesian_reference",
+    "/qp_debug/reference_effective",         # truthful per-arm reference the CLF tracks
     "/arm_right/user_cartesian_reference",   # Joystick mode only
     "/arm_left/user_cartesian_reference",    # Joystick mode only
 

@@ -199,8 +199,13 @@ def make_triago_dashboard(series, metrics, metadata, arm, t_act, right_active, o
     # what produced the huge inactive error + the handover jump). Mask it to the
     # spans where this arm is actually the teleoperated one.
     ax = fig.add_subplot(gs[1, 0])
-    ref = series.get(sm.T_REF[arm])
-    Rp = sm._stack(ref, range(0, 3)) if ref else None
+    # Use the truthful effective reference (/qp_debug/reference_effective); fall
+    # back to /arm_*/cartesian_reference for bags recorded before it existed.
+    ref = series.get(sm.T_REF_EFF)
+    Rp = sm._stack(ref, sm._REF_EFF_POS_IDX[arm]) if ref else None
+    if Rp is None:
+        ref = series.get(sm.T_REF[arm])
+        Rp = sm._stack(ref, range(0, 3)) if ref else None
     if P is not None and Rp is not None and len(P) > 1:
         ref_z = _zoh_cols(ee.t, ref.t, Rp)
         err = np.linalg.norm(ref_z - P, axis=1)

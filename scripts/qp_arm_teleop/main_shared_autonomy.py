@@ -380,6 +380,9 @@ class SharedControlNode(Node):
         # --- State Variables ---
         self.current_v_h = np.zeros(6)
         self.current_T_EE = np.eye(4)
+        # Latest pose of BOTH arms, refreshed every robot_state_callback so an
+        # arm switch can re-anchor synchronously (see _switch_active_arm).
+        self._T_EE = {"right": np.eye(4), "left": np.eye(4)}
         # Persistent latched reference for the BLENDING blend-hold path
         # (2026-07-06): the blended twist is integrated into this stored pose so
         # an idle user yields an ABSOLUTE hold instead of a reference that chases
@@ -893,9 +896,14 @@ class SharedControlNode(Node):
         # each arm keeps (and resumes from) its own frozen belief.
         self.pub_active_arm.publish(String(data=new_arm))
         self.plot_manager.push_arm_switch(new_arm)
-        # 4. Invalidate the blended reference latch so it re-anchors to the NEW
-        # arm's current_T_EE on the next blend tick (prevents the marker/reference
-        # from staying at the old arm's last position).
+        # 4. Re-anchor SYNCHRONOUSLY to the new arm's current pose, then
+        # invalidate the blended reference latch so it re-inits from that pose on
+        # the next blend tick. Refreshing current_T_EE here (rather than waiting
+        # for the next robot_state_callback) closes the race where the control
+        # timer fires first and would otherwise latch the new arm's reference
+        # onto the OLD arm's pose -> a persistent handover jump. The reference
+        # now always spawns at the de-activated gripper's own pose.
+        self.current_T_EE = self._T_EE[new_arm]
         self._blend_ref_valid = False
         self.get_logger().info(
             f"\033[95m[ARM SWITCH] → {new_arm.upper()} | state={self.grasp_sm.state} "
@@ -908,21 +916,23 @@ class SharedControlNode(Node):
         the original) is named here as constants so the contract is explicit
         rather than embedded in a comment.
         """
-        RIGHT_POS_SLICE = slice(0, 3)
-        RIGHT_RPY_SLICE = slice(12, 15)
-        LEFT_POS_SLICE = slice(6, 9)
-        LEFT_RPY_SLICE = slice(15, 18)
+        if len(msg.data) < 18:
+            return
+        d = msg.data
 
-        if len(msg.data) >= 18:
-            if self.active_arm == 'right':
-                pos = np.array(msg.data[RIGHT_POS_SLICE])
-                rpy = np.array(msg.data[RIGHT_RPY_SLICE])
-            else:
-                pos = np.array(msg.data[LEFT_POS_SLICE])
-                rpy = np.array(msg.data[LEFT_RPY_SLICE])
+        def _T(pos_slice, rpy_slice):
+            pos = np.array(d[pos_slice])
+            rpy = np.array(d[rpy_slice])
+            return create_transform(pos, R.from_euler('xyz', rpy).as_matrix())
 
-            rot_mat = R.from_euler('xyz', rpy).as_matrix()
-            self.current_T_EE = create_transform(pos, rot_mat)
+        # Cache BOTH arms' poses every tick (layout: R_pos 0:3, L_pos 6:9,
+        # R_rpy 12:15, L_rpy 15:18) so an arm switch can re-anchor to the new
+        # arm's pose SYNCHRONOUSLY -- otherwise the blend timer can re-init the
+        # latch from current_T_EE before this callback refreshes it, latching the
+        # new arm's reference onto the OLD arm's pose (a persistent handover jump).
+        self._T_EE = {"right": _T(slice(0, 3), slice(12, 15)),
+                      "left":  _T(slice(6, 9), slice(15, 18))}
+        self.current_T_EE = self._T_EE[self.active_arm]
 
     def _update_ee_twist(self):
         """Finite-difference + EMA estimate of the EE's ACTUAL 6D twist (base frame).

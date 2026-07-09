@@ -170,6 +170,14 @@ class SafetyQPController(Node):
         self.pub_xdot_err = self.create_publisher(Float64MultiArray, '/qp_debug/xdot_err', 10)
         self.pub_slacks = self.create_publisher(Float64MultiArray, '/qp_debug/slacks', 10)
         self.pub_ee_state = self.create_publisher(Float64MultiArray, '/qp_debug/ee_real', 10)
+        # The ACTUAL per-arm reference the CLF tracks (truthful for BOTH arms):
+        # for the active arm it is the commanded reference, for a frozen/inactive
+        # arm it is the held pose (main_qp_controller._freeze_arm) -- unlike
+        # /arm_*/cartesian_reference, which goes stale for the inactive arm since
+        # teleop/shared_autonomy only publish the active one. Layout (12 floats):
+        # [x_r(3), rpy_r(3), x_l(3), rpy_l(3)] (raw reference, pre-governor).
+        self.pub_reference_effective = self.create_publisher(
+            Float64MultiArray, '/qp_debug/reference_effective', 10)
         self.pub_debug_h = self.create_publisher(Float64, '/qp_debug/safety_margin', 10)
         self.pub_loop_freq = self.create_publisher(Float64, '/qp_debug/loop_freq', 10)
         self.pub_min_dist = self.create_publisher(Float64, '/qp_debug/min_distance', 10)
@@ -841,6 +849,16 @@ class SafetyQPController(Node):
             ee_data.extend(p_real_l.tolist()); ee_data.extend(v_real_l.tolist())
             ee_data.extend(rpy_real_r.tolist()); ee_data.extend(rpy_real_l.tolist())
             self.pub_ee_state.publish(Float64MultiArray(data=ee_data))
+
+        # Truthful per-arm effective reference the CLF actually tracks (see the
+        # publisher's docstring): [x_r(3), rpy_r(3), x_l(3), rpy_l(3)]. Published
+        # only once every arm's reference exists (avoids a half-populated frame).
+        if (self.x_ref_right is not None and self.rpy_ref_right is not None
+                and self.x_ref_left is not None and self.rpy_ref_left is not None):
+            ref_eff = (list(self.x_ref_right) + list(self.rpy_ref_right)
+                       + list(self.x_ref_left) + list(self.rpy_ref_left))
+            self.pub_reference_effective.publish(
+                Float64MultiArray(data=[float(v) for v in ref_eff]))
 
         # Loop frequency (measured)
         current_time = time.perf_counter()

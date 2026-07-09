@@ -181,8 +181,14 @@ class RobotKinematics:
         self.current_q = self.q_sim.copy()  # Next QP iteration uses the perfect state
 
     def update_kinematics(self):
-        # Refresh FK, frame placements and joint Jacobians for the current configuration.
-        pin.forwardKinematics(self.model, self.data, self.current_q)
+        # Refresh FK, frame placements and joint Jacobians for the current
+        # configuration. Pass the measured joint velocity as well so
+        # pin.getFrameVelocity() returns the TRUE frame twist -- with position
+        # only, forwardKinematics leaves the data's velocity terms at zero, which
+        # is why /qp_debug/ee_real's velocity slots (and offline_plotter's
+        # velocity-error figure) read ~0. Placements/Jacobians are unaffected.
+        v = self.current_v if self.current_v is not None else np.zeros(self.model.nv)
+        pin.forwardKinematics(self.model, self.data, self.current_q, v)
         pin.updateFramePlacements(self.model, self.data)
         pin.computeJointJacobians(self.model, self.data, self.current_q)
 

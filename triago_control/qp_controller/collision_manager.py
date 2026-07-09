@@ -722,7 +722,11 @@ class CollisionManager:
                           if res.min_distance <= cfg.DISTANCE_FILTER_THRESHOLD]
         pair_distances.sort(key=lambda x: x[0])
         active_pairs = pair_distances[:cfg.K_MAX_PAIRS]
-        abs_min_distance = float(pair_distances[0][0]) if pair_distances else 1.0
+        # NaN (not a fake 1.0) when NO pair is within DISTANCE_FILTER_THRESHOLD,
+        # so /qp_debug/min_distance stays truthful -- "no pair in range" instead
+        # of a spurious 1 m reading that plots as a discontinuous jump. Telemetry
+        # only (never consumed by the control law; h_soft carries the CBF value).
+        abs_min_distance = float(pair_distances[0][0]) if pair_distances else float("nan")
 
         # SoftMin accumulators -- ONE PER ARM. A pair's (weight * J_dist_k)
         # contribution is added to R's accumulator if the pair touches the right
