@@ -12,7 +12,7 @@ that:
 
   1. CENTERING  — the active arm's end-effector is kept in the centre of the
                   camera field of view (optical axis pointed at the hand).
-  2. STAND-OFF  — the camera keeps a fixed working distance of ~0.5 m from the
+  2. STAND-OFF  — the camera keeps a fixed working distance of ~0.8 m from the
                   active hand (close enough for a useful close-up, far enough to
                   see the whole gripper + a grasp target).
 
@@ -26,11 +26,11 @@ head chain is NOT part of the arm decision vector). The differences:
 
   * It tracks a SINGLE point (the active arm tool link) instead of the centroid
     of both hands.
-  * The desired stand-off distance is TARGET_DISTANCE (0.5 m) instead of 1.0 m.
+  * The desired stand-off distance is TARGET_DISTANCE (0.8 m) instead of 1.0 m.
   * The active side is selected live from /shared_autonomy/active_arm.
   * A live Matplotlib plotting THREAD (in this same file) reports tracking
     performance: pixel-centering error, angular-centering error, and the
-    stand-off distance held vs. the 0.5 m target.
+    stand-off distance held vs. the 0.8 m target.
 
 CONTROL (2.5D visual servoing, kinematic target)
 ------------------------------------------------
@@ -113,7 +113,7 @@ CAM_CX, CAM_CY = 640.0, 360.0
 # Targets: keep the active hand at the image centre, TARGET_DISTANCE away.
 TARGET_U = CAM_CX
 TARGET_V = CAM_CY
-TARGET_DISTANCE = 0.5   # [m] desired stand-off from the active hand (50 cm)
+TARGET_DISTANCE = 0.8   # [m] desired stand-off from the active hand (80 cm)
 
 # QP gains
 LAMBDA_VISUAL = 1.0     # CLF tracking gain (pixel + depth convergence rate)
@@ -396,12 +396,6 @@ class HeadActiveArmTracker(Node):
             wz_align = 0.0
         roll_align_err_deg = float(np.degrees(theta_roll))
 
-        self.get_logger().info(
-            f"[{self.active_arm.upper()}] hand_in_cam={np.round(P_cam, 2)} "
-            f"dist={dist:.2f}m ang_err={ang_err_deg:.1f}deg "
-            f"roll_align={roll_align_err_deg:.1f}deg",
-            throttle_duration_sec=2.0)
-
         # 3. FOV state (hand physically in front of the lens)
         in_fov = False
         u_h = v_h = None
@@ -454,8 +448,6 @@ class HeadActiveArmTracker(Node):
         # 5. State machine
         if in_fov:
             # --- IBVS: 2.5D centering + stand-off regulation --------------
-            self.get_logger().info("Active hand in FOV -> IBVS (centering + 50cm stand-off).",
-                                    throttle_duration_sec=1.0)
             e_visual = np.array([u_h - TARGET_U,
                                  v_h - TARGET_V,
                                  P_cam[2] - self.target_distance])
@@ -478,9 +470,6 @@ class HeadActiveArmTracker(Node):
             pub_error = e_visual
         else:
             # --- PBVS: rotate the optical axis onto the hand -------------
-            self.get_logger().warn(
-                f"Active hand outside FOV -> PBVS look-at (Z={P_cam[2]:.2f}m).",
-                throttle_duration_sec=1.0)
             P_norm = np.linalg.norm(P_cam)
             dir_vec = P_cam / P_norm if P_norm > 0.01 else np.array([0.0, 0.0, 1.0])
             z_axis = np.array([0.0, 0.0, 1.0])
@@ -597,7 +586,7 @@ def plotting_thread(node: HeadActiveArmTracker, stop_event: threading.Event):
     """Runs a live Matplotlib dashboard of tracking performance in its own thread.
 
     Shows CENTERING (pixel + angular error, target = 0) and the STAND-OFF
-    DISTANCE held vs. the 0.5 m target. Fully decoupled from the control loop:
+    DISTANCE held vs. the 0.8 m target. Fully decoupled from the control loop:
     it only reads the node's telemetry buffers under a lock, so a slow/absent
     display never stalls the controller. Any failure (e.g. no X display) is
     logged and the controller keeps running headless.
