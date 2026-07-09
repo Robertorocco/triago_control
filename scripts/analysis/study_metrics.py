@@ -137,18 +137,33 @@ def load_bag(bag_dir: str) -> dict:
     types = {t.name: t.type for t in reader.get_all_topics_and_types()}
     msg_cls: dict = {}
     raw: dict = {name: [] for name in types}
+    failed: set = set()   # topics whose messages can't be resolved/deserialized
 
     while reader.has_next():
         topic, data, t_ns = reader.read_next()
+        if topic in failed:
+            continue
         base = types[topic].split("/")[-1]
         extractor = _EXTRACTORS.get(base)
         if extractor is None:
             continue
-        if topic not in msg_cls:
-            msg_cls[topic] = get_message(types[topic])
-        row = extractor(deserialize_message(data, msg_cls[topic]))
+        # Deserialize defensively: a single unresolvable message type (e.g. a
+        # composite msg whose package isn't sourced -- the classic /tf
+        # "Unable to convert function return value" TypeError) must NOT abort
+        # the whole read. Skip that topic and keep every other one.
+        try:
+            if topic not in msg_cls:
+                msg_cls[topic] = get_message(types[topic])
+            row = extractor(deserialize_message(data, msg_cls[topic]))
+        except Exception:                       # noqa: BLE001
+            failed.add(topic)
+            continue
         row["_t_ns"] = t_ns
         raw[topic].append(row)
+
+    if failed:
+        print(f"[study_metrics] skipped {len(failed)} undecodable topic(s) "
+              f"(not needed for metrics): {sorted(failed)}")
 
     t0 = min((r[0]["_t_ns"] for r in raw.values() if r), default=0)
     series: dict = {}

@@ -252,4 +252,8 @@ CFG_SNAPSHOT_KEYS = (
     "JOYSTICK_DEADBAND_LIN", "JOYSTICK_DEADBAND_ANG",
     "JOYSTICK_K_TRANS", "JOYSTICK_K_ROT",
     "D_SAFE_BASE", "K_V_SAFE",
+    # Collision-pair cutoff: /qp_debug/min_distance reads a 1.0 sentinel when no
+    # pair is within this range -- the analysis masks samples >= it (see
+    # analyze_trial's obstacle-clearance panel).
+    "DISTANCE_FILTER_THRESHOLD",
 )

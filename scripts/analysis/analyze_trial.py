@@ -8,8 +8,8 @@ writes, IN THAT FOLDER, FOUR figures:
 
     plot_triago_right.png    robot-side telemetry, RIGHT arm
     plot_triago_left.png     robot-side telemetry, LEFT  arm
-    plot_haption_right.png   device-side telemetry while the RIGHT arm is active
-    plot_haption_left.png    device-side telemetry while the LEFT  arm is active
+    plot_haption_right.png   device-side telemetry (single Haption handle; the
+                             per-arm split is redundant, so only this one)
 
 plus the numeric summaries (unchanged):
 
@@ -134,6 +134,18 @@ def _legend(ax, **kw):
         ax.legend(loc="best", **{"fontsize": 7, **kw})
 
 
+def _active_mask_on(t_target, t_act, right_active, arm):
+    """Boolean mask on t_target that is True while THIS arm is the active one.
+    Returns None if no active-arm signal is available."""
+    if t_act is None or right_active is None:
+        return None
+    is_this = right_active if arm == "right" else ~right_active
+    m = _zoh_cols(t_target, t_act, np.asarray(is_this).reshape(-1, 1))
+    if m is None:
+        return None
+    return m[:, 0].astype(bool)
+
+
 # ---------------------------------------------------------------- TRIAGO (robot) dashboard
 def make_triago_dashboard(series, metrics, metadata, arm, t_act, right_active, out_path):
     """Robot-side telemetry for ONE arm, 3x3 (offline_plotter style)."""
@@ -157,16 +169,16 @@ def make_triago_dashboard(series, metrics, metadata, arm, t_act, right_active, o
     else:
         _no_data(ax, "EE path (top)")
 
-    # (0,1) EE path -- side view (x-z): reveals vertical drift/creep
+    # (0,1) EE position x/y/z vs time (+ active shading)
     ax = fig.add_subplot(gs[0, 1])
     if P is not None and len(P) > 1:
-        ax.plot(P[:, 0], P[:, 2], "-", color=col, lw=1.2)
-        ax.plot(P[0, 0], P[0, 2], "o", color="green", ms=6)
-        ax.plot(P[-1, 0], P[-1, 2], "X", color="black", ms=7)
-        ax.set_aspect("equal", adjustable="datalim")
-        ax.set_xlabel("x [m]"); ax.set_ylabel("z [m]"); ax.set_title("EE path (side)")
+        for k, lab in enumerate(("x", "y", "z")):
+            ax.plot(ee.t, P[:, k], lw=1.0, color=XYZ_COLORS[k], label=lab)
+        _shade_active(ax, t_act, right_active, arm)
+        ax.set_xlabel("t [s]"); ax.set_ylabel("pos [m]"); ax.set_title("EE position")
+        _legend(ax, ncol=3)
     else:
-        _no_data(ax, "EE path (side)")
+        _no_data(ax, "EE position")
 
     # (0,2) EE speed (differentiated) + active shading
     ax = fig.add_subplot(gs[0, 2])
@@ -180,20 +192,29 @@ def make_triago_dashboard(series, metrics, metadata, arm, t_act, right_active, o
     else:
         _no_data(ax, "EE speed")
 
-    # (1,0) Cartesian position tracking error  ||ref - real||
+    # (1,0) Cartesian position tracking error ||ref - real||, ACTIVE-ARM ONLY.
+    # When an arm is inactive the controller freezes it internally at its
+    # current EE (see main_qp_controller._freeze_arm) but the PUBLISHED
+    # reference goes stale, so ||stale_ref - ee|| there is meaningless (and is
+    # what produced the huge inactive error + the handover jump). Mask it to the
+    # spans where this arm is actually the teleoperated one.
     ax = fig.add_subplot(gs[1, 0])
     ref = series.get(sm.T_REF[arm])
     Rp = sm._stack(ref, range(0, 3)) if ref else None
     if P is not None and Rp is not None and len(P) > 1:
         ref_z = _zoh_cols(ee.t, ref.t, Rp)
         err = np.linalg.norm(ref_z - P, axis=1)
+        amask = _active_mask_on(ee.t, t_act, right_active, arm)
+        if amask is not None:
+            err = np.where(amask, err, np.nan)
         ax.plot(ee.t, err, color=col, lw=1.0)
+        _shade_active(ax, t_act, right_active, arm)
         _shade_grasp(ax, series)
         ax.set_xlabel("t [s]"); ax.set_ylabel("error [m]")
-        ax.set_title("Cartesian position tracking error")
+        ax.set_title("Cartesian tracking error (active arm)")
         _legend(ax)
     else:
-        _no_data(ax, "Position tracking error")
+        _no_data(ax, "Cartesian tracking error")
 
     # (1,1) Measured joint velocity (7 joints)
     ax = fig.add_subplot(gs[1, 1])
@@ -241,7 +262,6 @@ def make_triago_dashboard(series, metrics, metadata, arm, t_act, right_active, o
     plotted = False
     if lcol is not None and len(lcol):
         ax.plot(lam.t, lcol, color="#2ca02c", lw=1.0, label=r"$\lambda_{CBF}$")
-        ax.axhline(sc.CBF_ACTIVE_LAMBDA, color="#2ca02c", ls="--", lw=0.8, alpha=0.6)
         plotted = True
     if ljcol is not None and len(ljcol):
         ax.plot(lj.t, ljcol, color="#9467bd", lw=1.0, label=r"$\lambda_{joints}$")
@@ -253,21 +273,38 @@ def make_triago_dashboard(series, metrics, metadata, arm, t_act, right_active, o
     else:
         _no_data(ax, "Barrier shadow prices")
 
-    # (2,2) Safety: min obstacle distance + CBF margin (grasp shaded)
+    # (2,2) Obstacle clearance. /qp_debug/min_distance is the true closest-pair
+    # distance ONLY while a pair is within cfg.DISTANCE_FILTER_THRESHOLD; when
+    # nothing is that close the controller publishes a 1.0 sentinel (and the CBF
+    # margin ~ 1 - d_safe) -- that sentinel is exactly what makes the raw trace
+    # jump to 1. Mask samples at/above the threshold so the trace shows only
+    # genuine proximity, with no discontinuous jump.
     ax = fig.add_subplot(gs[2, 2])
     md = series.get(sm.T_MINDIST)
+    thr = float((metadata.get("cfg_snapshot", {}) or {}).get(
+        "DISTANCE_FILTER_THRESHOLD", 0.15))
     if md and md.col("value") is not None and len(md):
-        ax.plot(md.t, md.col("value"), color="#2ca02c", lw=1.0, label="min pair distance")
+        d = np.asarray(md.col("value"), dtype=float)
+        d = np.where(d >= thr, np.nan, d)
+        drew = bool(np.any(np.isfinite(d)))
+        if drew:
+            ax.plot(md.t, d, color="#2ca02c", lw=1.1, label="min pair distance")
         sf = series.get(sm.T_SAFETY)
         if sf and sf.col("value") is not None:
-            ax.plot(sf.t, sf.col("value"), color="#888", lw=0.8, alpha=0.8, label="CBF margin")
-        ax.axhline(sc.NEAR_MISS_DISTANCE_M, color="red", ls="--", lw=1,
-                   label=f"near-miss {sc.NEAR_MISS_DISTANCE_M} m")
-        ax.axhline(0.0, color="#333", ls=":", lw=0.8)
+            m = np.asarray(sf.col("value"), dtype=float)
+            m = np.where(m >= thr, np.nan, m)
+            if np.any(np.isfinite(m)):
+                ax.plot(sf.t, m, color="#888", lw=0.8, alpha=0.8, label="CBF margin")
+                drew = True
+        ax.axhline(0.0, color="#333", ls=":", lw=0.8)   # 0 = contact
         _shade_grasp(ax, series)
         ax.set_xlabel("t [s]"); ax.set_ylabel("distance [m]")
-        ax.set_title("Obstacle clearance")
-        _legend(ax)
+        ax.set_title(f"Obstacle clearance (< {thr:g} m)")
+        if drew:
+            _legend(ax)
+        else:
+            ax.text(0.5, 0.5, f"no pair within {thr:g} m", ha="center", va="center",
+                    transform=ax.transAxes, color="#999")
     else:
         _no_data(ax, "Obstacle clearance")
 
@@ -447,11 +484,15 @@ def analyze_one(bag_dir: str) -> bool:
                                   os.path.join(bag_dir, f"plot_triago_{arm}.png"))
         except Exception as exc:                     # noqa: BLE001
             print(f"  ! triago {arm} plot failed: {type(exc).__name__}: {exc}")
-        try:
-            make_haption_dashboard(series, metrics, metadata, arm, t_act, right_active,
-                                   os.path.join(bag_dir, f"plot_haption_{arm}.png"))
-        except Exception as exc:                     # noqa: BLE001
-            print(f"  ! haption {arm} plot failed: {type(exc).__name__}: {exc}")
+
+    # The Haption device is single (one operator, one handle), so a per-arm
+    # split is redundant -- emit ONE device figure keyed to the right arm.
+    try:
+        make_haption_dashboard(series, out["right"], metadata, "right", t_act,
+                               right_active, os.path.join(bag_dir, "plot_haption_right.png"))
+    except Exception as exc:                         # noqa: BLE001
+        print(f"  ! haption plot failed: {type(exc).__name__}: {exc}")
+
     with open(os.path.join(bag_dir, METRICS_NAME), "w") as fh:
         json.dump(out, fh, indent=2)
 
@@ -462,7 +503,7 @@ def analyze_one(bag_dir: str) -> bool:
         print(f"  [{arm}] active={mm.get('this_arm_active_frac')} "
               f"path={mm.get('ee_path_len_m')}m speed_mean={mm.get('ee_speed_mean_mps')} "
               f"sparc={mm.get('ee_sparc')} min_dist={mm.get('safety_min_dist_m')}")
-    print(f"  -> wrote plot_triago_(right|left).png, plot_haption_(right|left).png, "
+    print(f"  -> wrote plot_triago_(right|left).png, plot_haption_right.png, "
           f"metrics_summary_(right|left).txt, {METRICS_NAME}")
     return True
 
