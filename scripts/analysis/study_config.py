@@ -56,24 +56,33 @@ def resolve_participant_id(ros_param_value: str | None = None) -> str:
 #   CONTROL_MODE  F  B   code   condition
 #   CLUTCH        0  0   C      Clutch / Sync-only (baseline)
 #   CLUTCH        1  0   CF     Clutch / Guided feedback (VF)
+#   CLUTCH        0  1   CB     Clutch / Guided blending
 #   CLUTCH        1  1   CFB    Clutch / Full guidance
 #   JOYSTICK      0  0   J      Joystick / Sync-only (baseline)
+#   JOYSTICK      1  0   JF     Joystick / Guided feedback
 #   JOYSTICK      0  1   JB     Joystick / Guided blending
 #   JOYSTICK      1  1   JFB    Joystick / Full guidance
-# (CLUTCH+B-only and JOYSTICK+F-only are NOT part of the fair 2x3 design.)
+# CB (CLUTCH,F=0,B=1) and JF (JOYSTICK,F=1,B=0) complete the full 2x2x2 factorial
+# -- the off-diagonal cells the original "fair 2x3" omitted, added for a complete
+# paper study even though each pairs a control mode with its NON-native assist
+# channel (clutch+blend-only, joystick+feedback-only).
 VALID_CELLS = {
     ("CLUTCH",   False, False): "C",
     ("CLUTCH",   True,  False): "CF",
+    ("CLUTCH",   False, True):  "CB",
     ("CLUTCH",   True,  True):  "CFB",
     ("JOYSTICK", False, False): "J",
+    ("JOYSTICK", True,  False): "JF",
     ("JOYSTICK", False, True):  "JB",
     ("JOYSTICK", True,  True):  "JFB",
 }
 CELL_LABELS = {
     "C":   "Clutch / Sync-only (baseline)",
     "CF":  "Clutch / Guided feedback (VF)",
+    "CB":  "Clutch / Guided blending",
     "CFB": "Clutch / Full guidance",
     "J":   "Joystick / Sync-only (baseline)",
+    "JF":  "Joystick / Guided feedback",
     "JB":  "Joystick / Guided blending",
     "JFB": "Joystick / Full guidance",
 }
@@ -83,11 +92,12 @@ def derive_cell(cfg) -> dict:
     """Identify the active study cell from the controller config flags.
 
     Returns {code, label, control_mode, assist_feedback, assist_blending, valid,
-    warning}. ``code`` is the C/CF/CFB/J/JB/JFB tag used in trial-folder names and
-    the master table. ``valid`` is False for a flag combination outside the fair
-    2x3 design (the trial is still recorded, just flagged). Never raises: a missing
-    cfg yields a clearly-marked 'unknown' cell so the recorder can still capture
-    the bag.
+    warning}. ``code`` is the cell tag (C/CF/CB/CFB/J/JF/JB/JFB) used in
+    trial-folder names and the master table. ``valid`` is False only for a flag
+    combination outside the 8-cell factorial (all 2x2x2 combos are now valid, so
+    this should not happen for a real config); the trial is still recorded, just
+    flagged. Never raises: a missing cfg yields a clearly-marked 'unknown' cell so
+    the recorder can still capture the bag.
     """
     if cfg is None:
         return {"code": "unknown",

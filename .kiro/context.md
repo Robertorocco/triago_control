@@ -117,12 +117,14 @@ Exposing the two channels independently fixes the previous **unfairness** (the c
 |---|---|---|---|---|
 | CLUTCH | False | False | Sync only (baseline) | `teleop_triago_clutch` + `haptic_force_manager_C` |
 | CLUTCH | True | False | Guided feedback (VF) | `teleop_triago_clutch` + `haptic_force_manager_CF` |
+| CLUTCH | False | True | Guided blending | `teleop_triago_clutch` + `haptic_force_manager_CB` *(to implement)* |
 | CLUTCH | True | True | Full guidance | `teleop_triago_clutch` + `haptic_force_manager_CFB` |
 | JOYSTICK | False | False | Sync only | `teleop_triago_joystick` + `haptic_force_manager_J` |
+| JOYSTICK | True | False | Guided feedback | `teleop_triago_joystick` + `haptic_force_manager_JF` *(to implement)* |
 | JOYSTICK | False | True | Guided blending | `teleop_triago_joystick` + `haptic_force_manager_JB` |
 | JOYSTICK | True | True | Full guidance | `teleop_triago_joystick` + `haptic_force_manager_JFB` (centering spring + F_guide, guide calibrated to the deadzone-exit force) |
 
-**Force-manager naming convention.** Every force manager is `haptic_force_manager_<CELL>`, where `<CELL>` encodes the active study condition as letters: **C** = CLUTCH or **J** = JOYSTICK (the control mode, always first), then **F** if `ASSIST_FEEDBACK` is on, then **B** if `ASSIST_BLENDING` is on. The no-assist baseline is just the mode letter, so the six cells are `C / CF / CFB` (clutch) and `J / JB / JFB` (joystick). The `_tutorial` suffix was dropped in this rename, and the demo/legacy scripts (`haptic_force_manager_battery`, `teleop_demo_integrator`, `teleop_triago`) were removed from the package.
+**Force-manager naming convention.** Every force manager is `haptic_force_manager_<CELL>`, where `<CELL>` encodes the active study condition as letters: **C** = CLUTCH or **J** = JOYSTICK (the control mode, always first), then **F** if `ASSIST_FEEDBACK` is on, then **B** if `ASSIST_BLENDING` is on. The no-assist baseline is just the mode letter, so the eight cells are `C / CF / CB / CFB` (clutch) and `J / JF / JB / JFB` (joystick). `CB` (clutch + blending-only) and `JF` (joystick + feedback-only) are the two off-diagonal cells that complete the full 2×2×2 factorial for the paper — each pairs a control mode with its **non-native** assist channel (clutch is a position/Virtual-Fixture framework not meant to run on blending alone; the velocity joystick was conceived as the auto-blending solution), so they are conceptually unusual but included for a complete study comparison. The `_tutorial` suffix was dropped in this rename, and the demo/legacy scripts (`haptic_force_manager_battery`, `teleop_demo_integrator`, `teleop_triago`) were removed from the package.
 
 Every teleop / force-manager node calls `cfg.validate_condition(node_name, control_mode=…, feedback=…, blending=…)` at startup and **HARD-ERRORS on mismatch** (teleop nodes constrain only the control mode since they serve all three of their column's cells; force managers pin the full triple), so a mis-launched condition fails loudly instead of silently running the wrong strategy.
 

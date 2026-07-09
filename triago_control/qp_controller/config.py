@@ -39,7 +39,8 @@ ORIENTATION_CTRL = True         # True = control Pos+Ori (6DOF), False = Pos onl
 # =============================================================================
 # 1b. EXPERIMENT CONDITION SELECTOR (fair 2x3 teleoperation study design)
 # =============================================================================
-# The user study compares TWO control modes, each at THREE assistance levels.
+# The user study compares TWO control modes across the full factorial of the two
+# orthogonal assistance channels below (four F/B combinations per mode).
 # Historically this was governed by the single boolean `BLENDING`, which
 # conflated three independent things (which teleop node, which haptic force
 # manager, and whether main_shared_autonomy blends the reference). That made the
@@ -57,21 +58,30 @@ ORIENTATION_CTRL = True         # True = control Pos+Ori (6DOF), False = Pos onl
 #                                      in main_shared_autonomy (sole writer of
 #                                      /arm_*/cartesian_reference).
 #
-# The resulting fair 2x3 matrix (see .kiro/context.md for the authoritative table):
+# The FULL 2x2x2 factorial (see .kiro/context.md for the authoritative table):
 #
 #   CONTROL_MODE  ASSIST_FEEDBACK  ASSIST_BLENDING   condition              force manager
 #   ------------  ---------------  ---------------   --------------------   ----------------------------------------
 #   CLUTCH        False            False             Sync only              haptic_force_manager_C
 #   CLUTCH        True             False             Guided feedback (VF)   haptic_force_manager_CF
+#   CLUTCH        False            True              Guided blending        haptic_force_manager_CB   (to implement)
 #   CLUTCH        True             True              Full guidance          haptic_force_manager_CFB
 #   JOYSTICK      False            False             Sync only              haptic_force_manager_J
+#   JOYSTICK      True             False             Guided feedback        haptic_force_manager_JF   (to implement)
 #   JOYSTICK      False            True              Guided blending        haptic_force_manager_JB
-#   JOYSTICK      True             True              Full guidance          haptic_force_manager_JFB (not yet implemented)
+#   JOYSTICK      True             True              Full guidance          haptic_force_manager_JFB
+#
+# CB and JF are the two off-diagonal cells the original "fair 2x3" omitted; they
+# complete the factorial for the paper even though each pairs a control mode with
+# its NON-native assist channel (clutch is a position/Virtual-Fixture framework
+# not meant to run on blending alone; the velocity joystick was conceived as the
+# smart auto-blending solution). Included for a complete user-study comparison.
 #
 # Force-manager naming: every file is haptic_force_manager_<CELL>, where <CELL>
 # encodes the active study condition -- C=CLUTCH / J=JOYSTICK (control mode,
 # always first), then F if ASSIST_FEEDBACK and B if ASSIST_BLENDING. Baseline
-# (no assist) is just the mode letter. So C/CF/CFB (clutch) and J/JB/JFB (joystick).
+# (no assist) is just the mode letter. So C/CF/CB/CFB (clutch) and J/JF/JB/JFB
+# (joystick) -- eight cells total.
 #
 # Each teleop / force-manager node calls cfg.validate_condition(...) at startup
 # and HARD-ERRORS if the launched node does not match the selected condition, so
