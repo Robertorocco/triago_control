@@ -905,6 +905,21 @@ class SharedControlNode(Node):
         # now always spawns at the de-activated gripper's own pose.
         self.current_T_EE = self._T_EE[new_arm]
         self._blend_ref_valid = False
+        # 4b. Reset the per-tick estimators so the NEW arm starts CLEAN -- each of
+        # these otherwise carries OLD-arm state across the switch:
+        #   * _prev_T_EE: else _update_ee_twist finite-differences the OLD->NEW arm
+        #     pose next tick = a huge spurious EE twist that corrupts the belief.
+        #   * _ee_twist: drop the smoothed observed action (old-arm motion).
+        #   * current_v_h: no stale user twist gets blended until the new arm's
+        #     first user_cartesian_reference arrives.
+        #   * alpha_lpf/last_alpha: the new arm starts USER-led (no autonomy
+        #     authority carried over from the arm we just left); alpha then
+        #     re-ramps from the new arm's own alignment.
+        self._prev_T_EE = None
+        self._ee_twist = np.zeros(6)
+        self.current_v_h = np.zeros(6)
+        self.alpha_lpf = 0.0
+        self.last_alpha = 0.0
         self.get_logger().info(
             f"\033[95m[ARM SWITCH] → {new_arm.upper()} | state={self.grasp_sm.state} "
             f"| holding={self.grasped_color}\033[0m")
