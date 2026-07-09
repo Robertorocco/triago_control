@@ -120,7 +120,7 @@ Exposing the two channels independently fixes the previous **unfairness** (the c
 | CLUTCH | False | True | Guided blending | `teleop_triago_clutch` + `haptic_force_manager_CB` |
 | CLUTCH | True | True | Full guidance | `teleop_triago_clutch` + `haptic_force_manager_CFB` |
 | JOYSTICK | False | False | Sync only | `teleop_triago_joystick` + `haptic_force_manager_J` |
-| JOYSTICK | True | False | Guided feedback | `teleop_triago_joystick` + `haptic_force_manager_JF` *(to implement)* |
+| JOYSTICK | True | False | Guided feedback | `teleop_triago_joystick` + `haptic_force_manager_JF` |
 | JOYSTICK | False | True | Guided blending | `teleop_triago_joystick` + `haptic_force_manager_JB` |
 | JOYSTICK | True | True | Full guidance | `teleop_triago_joystick` + `haptic_force_manager_JFB` (centering spring + F_guide, guide calibrated to the deadzone-exit force) |
 
