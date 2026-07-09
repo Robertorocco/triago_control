@@ -58,6 +58,24 @@ guard disables it when world-right is ~parallel to the optical axis. The optical
 axis itself stays completely free (the head may view the hand from above or
 below) — the image simply won't roll past vertical / go upside-down.
 
+APPROACH-AXIS ALIGNMENT (soft viewpoint / orbit preference)
+-----------------------------------------------------------
+Optional preference to align the optical axis (+Z) with the active gripper's
+approach axis (its tool-frame +X) — so the head "looks along where the hand is
+reaching" (e.g. a top-down view for a top grasp). Centering already owns the
+optical-axis DIRECTION (it must point at the hand), so this is NOT servoed as an
+orientation: aligning +Z with the approach axis is equivalent to placing the
+camera ON the approach line, one stand-off behind the gripper:
+
+    p_cam_des = p_hand - TARGET_DISTANCE * x_gripper(world)
+
+A low-weight least-squares bias on the camera's LINEAR velocity toward that
+on-sphere point orbits the head to the aligned viewpoint, while centering keeps
+the hand framed and stand-off holds the distance. It is subordinate to tracking
+(centering gate + modest weight, never an equality) exactly like the roll term,
+and resolves in the null space of centering+stand-off. Toggle via ENABLE_
+APPROACH_ALIGN / the `approach_align` ROS param.
+
 RUN:
     ros2 run triago_control head_active_arm_tracking.py
     ros2 run triago_control head_active_arm_tracking.py --ros-args -p plot:=false
@@ -150,6 +168,24 @@ ROLL_ALIGN_EPS = 0.1        # gimbal guard: skip when world-right ~parallel to o
 ROLL_GATE_ANGLE_DEG = 30.0  # leveling authority fades out as the hand goes off-axis...
 ROLL_GATE_FLOOR = 0.15      # ...down to this floor (gentle leveling during acquisition)
 
+# --- Soft approach-axis alignment (viewpoint / orbit preference) ----------
+# Preference (NOT a hard task): orbit the camera around the hand so the optical
+# axis (+Z) aligns with the gripper's approach axis (tool-frame +X). Centering
+# already owns the optical-axis DIRECTION, so aligning +Z with the approach axis
+# is equivalent to placing the camera ON the approach line, one stand-off behind
+# the gripper:  p_cam_des = p_hand - TARGET_DISTANCE * x_gripper. A low-weight
+# least-squares bias on the camera's LINEAR velocity toward that on-sphere point
+# orbits the head to the aligned viewpoint; centering keeps the hand framed and
+# stand-off holds the distance. Subordinate to tracking (gated + modest weight),
+# resolved in the null space of centering+stand-off — same spirit as the roll
+# term. A hard version would fight centering, so this must stay a soft cost.
+ENABLE_APPROACH_ALIGN = True
+K_APPROACH_ALIGN = 1.0          # camera-position servo gain [1/s]
+W_APPROACH_ALIGN = 5.0          # cost weight (subordinate to centering; tune here)
+APPROACH_V_MAX = 0.3            # [m/s] clamp on the requested orbit velocity
+APPROACH_GATE_ANGLE_DEG = 25.0  # fades out as the hand leaves the optical axis...
+APPROACH_GATE_FLOOR = 0.0       # ...to zero (never fights FOV acquisition / PBVS)
+
 # Control loop rate
 CONTROL_HZ = 50.0
 
@@ -164,8 +200,10 @@ class HeadActiveArmTracker(Node):
         # --- Parameters ---
         self.declare_parameter('plot', True)
         self.declare_parameter('target_distance', TARGET_DISTANCE)
+        self.declare_parameter('approach_align', ENABLE_APPROACH_ALIGN)
         self.enable_plot = self.get_parameter('plot').value
         self.target_distance = float(self.get_parameter('target_distance').value)
+        self.approach_align = bool(self.get_parameter('approach_align').value)
 
         # --- State ---
         self.joint_name_seen = {}
@@ -181,6 +219,7 @@ class HeadActiveArmTracker(Node):
         self.buf_v_err = deque(maxlen=maxlen)      # [px] v - TARGET_V
         self.buf_ang_err = deque(maxlen=maxlen)    # [deg] optical-axis vs hand
         self.buf_roll_align = deque(maxlen=maxlen) # [deg] image-right vs world-right
+        self.buf_approach = deque(maxlen=maxlen)   # [deg] optical axis vs gripper approach axis
         self.buf_dist = deque(maxlen=maxlen)       # [m] camera->hand distance
         self.buf_in_fov = deque(maxlen=maxlen)     # 1.0 IBVS / 0.0 PBVS
         self.buf_active = deque(maxlen=maxlen)     # 1.0 right / 0.0 left
@@ -396,6 +435,31 @@ class HeadActiveArmTracker(Node):
             wz_align = 0.0
         roll_align_err_deg = float(np.degrees(theta_roll))
 
+        # Soft approach-axis alignment (viewpoint / orbit preference): the camera
+        # should end up on the gripper's approach line so the optical axis (+Z)
+        # coincides with the tool-frame +X. Centering owns the axis DIRECTION, so
+        # we instead bias the camera POSITION toward the on-sphere point
+        # p_cam_des = p_hand - D * x_gripper (one stand-off behind the gripper).
+        # The resulting desired LINEAR velocity (mapped into the camera frame) is
+        # added as a low-weight, centering-gated LS term below. Reports the
+        # optical-axis-vs-approach-axis angle for telemetry.
+        x_grip_w = np.asarray(T_hand.rotation)[:, 0]     # gripper approach axis (world)
+        z_cam_w = R_cam[:, 2]                            # current optical axis (world)
+        approach_err_deg = float(np.degrees(
+            np.arccos(np.clip(float(z_cam_w @ x_grip_w), -1.0, 1.0))))
+        if self.approach_align:
+            p_cam_des = np.asarray(T_hand.translation) - self.target_distance * x_grip_w
+            v_des_w = K_APPROACH_ALIGN * (p_cam_des - np.asarray(T_cam.translation))
+            nv = float(np.linalg.norm(v_des_w))
+            if nv > APPROACH_V_MAX:
+                v_des_w *= APPROACH_V_MAX / nv
+            v_des_cam = R_cam.T @ v_des_w                # desired linear vel in camera frame
+            approach_gate = float(np.clip(1.0 - ang_err_deg / APPROACH_GATE_ANGLE_DEG,
+                                          APPROACH_GATE_FLOOR, 1.0))
+        else:
+            v_des_cam = np.zeros(3)
+            approach_gate = 0.0
+
         # 3. FOV state (hand physically in front of the lens)
         in_fov = False
         u_h = v_h = None
@@ -442,6 +506,18 @@ class HeadActiveArmTracker(Node):
         J_roll = J_cam[5, :]
         H[:7, :7] += W_ROLL_ALIGN * np.outer(J_roll, J_roll)
         g[:7] += W_ROLL_ALIGN * wz_align * J_roll
+
+        # Soft approach-axis (orbit) task: add (w_eff/2) * ||J_lin @ dq - v_des_cam||^2
+        # to the cost, where J_lin = J_cam[:3,:] is the camera LINEAR velocity and
+        # v_des_cam drives the camera onto the gripper approach line. w_eff folds in
+        # the centering gate so the term vanishes off-axis (never fights acquisition
+        # / PBVS). Like the roll term, this only shapes the redundancy left after
+        # centering + stand-off and cannot override the primary equality.
+        if self.approach_align and approach_gate > 0.0:
+            J_lin = J_cam[:3, :]
+            w_eff = W_APPROACH_ALIGN * approach_gate
+            H[:7, :7] += w_eff * (J_lin.T @ J_lin)
+            g[:7] += w_eff * (J_lin.T @ v_des_cam)
 
         C, b = [], []
 
@@ -551,6 +627,7 @@ class HeadActiveArmTracker(Node):
             self.buf_v_err.append((v_h - TARGET_V) if v_h is not None else np.nan)
             self.buf_ang_err.append(ang_err_deg)
             self.buf_roll_align.append(roll_align_err_deg)
+            self.buf_approach.append(approach_err_deg)
             self.buf_dist.append(dist)
             self.buf_in_fov.append(1.0 if in_fov else 0.0)
             self.buf_active.append(1.0 if self.active_arm == 'right' else 0.0)
@@ -619,13 +696,15 @@ def plotting_thread(node: HeadActiveArmTracker, stop_event: threading.Event):
         line_v, = ax_px.plot([], [], "r-", linewidth=1.5, label="v error")
         ax_px.legend(loc="upper right", fontsize=8)
 
-        ax_ang.set_title("Angular Errors — pointing (opt.axis vs hand) + roll alignment")
+        ax_ang.set_title("Angular Errors — pointing + roll align + approach align")
         ax_ang.set_ylabel("Error [deg]"); ax_ang.set_xlabel("Time [s]")
         ax_ang.grid(True, alpha=0.3)
         ax_ang.axhline(0.0, color="gray", linestyle="--", linewidth=1)
         line_ang, = ax_ang.plot([], [], "m-", linewidth=1.5, label="pointing error")
         line_roll, = ax_ang.plot([], [], "orange", linewidth=1.5,
                                  label="roll align (img-right vs world-right)")
+        line_appr, = ax_ang.plot([], [], "g-", linewidth=1.5,
+                                 label="approach align (opt.axis vs gripper +X)")
         ax_ang.legend(loc="upper right", fontsize=8)
 
         ax_dist.set_title(f"Stand-off Distance vs Target ({node.target_distance:.2f} m)")
@@ -652,6 +731,7 @@ def plotting_thread(node: HeadActiveArmTracker, stop_event: threading.Event):
                 ve = list(node.buf_v_err)
                 ang = list(node.buf_ang_err)
                 roll = list(node.buf_roll_align)
+                appr = list(node.buf_approach)
                 dist = list(node.buf_dist)
                 in_fov = list(node.buf_in_fov)
 
@@ -660,6 +740,7 @@ def plotting_thread(node: HeadActiveArmTracker, stop_event: threading.Event):
                 line_v.set_data(t, ve)
                 line_ang.set_data(t, ang)
                 line_roll.set_data(t, roll)
+                line_appr.set_data(t, appr)
                 line_dist.set_data(t, dist)
                 disterr = [(d - node.target_distance) * 100.0 for d in dist]
                 line_disterr.set_data(t, disterr)
