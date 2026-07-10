@@ -158,6 +158,8 @@ class SafetyQPController(Node):
         self.last_freq_pub_time = time.perf_counter()
         self.last_sim_time = None
         self.last_qdot_cmd_14 = np.zeros(14)
+        # Per-tick jitter/compute-time diagnostic (see /qp_debug/loop_timing below).
+        self._last_tick_perf = None
 
         # --- COMMAND PUBLISHERS ---
         self.pub_right = self.create_publisher(Float64MultiArray, f'/{cfg.RIGHT_CONTROLLER}/joint_velocity_cmd', 1)
@@ -178,6 +180,13 @@ class SafetyQPController(Node):
             Float64MultiArray, '/qp_debug/reference_effective', 10)
         self.pub_debug_h = self.create_publisher(Float64, '/qp_debug/safety_margin', 10)
         self.pub_loop_freq = self.create_publisher(Float64, '/qp_debug/loop_freq', 10)
+        # Per-tick diagnostic (NOT downsampled -- every tick, unlike loop_freq's
+        # running average): [tick_dt_ms, solve_ms]. tick_dt is wall-clock time
+        # since the previous tick started (scheduling/jitter, includes everything:
+        # OS scheduling delay + all of solve_and_publish); solve_ms isolates just
+        # the QP build+solve compute time. Separates "the OS isn't scheduling us on
+        # time" from "the solve itself is too slow for this CPU" -- see loop_timing_monitor.py.
+        self.pub_loop_timing = self.create_publisher(Float64MultiArray, '/qp_debug/loop_timing', 10)
         self.pub_min_dist = self.create_publisher(Float64, '/qp_debug/min_distance', 10)
         self.pub_top_pairs = self.create_publisher(String, '/qp_debug/top_pairs', 10)
         self.pub_lambda_cbf = self.create_publisher(Float64MultiArray, '/qp_debug/lambda_cbf', 10)
@@ -552,6 +561,12 @@ class SafetyQPController(Node):
         if self.kin.current_q is None:
             return
 
+        # Tick-to-tick wall time (jitter diagnostic, see pub_loop_timing above).
+        _tick_start = time.perf_counter()
+        _tick_dt_ms = ((_tick_start - self._last_tick_perf) * 1000.0
+                       if self._last_tick_perf is not None else 0.0)
+        self._last_tick_perf = _tick_start
+
         # --- Watchdog: a stale-reference arm is FROZEN at its current pose (held
         # by a zero-velocity CLF) rather than going limp. Option B keeps it under
         # QP control so it can still bend to help the active arm avoid collisions.
@@ -665,6 +680,7 @@ class SafetyQPController(Node):
         orient_boost_arms = set(self.hri.attached_object_arm.values())
         if self.grasp_active:
             orient_boost_arms.add(self.active_arm)
+        _solve_start = time.perf_counter()
         q_dot_safe, slack_r, slack_l, b_col_pair, lambda_joints_total = self.qp.build_and_solve(
             self.kin, J_soft_r, h_soft_r, J_soft_l, h_soft_l,
             d_safe_dynamic_r, d_safe_dynamic_l,
@@ -672,6 +688,8 @@ class SafetyQPController(Node):
             self.xdot_ref_right, self.xdot_ref_left, e_r, v_r, e_l, v_l, dt,
             right_frozen=self.right_frozen, left_frozen=self.left_frozen,
             tracking_boost_arm=boost_arm, orient_boost_arms=orient_boost_arms)
+        _solve_ms = (time.perf_counter() - _solve_start) * 1000.0
+        self.pub_loop_timing.publish(Float64MultiArray(data=[_tick_dt_ms, _solve_ms]))
 
         self.publish_counter += 1
 

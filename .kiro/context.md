@@ -266,6 +266,7 @@ Identical to `haption_teleoperation`'s §7: a pure 180° rotation about Z betwee
 3. **Meshcat is not thread-safe** — only the dedicated `_run_viz` thread may touch the WebSocket; callbacks mutate state under a lock and set a reload-pending flag.
 4. **Controller switching** — TRIAGo requires explicit activation of `arm_{right,left}_joint_space_controller_vel` and deactivation of the conflicting trajectory controllers before the QP can command the arms.
 5. **No force/torque sensing anywhere on the arm chains**, and no Gazebo ground-truth is ever read — everything is derived from `/joint_states` + FK. This is why grasp confirmation (§5.5) is purely geometric.
+6. **Control-loop timing is measured, not assumed, on real hardware.** `main_qp_controller.py` uses a fixed nominal `dt = 1/CONTROL_FREQ_DEFAULT` in the CLF/CBF/governor math (never the measured wall-clock gap between ticks), so scheduling jitter is invisible to that math — same-host sim (loopback DDS discovery, uncontended CPU) hides this; a real robot under Docker/CPU contention does not. `/qp_debug/loop_timing` (`Float64MultiArray`, published every tick, NOT downsampled: `[tick_dt_ms, solve_ms]`) separates OS/container scheduling jitter (`tick_dt_ms`, wall time since the previous tick started) from raw QP compute time (`solve_ms`, the `build_and_solve` call only) — diagnose a real-hardware E-stop or missed-deadline suspicion with `loop_timing_monitor.py` (§11) before assuming a compute-budget problem requiring a frequency drop + full gain retune.
 
 ## 11. Build & Run
 
@@ -281,6 +282,7 @@ ros2 run triago_control head_active_arm_tracking.py # teleop: head follows the a
 ros2 run triago_control trajectory_generator.py     # open-loop test source
 ros2 run triago_control plotter.py                  # live dashboard
 ros2 run triago_control offline_plotter.py          # static, publication-quality figures
+ros2 run triago_control loop_timing_monitor.py      # real-hardware control-loop jitter / compute-time diagnostic (§10.6)
 ```
 
 **Full simulation launch sequence** (robot side, then teleoperation side):
