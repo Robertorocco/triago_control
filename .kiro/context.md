@@ -94,9 +94,9 @@ An intermediate filter between the raw Cartesian reference (from teleop / trajec
 
 Implements Bayesian belief estimation over a discrete goal set, a local QP policy per goal, a grasp state machine, and (when `cfg.ASSIST_BLENDING`) reference-level blending of the human twist with the autonomous policy. The human side is either "Joystick Mode" (velocity control, `haption_teleoperation`'s context.md §3.2: spring-centered handle, displacement → twist) or "Clutch Mode" (position control, integrates handle twist into a pose reference).
 
-### 5.0 Experiment Condition Selector (fair 2×3 study) — `config.py` §1b
+### 5.0 Experiment Condition Selector (2×2×2 factorial, 8 cells) — `config.py` §1b
 
-The study is a **fair 2×3 matrix**: two control modes × three assistance levels, selected by three **orthogonal** flags in `config.py` (§1b):
+The study is a **full 2×2×2 factorial** (equivalently: 2 control modes × 4 assistance-channel combinations = 8 cells), selected by three **orthogonal** flags in `config.py` (§1b). This superseded an earlier "fair 2×3" design (2 modes × 3 shared assistance levels, 6 cells) that omitted the `CB`/`JF` off-diagonal cells — see §5.0's force-manager naming note below for why they were added back.
 
 - `CONTROL_MODE ∈ {CLUTCH, JOYSTICK}` — position control (clutch integrates the handle twist to a pose reference) vs velocity control (spring-centered joystick, displacement → twist).
 - `ASSIST_FEEDBACK` (bool) — **channel F**: assistive haptic FORCES on the handle (`F_guide` velocity field + `F_fixture` funnel) on top of the always-present `F_sync` tether.
@@ -352,9 +352,9 @@ Self-contained tooling to run and record a **human-subject study** comparing fee
 
 ### 15.1 Independent Variable — Feedback Conditions
 
-The independent variable is the **fair 2×3 condition matrix** defined authoritatively in §5.0 — a `(CONTROL_MODE, ASSIST_FEEDBACK, ASSIST_BLENDING)` triple, not the single legacy `cfg.BLENDING`. Each cell is a `(control_mode, assist_level)` pair used in trial-folder names and the master table (e.g. `clutch_sync`, `clutch_feedback`, `clutch_full`, `joystick_sync`, `joystick_blend`, `joystick_full`). The recorder snapshots the full triple from `cfg` into `metadata.json` and verifies the launched condition against it (nodes also hard-error on mismatch via `cfg.validate_condition`, §5.0). The experimenter's declaration remains the source of truth for the manual success call; the flag triple resolves the condition unambiguously (unlike the old scheme where `virtual_fixture` and `no_assist` were indistinguishable at `cfg.BLENDING=False`).
+The independent variable is the **full 2×2×2 factorial condition matrix** (8 cells) defined authoritatively in §5.0 — a `(CONTROL_MODE, ASSIST_FEEDBACK, ASSIST_BLENDING)` triple, not the single legacy `cfg.BLENDING`. Each cell has a short code used in trial-folder names and the master table: `C / CF / CB / CFB` (clutch) and `J / JF / JB / JFB` (joystick) — see `VALID_CELLS`/`CELL_LABELS` in `scripts/analysis/study_config.py` for the canonical code → label mapping. The recorder snapshots the full triple from `cfg` into `metadata.json` and verifies the launched condition against it (nodes also hard-error on mismatch via `cfg.validate_condition`, §5.0). The experimenter's declaration remains the source of truth for the manual success call; the flag triple resolves the condition unambiguously (unlike the old scheme where `virtual_fixture` and `no_assist` were indistinguishable at `cfg.BLENDING=False`).
 
-> The analysis condition labels/short-codes here are being migrated to the 2×3 scheme; `study_config.py` (analysis agent) owns the canonical label strings.
+`study_config.py` (analysis agent) owns the canonical label strings and already implements all 8 cells via `derive_cell()`.
 
 ### 15.2 Recorder — GUI, one launch per trial (`study_recorder.py`)
 
