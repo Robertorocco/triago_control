@@ -176,6 +176,18 @@ class HeadAprilNode(Node):
         self._last_proc_ms = 0.0
         self._camera_warned = False
 
+        # --- Tag-localization diagnostic (READ-ONLY audit) -------------
+        # Splits the systematic reconstruction bias into its two possible
+        # sources — the TF camera extrinsic vs. ViSP's tag-pose estimate —
+        # by comparing the CAMERA-ESTIMATED tag pose in base against the KNOWN
+        # tag pose (self.world_M_tag). This is comparison-only tooling: the
+        # known pose is NEVER fed back into the reconstruction (that would be a
+        # forbidden ground-truth fudge). Toggle with `-p tag_diag:=false`.
+        # Logged at the console cadence (not per-frame) to avoid spam.
+        self.declare_parameter("tag_diag", True)
+        self._tag_diag = self.get_parameter("tag_diag").value
+        self._diag_cache = None        # (base_M_cam, c_M_tag, base_M_tag)
+
         # --- Timers ----------------------------------------------------
         self.create_timer(1.0 / cfg.CONTROL_RATE_HZ, self._control_tick)
         self.create_timer(1.0 / cfg.PERCEPTION_RATE_HZ, self._perception_tick)
@@ -263,6 +275,7 @@ class HeadAprilNode(Node):
             return
 
         base_M_tag = base_M_cam @ c_M_tag
+        self._diag_cache = (base_M_cam, c_M_tag, base_M_tag)   # read-only audit
 
         # Reconstruct every scene object from its known tag-relative transform.
         recon = {}
@@ -466,6 +479,60 @@ class HeadAprilNode(Node):
             head_line + "\n"
             f"       [APRILTAG] id {cfg.APRILTAG_ID} seen | recon {self._last_proc_ms:.2f} ms\n"
             f"       [RECON] {obj_txt}")
+
+        if self._tag_diag and self._diag_cache is not None:
+            self._log_tag_diagnostic(*self._diag_cache)
+
+    # ================================================================== #
+    # Tag-localization diagnostic (READ-ONLY audit — see __init__ note)   #
+    # ================================================================== #
+    def _log_tag_diagnostic(self, base_M_cam, c_M_tag, base_M_tag):
+        """Log where the systematic reconstruction bias comes from.
+
+        The whole scene hangs rigidly off the tag, so a constant offset on
+        every object equals the error on the ESTIMATED tag pose:
+            base_M_tag = base_M_cam . c_M_tag
+                         └ TF extrinsic ┘  └ ViSP ┘
+        We compare that estimate against the KNOWN tag pose (self.world_M_tag,
+        base==world) and also print, in the CAMERA frame, ViSP's raw c_M_tag
+        vs. the c_M_tag that the TF extrinsic + known tag pose imply
+        (`c_M_tag_ideal = base_M_cam^-1 . world_M_tag`). Reading:
+          * If ViSP's c_M_tag ~= c_M_tag_ideal  -> ViSP agrees with (TF+truth);
+            the residual is dominated by the TF extrinsic.
+          * If they differ, look at the split: a |range| (Z) mismatch points at
+            tag_size / focal-length (intrinsics) scale; a lateral (X/Y)
+            mismatch points at principal point (cx,cy) or a lateral extrinsic.
+        NOTHING here is fed back into the reconstruction.
+        """
+        true_base_M_tag = self.world_M_tag           # known tag pose (base==world)
+
+        cam_t = base_M_cam[:3, 3]
+        cam_rpy = np.degrees(Rot.from_matrix(base_M_cam[:3, :3]).as_euler("xyz"))
+
+        ct = c_M_tag[:3, 3]
+        rng = float(np.linalg.norm(ct))
+
+        c_M_tag_ideal = np.linalg.inv(base_M_cam) @ true_base_M_tag
+        cti = c_M_tag_ideal[:3, 3]
+        rng_i = float(np.linalg.norm(cti))
+        dcam = ct - cti                              # ViSP - ideal, in camera frame
+
+        est_t = base_M_tag[:3, 3]
+        est_yaw = float(np.degrees(Rot.from_matrix(base_M_tag[:3, :3]).as_euler("xyz"))[2])
+        true_t = true_base_M_tag[:3, 3]
+        true_yaw = float(np.degrees(Rot.from_matrix(true_base_M_tag[:3, :3]).as_euler("xyz"))[2])
+        dpos = est_t - true_t
+
+        self.get_logger().info(
+            "       [TAG-DIAG] (read-only; frame='%s')\n" % self._tag_frame +
+            f"         extrinsic base_M_cam : t={np.round(cam_t, 4)} rpy_deg={np.round(cam_rpy, 1)}\n"
+            f"         ViSP  c_M_tag        : t={np.round(ct, 4)} range={rng:.4f} m\n"
+            f"         ideal c_M_tag(TF+GT) : t={np.round(cti, 4)} range={rng_i:.4f} m\n"
+            f"         ViSP-ideal (cam frm) : dt={np.round(dcam, 4)} d|range|={rng - rng_i:+.4f} m\n"
+            f"         tag in base  EST     : t={np.round(est_t, 4)} yaw={est_yaw:+.1f} deg\n"
+            f"         tag in base  KNOWN   : t={np.round(true_t, 4)} yaw={true_yaw:+.1f} deg\n"
+            f"         >> TAG POS ERROR     : {np.round(dpos, 4)} m  "
+            f"|{np.linalg.norm(dpos) * 100:.2f} cm|  yaw_err={est_yaw - true_yaw:+.2f} deg")
 
 
 def main():
