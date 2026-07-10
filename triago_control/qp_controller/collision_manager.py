@@ -75,6 +75,14 @@ class CollisionManager:
         self.workspace_obstacle_ids = []
         self.table_id = None               # set in build_collision_model (role=="table")
         self.top_active_pairs = []         # [(name1, name2, dist)] 3 closest enabled pairs (debug)
+        # Cached once (right/left_geom_ids never change after build_collision_model)
+        # by compute_softmin_jacobian -- see its "allowed_grasp_ids" comment.
+        self._allowed_grasp_ids_cache = None
+        # Global (unfiltered) closest-pair witness, refreshed every tick by
+        # compute_softmin_jacobian -- consumed by qp_visualizer_tutorial.py's
+        # publish_debug instead of it re-scanning cdata.distanceResults itself.
+        self.witness_min_distance = float('nan')
+        self.witness_min_points = None
 
         # Lazy sets (built on first use in _arm_membership) for O(1) "does this
         # geom_id belong to the right/left arm's own geometry" lookups.
@@ -715,11 +723,25 @@ class CollisionManager:
         # per pair (a gripper<->cylinder pair belongs to exactly one arm in
         # practice, resolved via _arm_membership) -- see the shift computation.
 
-        # STEP 1: Collect candidate pairs within range, then keep the K closest
-        pair_distances = [(res.min_distance, k, res)
-                          for k, res in enumerate(self.cdata.distanceResults)
-                          if res.min_distance <= cfg.DISTANCE_FILTER_THRESHOLD]
-        pair_distances.sort(key=lambda x: x[0])
+        # STEP 1: Collect candidate pairs within range, then keep the K closest.
+        # Also track the TRUE (unfiltered) global-closest pair in this SAME pass
+        # -- used only for the RViz collision witness line (qp_visualizer_
+        # tutorial.py's publish_debug), which used to re-scan cdata.distanceResults
+        # from scratch on every telemetry tick: a second full pass over the exact
+        # same data this loop already visits. Folding it in here makes it ONE scan
+        # instead of two; the visualizer's own draw threshold (0.20m) is unchanged,
+        # it just reads self.witness_min_distance/points instead of recomputing them.
+        pair_distances = []
+        witness_dist = float('inf')
+        witness_res = None
+        for k, res in enumerate(self.cdata.distanceResults):
+            d = res.min_distance
+            if d < witness_dist:
+                witness_dist = d
+                witness_res = res
+            if d <= cfg.DISTANCE_FILTER_THRESHOLD:
+                pair_distances.append((d, k, res))
+        pair_distances.sort()   # tuples sort by [0] (distance) first -- no lambda needed
         active_pairs = pair_distances[:cfg.K_MAX_PAIRS]
         # NaN (not a fake 1.0) when NO pair is within DISTANCE_FILTER_THRESHOLD,
         # so /qp_debug/min_distance stays truthful -- "no pair in range" instead
@@ -727,24 +749,44 @@ class CollisionManager:
         # only (never consumed by the control law; h_soft carries the CBF value).
         abs_min_distance = float(pair_distances[0][0]) if pair_distances else float("nan")
 
-        # SoftMin accumulators -- ONE PER ARM. A pair's (weight * J_dist_k)
-        # contribution is added to R's accumulator if the pair touches the right
-        # arm's geometry, to L's if it touches the left arm's, to BOTH if it
-        # touches both (genuine inter-arm / held-object pairs) -- see
-        # _arm_membership. This is the core of the per-arm decoupling.
-        sum_exp_r, sum_exp_l = 0.0, 0.0
-        J_soft_sum_r = np.zeros(self.model.nv)
-        J_soft_sum_l = np.zeros(self.model.nv)
-        active_interaction_r, active_interaction_l = False, False
+        self.witness_min_distance = witness_dist if witness_res is not None else float('nan')
+        if witness_res is not None:
+            if hasattr(witness_res, 'nearest_points'):
+                self.witness_min_points = (witness_res.nearest_points[0], witness_res.nearest_points[1])
+            elif hasattr(witness_res, 'getNearestPoint1'):
+                self.witness_min_points = (witness_res.getNearestPoint1(), witness_res.getNearestPoint2())
+            else:
+                self.witness_min_points = (witness_res.o1, witness_res.o2)
+        else:
+            self.witness_min_points = None
+
+        # Per-pair "core math" (contact normal, distance-rate Jacobian, softmax
+        # weight) is collected here and processed in ONE vectorized batch AFTER
+        # the loop, instead of a separate small numpy call (exp, weighted-sum) on
+        # every single pair -- numpy's per-call overhead dominates at this array
+        # size (up to K_MAX_PAIRS), so batching M calls into 1-2 is a real saving.
+        # The per-pair HOOKS below (skip/margin/ramp logic) are UNCHANGED and
+        # still run per-pair exactly as before -- only the final weighting/
+        # summation step is batched.
+        d_eff_list = []
+        Jdist_list = []
+        route_r_list = []
+        route_l_list = []
         jacobian_cache = {}
         enabled_pairs = []   # (raw_distance, geom_id_first, geom_id_second) actually contributing
 
-        # Geometry set allowed to "touch" a cylinder during a grasp (boxes + wrist + fingers)
-        allowed_grasp_ids = set(self.gripper_box_ids.values())
-        for gid in self.right_geom_ids + self.left_geom_ids:
-            name = self.cmodel.geometryObjects[gid].name.lower()
-            if "7_link" in name or "gripper" in name or "finger" in name:
-                allowed_grasp_ids.add(gid)
+        # Geometry set allowed to "touch" a cylinder during a grasp (boxes + wrist
+        # + fingers). STATIC for the node's lifetime (right_geom_ids/left_geom_ids
+        # never change after build_collision_model), so compute it ONCE and cache
+        # it instead of rebuilding it via string ops on every single tick.
+        if self._allowed_grasp_ids_cache is None:
+            allowed_grasp_ids = set(self.gripper_box_ids.values())
+            for gid in self.right_geom_ids + self.left_geom_ids:
+                name = self.cmodel.geometryObjects[gid].name.lower()
+                if "7_link" in name or "gripper" in name or "finger" in name:
+                    allowed_grasp_ids.add(gid)
+            self._allowed_grasp_ids_cache = allowed_grasp_ids
+        allowed_grasp_ids = self._allowed_grasp_ids_cache
 
         for d, k, res in active_pairs:
             pair = self.cmodel.collisionPairs[k]
@@ -843,9 +885,9 @@ class CollisionManager:
             J2_p2 = get_point_jacobian(second, p2)
             J_dist_k = np.dot(n, (J1_p1 - J2_p2))  # Scalar distance-rate Jacobian for this pair
 
-            # SoftMax weighting on the (shifted) effective distance
+            # Effective (shifted) distance -- SoftMax weighting itself is now
+            # batched below, after the loop.
             d_eff = d + shift
-            weight = np.exp(-cfg.ALPHA_SOFTMIN * d_eff)
 
             # --- PER-ARM ROUTING (the coupling fix) ---
             # A pair contributes to arm X's SoftMin aggregate iff at least one of
@@ -857,22 +899,43 @@ class CollisionManager:
             # table) NEVER pollutes the other arm's barrier.
             touched = (self._arm_membership(first, attached_object_arm)
                       | self._arm_membership(second, attached_object_arm))
-            if 'right' in touched:
-                sum_exp_r += weight
-                J_soft_sum_r += weight * J_dist_k
-                active_interaction_r = True
-            if 'left' in touched:
-                sum_exp_l += weight
-                J_soft_sum_l += weight * J_dist_k
-                active_interaction_l = True
+            d_eff_list.append(d_eff)
+            Jdist_list.append(J_dist_k)
+            route_r_list.append('right' in touched)
+            route_l_list.append('left' in touched)
 
         # --- Record the 3 closest ACTUALLY-ENABLED pairs for the debug plot ---
-        enabled_pairs.sort(key=lambda x: x[0])
+        enabled_pairs.sort()
         self.top_active_pairs = []
         for d_p, g1, g2 in enabled_pairs[:3]:
             n1 = self.cmodel.geometryObjects[g1].name
             n2 = self.cmodel.geometryObjects[g2].name
             self.top_active_pairs.append((n1, n2, float(d_p)))
+
+        # --- Batched SoftMax weighting + per-arm accumulation --------------
+        # Mathematically identical to the old per-pair "weight = exp(...);
+        # sum_exp_X += weight; J_soft_sum_X += weight * J_dist_k" loop, just
+        # computed as 1-2 vectorized numpy calls over all collected pairs
+        # instead of up to K_MAX_PAIRS individual exp()/accumulate calls.
+        if d_eff_list:
+            d_eff_arr = np.asarray(d_eff_list)
+            weights = np.exp(-cfg.ALPHA_SOFTMIN * d_eff_arr)
+            Jdist_arr = np.asarray(Jdist_list)          # (M, nv)
+            mask_r = np.asarray(route_r_list, dtype=bool)
+            mask_l = np.asarray(route_l_list, dtype=bool)
+            active_interaction_r = bool(mask_r.any())
+            active_interaction_l = bool(mask_l.any())
+            sum_exp_r = float(weights[mask_r].sum()) if active_interaction_r else 0.0
+            sum_exp_l = float(weights[mask_l].sum()) if active_interaction_l else 0.0
+            J_soft_sum_r = ((weights[mask_r, None] * Jdist_arr[mask_r]).sum(axis=0)
+                           if active_interaction_r else np.zeros(self.model.nv))
+            J_soft_sum_l = ((weights[mask_l, None] * Jdist_arr[mask_l]).sum(axis=0)
+                           if active_interaction_l else np.zeros(self.model.nv))
+        else:
+            active_interaction_r, active_interaction_l = False, False
+            sum_exp_r, sum_exp_l = 0.0, 0.0
+            J_soft_sum_r = np.zeros(self.model.nv)
+            J_soft_sum_l = np.zeros(self.model.nv)
 
         # No active interaction -> that arm's barrier is silent (open space).
         # Each arm's SoftMin is computed and returned INDEPENDENTLY.

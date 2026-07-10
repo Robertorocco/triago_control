@@ -154,7 +154,11 @@ class SafetyQPController(Node):
         # --- LOOP / SIM STATE ---
         self.active_controller_mode = False
         self.publish_counter = 0
-        self.publish_every_n = cfg.PUBLISH_EVERY_N
+        # On real hardware, telemetry/viz publishing is real CPU cost competing
+        # with the control tick itself (see /qp_debug/loop_timing's telemetry_ms
+        # phase) -- halve the rate. Sim has no such CPU-budget pressure, so the
+        # default cadence is unchanged there.
+        self.publish_every_n = cfg.PUBLISH_EVERY_N * (2 if self.REAL_HARDWARE else 1)
         self.last_freq_pub_time = time.perf_counter()
         self.last_sim_time = None
         self.last_qdot_cmd_14 = np.zeros(14)
@@ -219,7 +223,8 @@ class SafetyQPController(Node):
         # from the Pinocchio model built from the live URDF -- the SAME
         # numbers the joint-limit CBF rows in qp_formulator enforce.
         self.pub_joint_limits = self.create_publisher(String, '/qp_debug/joint_limits', 10)
-        self.timer_joint_limits = self.create_timer(2.0, self._publish_joint_limits)
+        self.timer_joint_limits = self.create_timer(
+            4.0 if self.REAL_HARDWARE else 2.0, self._publish_joint_limits)
 
         # Reference governor telemetry (2026-07-01): publishes the DIFFERENCE
         # between raw and governed references (6D each arm: [dx,dy,dz,droll,dpitch,dyaw])
@@ -253,8 +258,10 @@ class SafetyQPController(Node):
         self.switch_srv = self.create_client(SwitchController, '/controller_manager/switch_controller')
         self.list_srv = self.create_client(ListControllers, '/controller_manager/list_controllers')
 
-        # Low-rate RViz obstacle marker timer (matches original 0.5s cadence)
-        self.timer_obs = self.create_timer(0.5, lambda: self.viz.publish_obstacle_marker(self.hri))
+        # Low-rate RViz obstacle marker timer (matches original 0.5s cadence;
+        # halved on real hardware -- see the publish_every_n comment above).
+        self.timer_obs = self.create_timer(
+            1.0 if self.REAL_HARDWARE else 0.5, lambda: self.viz.publish_obstacle_marker(self.hri))
 
     # =====================================================================
     # CONFIGURABLE FREQUENCY GOVERNOR
@@ -784,7 +791,9 @@ class SafetyQPController(Node):
                 margin_l = h_soft_l - d_safe_dynamic_l
                 self.pub_debug_h.publish(Float64(data=float(min(margin_r, margin_l))))
             self.viz.publish_debug(
-                self.kin.model, self.kin.data, self.col.cdata, self.kin.current_q,
+                self.kin.model, self.kin.data,
+                (self.col.witness_min_distance, self.col.witness_min_points),
+                self.kin.current_q,
                 q_dot_safe, None, None, self.kin.ee_id_right, self.kin.ee_id_left,
                 cfg.JOINT_LIMIT_BUFFER_BASE)
             self.viz.publish_teleop_tether()
@@ -927,7 +936,15 @@ def main():
         return
 
     # --- PHASE 2: visualization + diagnostics ---
-    node.viz.init_meshcat(lambda: node.kin.current_q, node.col)
+    # Meshcat is suspended entirely on real hardware: its dedicated _run_viz
+    # thread renders every 0.2s regardless of anything else, permanent CPU cost
+    # for a web visualizer nobody watches on the robot itself (RViz + the
+    # plotters remain fully available -- this only skips the Meshcat 3D view).
+    if node.REAL_HARDWARE:
+        node.get_logger().info(
+            "\033[93m[Viz] REAL HARDWARE: Meshcat suspended (RViz/plotters unaffected).\033[0m")
+    else:
+        node.viz.init_meshcat(lambda: node.kin.current_q, node.col)
     node.kin.print_joint_limits_table(node.get_logger())
 
     # --- PHASE 3: engage the real-time loop ---

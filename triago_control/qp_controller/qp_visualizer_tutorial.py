@@ -272,13 +272,19 @@ class QPVisualizer:
         # Publish to the dedicated teleop channel
         self.teleop_pub.publish(markers)
 
-    def publish_debug(self, model, data, cdata, q, q_dot, target_right, target_left, id_right, id_left, limit_buffer):
+    def publish_debug(self, model, data, witness_info, q, q_dot, target_right, target_left, id_right, id_left, limit_buffer):
         """
         Visualizes:
         1. Collision Witness (Red Line + Distance Text)
         2. WORST Joint Limit (Arms Only, Smaller Text)
         3. End Effector Desires vs Reality (Arrows)
         4. Commanded Target Gripper (Blue)
+
+        `witness_info` = (min_distance, (p1, p2) or None): the TRUE global
+        closest collision-pair distance/points, computed ONCE per tick by
+        CollisionManager.compute_softmin_jacobian (self.witness_min_distance/
+        points) -- this used to be recomputed here via a second full scan of
+        cdata.distanceResults, duplicating that same scan every telemetry tick.
         """
         markers = MarkerArray()
         idx = 0
@@ -313,19 +319,13 @@ class QPVisualizer:
         c_text   = ColorRGBA(r=1.0, g=1.0, b=1.0, a=1.0) # White text
         
         # --- 1. COLLISION SAFETY (Red Line + Text) ---
-        min_d = 100.0
-        p1_w, p2_w = None, None
+        # Reused from CollisionManager.compute_softmin_jacobian's own scan of
+        # cdata.distanceResults (same tick) instead of re-scanning it here.
+        min_d, witness_points = witness_info
+        if min_d is None or (isinstance(min_d, float) and min_d != min_d):  # NaN-safe (no pairs at all)
+            min_d = 100.0
+        p1_w, p2_w = witness_points if witness_points is not None else (None, None)
 
-        for res in cdata.distanceResults:
-            if res.min_distance < min_d:
-                min_d = res.min_distance
-                if hasattr(res, 'nearest_points'):
-                    p1_w, p2_w = res.nearest_points[0], res.nearest_points[1]
-                elif hasattr(res, 'getNearestPoint1'):
-                    p1_w, p2_w = res.getNearestPoint1(), res.getNearestPoint2()
-                else:
-                    p1_w, p2_w = res.o1, res.o2
-        
         if min_d < 0.20 and p1_w is not None:
             col = c_warn if min_d > 0.05 else c_crit
             markers.markers.append(create_marker(idx, Marker.LINE_LIST, (0.01, 0.0, 0.0), col, points=[make_point(p1_w), make_point(p2_w)]))
