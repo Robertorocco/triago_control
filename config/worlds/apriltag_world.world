@@ -84,18 +84,7 @@
       </link>
     </model>
 
-    <!-- Visual placement manifold (Yellow Area), no collision, same as
-         no_obstacle.world -->
-    <model name="placement_area">
-      <static>true</static>
-      <pose>1.000 0.0 0.701 0 0 0</pose>
-      <link name="link">
-        <visual name="vis">
-          <geometry><cylinder><radius>0.15</radius><length>0.002</length></cylinder></geometry>
-          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Yellow</name></script></material>
-        </visual>
-      </link>
-    </model>
+
 
     <!-- ================================================================
          RED CYLINDER, right arm manipulandum. Same as no_obstacle.world.
