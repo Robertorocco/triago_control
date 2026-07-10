@@ -181,11 +181,14 @@ class SafetyQPController(Node):
         self.pub_debug_h = self.create_publisher(Float64, '/qp_debug/safety_margin', 10)
         self.pub_loop_freq = self.create_publisher(Float64, '/qp_debug/loop_freq', 10)
         # Per-tick diagnostic (NOT downsampled -- every tick, unlike loop_freq's
-        # running average): [tick_dt_ms, solve_ms]. tick_dt is wall-clock time
-        # since the previous tick started (scheduling/jitter, includes everything:
-        # OS scheduling delay + all of solve_and_publish); solve_ms isolates just
-        # the QP build+solve compute time. Separates "the OS isn't scheduling us on
-        # time" from "the solve itself is too slow for this CPU" -- see loop_timing_monitor.py.
+        # running average): [tick_dt_ms, kin_ms, cbf_ms, gov_ms, solve_ms,
+        # telemetry_ms, misc_ms]. tick_dt is wall-clock time since the previous
+        # tick started (scheduling/jitter + everything in solve_and_publish); the
+        # rest breaks that down by phase -- kinematics/FK refresh, SoftMin CBF
+        # aggregation, reference governor + task error, QP build+solve, downstream
+        # telemetry/command/viz publishing, and misc (unbracketed code + any
+        # residual OS scheduling wait) -- so a real-hardware compute bottleneck can
+        # be pinned to a specific phase instead of guessed at. See loop_timing_monitor.py.
         self.pub_loop_timing = self.create_publisher(Float64MultiArray, '/qp_debug/loop_timing', 10)
         self.pub_min_dist = self.create_publisher(Float64, '/qp_debug/min_distance', 10)
         self.pub_top_pairs = self.create_publisher(String, '/qp_debug/top_pairs', 10)
@@ -580,9 +583,11 @@ class SafetyQPController(Node):
             print("[Safety] Watchdog: Left reference stale -> frozen at current pose.")
 
         # --- 0. Kinematics + geometry refresh ---
+        _kin_start = time.perf_counter()
         self.kin.update_kinematics()
         self.kin.debug_interrogate()
         self.col.update_geometry(self.kin.current_q)
+        _kin_ms = (time.perf_counter() - _kin_start) * 1000.0
 
         # One-time: freeze BOTH arms at their startup pose so every arm always has
         # a holding CLF (no limp/uncontrolled arm). Teleop overrides the active one.
@@ -616,6 +621,7 @@ class SafetyQPController(Node):
         qdot_err_14, xdot_err_6 = self.kin.compute_tracking_errors(self.last_qdot_cmd_14)
 
         # --- 1. SoftMin CBF aggregation (TWO independent per-arm barriers) ---
+        _cbf_start = time.perf_counter()
         J_soft_r, h_soft_r, J_soft_l, h_soft_l, d_safe_dynamic_r, d_safe_dynamic_l, abs_min_distance = \
             self.col.compute_softmin_jacobian(
                 self.kin.current_v, self.kin.idx_right, self.kin.idx_left,
@@ -623,6 +629,7 @@ class SafetyQPController(Node):
                 self.hri.attached_adjacency, self.hri.ignored_targets, self.publish_counter,
                 attach_ramp_shifts=self.hri.get_attach_ramp_shifts(),
                 attached_object_arm=self.hri.attached_object_arm)
+        _cbf_ms = (time.perf_counter() - _cbf_start) * 1000.0
 
         # --- 2. Task errors ---
         # REFERENCE GOVERNOR (2026-07-01): apply velocity/error/acceleration
@@ -630,6 +637,7 @@ class SafetyQPController(Node):
         # (self.x_ref_right, etc.) are PRESERVED for future plotting / consumers;
         # the governed versions are used ONLY for the CLF task-error computation
         # below (and passed to build_and_solve as the feedforward velocities).
+        _gov_start = time.perf_counter()
         dt = 1.0 / self._control_freq
         if cfg.ENABLE_REFERENCE_GOVERNOR:
             # Right arm
@@ -656,6 +664,7 @@ class SafetyQPController(Node):
                                         v_gov_r, w_gov_r, self.task_dim_right)
         e_l, v_l = self._arm_task_error(self.kin.ee_id_left, x_gov_l, rpy_gov_l,
                                         v_gov_l, w_gov_l, self.task_dim_left)
+        _gov_ms = (time.perf_counter() - _gov_start) * 1000.0
 
         # --- 3. Build + solve the CLF-CBF-QP ---
         # Smoothly ramp the posture-task weight scale: drop toward POSTURE_GRASP_SCALE
@@ -689,7 +698,7 @@ class SafetyQPController(Node):
             right_frozen=self.right_frozen, left_frozen=self.left_frozen,
             tracking_boost_arm=boost_arm, orient_boost_arms=orient_boost_arms)
         _solve_ms = (time.perf_counter() - _solve_start) * 1000.0
-        self.pub_loop_timing.publish(Float64MultiArray(data=[_tick_dt_ms, _solve_ms]))
+        _telemetry_start = time.perf_counter()
 
         self.publish_counter += 1
 
@@ -779,6 +788,18 @@ class SafetyQPController(Node):
                 q_dot_safe, None, None, self.kin.ee_id_right, self.kin.ee_id_left,
                 cfg.JOINT_LIMIT_BUFFER_BASE)
             self.viz.publish_teleop_tether()
+
+        # Per-tick timing breakdown (see pub_loop_timing above): localizes the
+        # tick_dt cost into its constituent phases, so a real-hardware compute
+        # bottleneck can be pinned to a specific phase instead of guessed at.
+        # misc_ms is whatever this breakdown didn't explicitly bracket (arm-freeze
+        # checks, attach/detach handling, contact-distance telemetry, tracking-
+        # error compute) plus any genuine OS scheduling wait.
+        _telemetry_ms = (time.perf_counter() - _telemetry_start) * 1000.0
+        _accounted_ms = _kin_ms + _cbf_ms + _gov_ms + _solve_ms + _telemetry_ms
+        _misc_ms = max(0.0, _tick_dt_ms - _accounted_ms)
+        self.pub_loop_timing.publish(Float64MultiArray(data=[
+            _tick_dt_ms, _kin_ms, _cbf_ms, _gov_ms, _solve_ms, _telemetry_ms, _misc_ms]))
 
     def _publish_telemetry(self, q_dot_safe, slack_r, slack_l, b_col_pair, lambda_joints_total,
                            J_soft_r, h_soft_r, J_soft_l, h_soft_l,

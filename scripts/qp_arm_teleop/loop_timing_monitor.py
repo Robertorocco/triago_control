@@ -2,23 +2,35 @@
 """
 loop_timing_monitor.py -- Real-time diagnostic for main_qp_controller's control
 loop timing (subscribes to /qp_debug/loop_timing, published every tick as
-[tick_dt_ms, solve_ms]).
+[tick_dt_ms, kin_ms, cbf_ms, gov_ms, solve_ms, telemetry_ms, misc_ms]).
 
-tick_dt_ms is wall-clock time since the PREVIOUS tick STARTED: it captures
-everything between "the timer should have fired" and "solve_and_publish
-actually got to run" -- i.e. OS/container scheduling jitter, on top of the
-solve itself. solve_ms is just the QP build+solve compute time. Comparing the
-two separates "the OS isn't scheduling us on time" (tick_dt spikes, solve_ms
-stays flat) from "the solve itself is too slow for this CPU" (both rise
-together) -- the two have different fixes (RT scheduling/CPU isolation vs.
-lowering the control frequency and retuning).
+tick_dt_ms is wall-clock time since the PREVIOUS tick STARTED -- everything
+between "the timer should have fired" and "this tick finished publishing",
+i.e. OS/container scheduling jitter PLUS all of solve_and_publish's own compute.
+The remaining fields break that total down by phase:
+  kin_ms       kinematics/FK refresh (RobotKinematics.update_kinematics + debug
+               interrogate + CollisionManager.update_geometry)
+  cbf_ms       SoftMin CBF Jacobian aggregation (compute_softmin_jacobian, scales
+               with collision-pair count)
+  gov_ms       reference governor + CLF task-error computation
+  solve_ms     QP build_and_solve only
+  telemetry_ms downstream telemetry/command/viz publishing
+  misc_ms      whatever this breakdown didn't explicitly bracket (arm-freeze
+               checks, attach/detach handling, contact-distance telemetry,
+               tracking-error compute) plus any residual OS scheduling wait
+
+If tick_dt is high but every phase above is small AND misc_ms is large, that
+points at OS/container scheduling (this process isn't being given the CPU on
+time). If one phase dominates instead, that phase IS the compute bottleneck --
+a genuine "too much work per tick" problem (fix: optimize that phase, or lower
+the control frequency and retune), not a scheduling one.
 
 Prints a rolling summary every REPORT_INTERVAL_S seconds, and a final full-run
 summary (exact min/max/mean/overrun-count, plus percentile estimates from a
 bounded rolling window) on Ctrl-C.
 
 For an OS-level cross-check independent of this node entirely, run
-`cyclictest` (rt-tests package) in the same container:
+`cyclictest` (rt-tests package) on the same machine:
     sudo cyclictest -p 80 -i 1000 -d 0 -m -q -l 20000
 
 Usage:
@@ -38,6 +50,18 @@ import triago_control.qp_controller.config as cfg
 
 REPORT_INTERVAL_S = 2.0
 PERCENTILE_WINDOW = 100_000   # ~5.5 min at 300 Hz -- bounded memory for p50/p95/p99
+
+# Order must match main_qp_controller.py's pub_loop_timing payload.
+PHASES = ['tick_dt', 'kin', 'cbf', 'gov', 'solve', 'telemetry', 'misc']
+PHASE_LABELS = {
+    'tick_dt': 'TICK dt   (full tick, scheduling + everything below)',
+    'kin': 'kin_ms    (kinematics/FK + geometry refresh)',
+    'cbf': 'cbf_ms    (SoftMin CBF aggregation)',
+    'gov': 'gov_ms    (reference governor + task error)',
+    'solve': 'solve_ms  (QP build+solve)',
+    'telemetry': 'telemetry_ms (downstream publish/viz)',
+    'misc': 'misc_ms   (unbracketed code + residual sched wait)',
+}
 
 
 class _Stream:
@@ -81,8 +105,7 @@ class LoopTimingMonitor(Node):
         nominal_ms = 1000.0 / cfg.CONTROL_FREQ_DEFAULT
         self.overrun_threshold_ms = overrun_factor * nominal_ms
 
-        self.tick = _Stream()
-        self.solve = _Stream()
+        self.streams = {name: _Stream() for name in PHASES}
 
         self.create_subscription(
             Float64MultiArray, '/qp_debug/loop_timing', self._cb, 10)
@@ -91,71 +114,77 @@ class LoopTimingMonitor(Node):
         self.get_logger().info(
             f"Listening on /qp_debug/loop_timing. Nominal tick = {nominal_ms:.2f}ms "
             f"(CONTROL_FREQ_DEFAULT={cfg.CONTROL_FREQ_DEFAULT:.0f}Hz); flagging "
-            f"overruns > {self.overrun_threshold_ms:.2f}ms ({overrun_factor:.1f}x nominal).")
+            f"tick_dt overruns > {self.overrun_threshold_ms:.2f}ms ({overrun_factor:.1f}x nominal).")
 
     def _cb(self, msg: Float64MultiArray):
-        if len(msg.data) < 2:
+        if len(msg.data) < len(PHASES):
             return
-        tick_dt_ms, solve_ms = msg.data[0], msg.data[1]
-        if tick_dt_ms > 0.0:   # the very first sample after startup has no valid dt
-            self.tick.add(tick_dt_ms, overrun_threshold=self.overrun_threshold_ms)
-        self.solve.add(solve_ms)
+        values = dict(zip(PHASES, msg.data))
+        if values['tick_dt'] <= 0.0:
+            return   # the very first sample after startup has no valid dt
+        self.streams['tick_dt'].add(values['tick_dt'], overrun_threshold=self.overrun_threshold_ms)
+        for name in PHASES[1:]:
+            self.streams[name].add(values[name])
+
+    def _line(self, name):
+        s = self.streams[name]
+        p = s.percentiles()
+        return (f"{PHASE_LABELS[name]:<45} n={s.count} mean={s.mean:6.3f} "
+                f"min={s.min:6.3f} p50={p[50]:6.3f} p95={p[95]:6.3f} "
+                f"p99={p[99]:6.3f} max={s.max:6.3f}")
 
     def _report(self):
-        if self.tick.count == 0:
+        if self.streams['tick_dt'].count == 0:
             self.get_logger().info("Waiting for data on /qp_debug/loop_timing...")
             return
-        tp = self.tick.percentiles()
-        sp = self.solve.percentiles()
-        overrun_pct = 100.0 * self.tick.overruns / self.tick.count
+        tick = self.streams['tick_dt']
+        overrun_pct = 100.0 * tick.overruns / tick.count
+        for name in PHASES:
+            self.get_logger().info(self._line(name))
         self.get_logger().info(
-            f"[TICK dt ms] n={self.tick.count} mean={self.tick.mean:.3f} "
-            f"min={self.tick.min:.3f} p50={tp[50]:.3f} p95={tp[95]:.3f} "
-            f"p99={tp[99]:.3f} max={self.tick.max:.3f} | "
-            f"overruns(>{self.overrun_threshold_ms:.2f}ms)={self.tick.overruns} "
-            f"({overrun_pct:.2f}%)")
-        self.get_logger().info(
-            f"[SOLVE ms]   n={self.solve.count} mean={self.solve.mean:.3f} "
-            f"min={self.solve.min:.3f} p50={sp[50]:.3f} p95={sp[95]:.3f} "
-            f"p99={sp[99]:.3f} max={self.solve.max:.3f}")
+            f"overruns(tick_dt>{self.overrun_threshold_ms:.2f}ms)={tick.overruns} ({overrun_pct:.2f}%)")
 
     def final_report(self):
-        if self.tick.count == 0:
+        tick = self.streams['tick_dt']
+        if tick.count == 0:
             print("[loop_timing_monitor] No data received -- nothing to report.")
             return
-        tp = self.tick.percentiles()
-        sp = self.solve.percentiles()
-        overrun_pct = 100.0 * self.tick.overruns / self.tick.count
+        overrun_pct = 100.0 * tick.overruns / tick.count
         nominal_ms = 1000.0 / cfg.CONTROL_FREQ_DEFAULT
-        print("\n" + "=" * 70)
+        print("\n" + "=" * 90)
         print("[loop_timing_monitor] FINAL SUMMARY")
-        print("=" * 70)
-        print(f"Samples: {self.tick.count}")
+        print("=" * 90)
+        print(f"Samples: {tick.count}")
         print(f"Nominal tick: {nominal_ms:.3f} ms ({cfg.CONTROL_FREQ_DEFAULT:.0f} Hz)")
-        print("\nTICK dt (scheduling + full solve_and_publish, ms):")
-        print(f"  mean={self.tick.mean:.3f}  min={self.tick.min:.3f}  "
-              f"p50={tp[50]:.3f}  p95={tp[95]:.3f}  p99={tp[99]:.3f}  "
-              f"max={self.tick.max:.3f}")
-        print(f"  overruns (> {self.overrun_threshold_ms:.2f}ms): "
-              f"{self.tick.overruns} ({overrun_pct:.2f}%)")
-        print("\nSOLVE time (QP build+solve only, ms):")
-        print(f"  mean={self.solve.mean:.3f}  min={self.solve.min:.3f}  "
-              f"p50={sp[50]:.3f}  p95={sp[95]:.3f}  p99={sp[99]:.3f}  "
-              f"max={self.solve.max:.3f}")
+        print()
+        for name in PHASES:
+            print(self._line(name))
+        print(f"\novverruns (tick_dt > {self.overrun_threshold_ms:.2f}ms): "
+              f"{tick.overruns} ({overrun_pct:.2f}%)")
+
         print("\nInterpretation:")
-        if self.solve.max > nominal_ms:
-            print("  - SOLVE time alone exceeds the nominal tick budget at times:")
-            print("    the compute itself doesn't fit in one tick -> likely a real")
-            print("    compute-budget problem, independent of OS scheduling.")
-        if overrun_pct > 1.0:
-            print(f"  - {overrun_pct:.1f}% of ticks overran. If SOLVE time stayed")
-            print("    small while TICK dt spiked, that points at OS/container")
-            print("    scheduling jitter (missed deadlines), not raw compute load.")
-            print("    Cross-check with `cyclictest` in the same container.")
+        phase_means = {name: self.streams[name].mean for name in PHASES[1:]}
+        worst_phase = max(phase_means, key=phase_means.get)
+        worst_mean = phase_means[worst_phase]
+        accounted_mean = sum(phase_means.values())
+        if worst_phase == 'misc' and worst_mean > 0.5 * tick.mean:
+            print(f"  - Most of the tick ({worst_mean:.3f}ms mean, "
+                  f"{100*worst_mean/tick.mean:.0f}% of tick_dt) is UNACCOUNTED for by any")
+            print("    bracketed phase -- consistent with OS/container scheduling wait")
+            print("    (the process is idle, waiting to be scheduled), not our own compute.")
+            print("    Cross-check with `cyclictest` and check the process's scheduling")
+            print("    class/CPU affinity (chrt -p PID / taskset -pc PID).")
         else:
-            print("  - Overrun rate is low: this run shows no evidence of the loop")
-            print("    missing its deadline.")
-        print("=" * 70)
+            print(f"  - Dominant phase: {PHASE_LABELS[worst_phase].split('(')[0].strip()} "
+                  f"({worst_mean:.3f}ms mean, {100*worst_mean/tick.mean:.0f}% of tick_dt).")
+            print("    This is a genuine compute-budget cost in that phase, not OS")
+            print("    scheduling -- optimizing/reducing that phase's work is the fix")
+            print("    (or lowering the control frequency + retuning, as a last resort).")
+        if accounted_mean < 0.5 * tick.mean and worst_phase != 'misc':
+            print(f"  - Note: bracketed phases only account for "
+                  f"{100*accounted_mean/tick.mean:.0f}% of tick_dt on average --")
+            print("    the rest is misc/unbracketed code or scheduling wait; see misc_ms above.")
+        print("=" * 90)
 
 
 def main(args=None):
