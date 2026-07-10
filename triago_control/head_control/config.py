@@ -160,7 +160,14 @@ LOOKAT_ALIGNED_DEG = 4.0
 # given scenario, this can safely be set False now — accuracy will not
 # meaningfully suffer, only the (already less important) full-circumference
 # arc-coverage stat will stay lower.
-ENABLE_SCAN = True
+ENABLE_SCAN = False           # Disabled: the geometric depth pipeline needs a STILL
+                              # head for accurate TF-based cloud transforms. With scan
+                              # enabled, TF lags behind the actual head motion and
+                              # introduces ~5-10 cm oscillations in the detected object
+                              # poses. The camera FOV already covers the full table from
+                              # the HEAD_POSTURE_TARGET viewpoint. head_april_main can
+                              # safely scan (single-point detection, not a full cloud
+                              # transform); re-enable here only if TF latency is solved.
 SCAN_DWELL_S = 8.0           # [s] time parked at each waypoint (settle + fuse);
                               # increased from 4s so the head fully settles below
                               # INTEGRATE_VEL_THRESH before the next jump
