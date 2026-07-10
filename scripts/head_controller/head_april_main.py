@@ -188,6 +188,16 @@ class HeadAprilNode(Node):
         self._tag_diag = self.get_parameter("tag_diag").value
         self._diag_cache = None        # (base_M_cam, c_M_tag, base_M_tag)
 
+        # --- True optical-centre frame (SIM vs REAL — see config §15) --
+        # ViSP's c_M_tag is in optical convention; we take the camera
+        # ORIENTATION from the image's optical frame but the POSITION from this
+        # frame. In Gazebo the plugin renders from the camera LINK (not the
+        # offset color optical frame), so leaving this at the link removes the
+        # ~2.7 cm bias. On real hardware set it equal to the optical frame.
+        self.declare_parameter("optical_center_frame", cfg.APRILTAG_OPTICAL_CENTER_FRAME)
+        self._optical_center_frame = self.get_parameter("optical_center_frame").value
+        self._center_warned = False
+
         # --- Timers ----------------------------------------------------
         self.create_timer(1.0 / cfg.CONTROL_RATE_HZ, self._control_tick)
         self.create_timer(1.0 / cfg.PERCEPTION_RATE_HZ, self._perception_tick)
@@ -201,7 +211,8 @@ class HeadAprilNode(Node):
             f"  Tag topic   : {cfg.APRILTAG_DETECTIONS_TOPIC}\n"
             f"  Tag id      : {cfg.APRILTAG_ID}  family {cfg.APRILTAG_FAMILY}  "
             f"size {cfg.APRILTAG_SIZE} m\n"
-            f"  Optical frm : {cfg.APRILTAG_CAMERA_OPTICAL_FRAME}\n"
+            f"  Optical frm : {cfg.APRILTAG_CAMERA_OPTICAL_FRAME} (orientation)\n"
+            f"  Centre frm  : {self._optical_center_frame} (position; =optical frame on real HW)\n"
             f"  Reconstruct : {', '.join(cfg.APRILTAG_SCENE.keys())}\n"
             "  Detector    : run `visp_apriltag_node` (see header of this file)\n"
             "==================================================================")
@@ -268,11 +279,27 @@ class HeadAprilNode(Node):
         stamp = self._tag_stamp
         frame = self._tag_frame
 
-        # base_M_cam from TF at the detection timestamp (correct frame + time).
-        base_M_cam = self._lookup_transform(frame, stamp)
-        if base_M_cam is None:
+        # Camera pose in base at the detection timestamp (correct frame + time).
+        # ORIENTATION from the image's optical frame; POSITION from the true
+        # optical-centre frame (= camera link in Gazebo, since the plugin
+        # renders there; = the optical frame itself on real hardware). This is
+        # the root-cause fix for the ~2.7 cm sim bias, NOT a fudge offset.
+        base_M_optical = self._lookup_transform(frame, stamp)
+        if base_M_optical is None:
             self._publish_telemetry(reconstructed=set(), proc_ms=0.0)
             return
+
+        base_M_cam = base_M_optical
+        if self._optical_center_frame and self._optical_center_frame != frame:
+            base_M_center = self._lookup_transform(self._optical_center_frame, stamp)
+            if base_M_center is not None:
+                base_M_cam = base_M_optical.copy()
+                base_M_cam[:3, 3] = base_M_center[:3, 3]   # link position, optical orientation
+            elif not self._center_warned:
+                self.get_logger().warn(
+                    f"optical_center_frame '{self._optical_center_frame}' not in TF; "
+                    f"falling back to '{frame}' (expect the ~cm sim offset).")
+                self._center_warned = True
 
         base_M_tag = base_M_cam @ c_M_tag
         self._diag_cache = (base_M_cam, c_M_tag, base_M_tag)   # read-only audit

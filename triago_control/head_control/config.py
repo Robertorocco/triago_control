@@ -453,8 +453,29 @@ APRILTAG_POSE_METHOD = "homography_virtual_vs"
 APRILTAG_IMAGE_TOPIC = "/gripper_head_camera_rgbd/color/image_raw"
 APRILTAG_CAMERA_INFO_TOPIC = "/gripper_head_camera_rgbd/color/camera_info"
 # Optical frame the color image (and therefore c_M_tag) lives in. TF base<-this
-# frame gives base_M_cam. (Same frame already used as CAMERA_OPTICAL_FRAME, §1.)
+# frame gives the camera ORIENTATION. (Same frame already used as
+# CAMERA_OPTICAL_FRAME, §1.)
 APRILTAG_CAMERA_OPTICAL_FRAME = CAMERA_OPTICAL_FRAME
+
+# --- True optical-CENTRE frame (SIM vs REAL — important) ------------------
+# ViSP's c_M_tag is always in optical convention (X-right, Y-down, Z-forward);
+# the only question is WHERE the optical centre physically sits. We take the
+# camera ORIENTATION from APRILTAG_CAMERA_OPTICAL_FRAME but the POSITION from
+# this frame.
+#
+#   * REAL RealSense hardware: the driver tags the image with the color optical
+#     frame whose origin IS the true optical centre -> set this EQUAL to
+#     APRILTAG_CAMERA_OPTICAL_FRAME (i.e. no position correction).
+#   * Gazebo (sim): the camera plugin RENDERS from the camera-link origin but
+#     still tags the image as the color optical frame, which the URDF offsets
+#     from the link by ~2.5 cm (measured: camera_link->color_optical_frame
+#     translation [-0.011,-0.009,-0.021]). ViSP's pose is therefore relative to
+#     the LINK, so the true optical centre is the link origin. Using the offset
+#     optical frame's position caused a constant ~2.7 cm reconstruction bias on
+#     every object (root cause, not maskable with a fudge offset). Set this to
+#     the camera-link frame in sim.
+# Override at runtime with -p optical_center_frame:=<frame>.
+APRILTAG_OPTICAL_CENTER_FRAME = "gripper_head_camera_rgbd_link"   # SIM default
 
 # --- ViSP tag frame orientation in the world ------------------------------
 # The tag lies flat, face up (surface normal = world +Z). ViSP's DEFAULT frame
