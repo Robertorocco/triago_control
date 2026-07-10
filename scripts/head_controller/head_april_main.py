@@ -61,6 +61,7 @@ from rclpy.duration import Duration
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray
 from visualization_msgs.msg import Marker, MarkerArray
+from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 from scipy.spatial.transform import Rotation as Rot
 
 import tf2_ros
@@ -143,9 +144,19 @@ class HeadAprilNode(Node):
 
         # --- Subscriptions ---------------------------------------------
         self.create_subscription(JointState, "/joint_states", self._joint_cb, 50)
+        # The visp_apriltag node publishes tags_info with
+        # KeepLast(5).best_effort().transient_local() (see visp_tracker_common
+        # BaseTracker). A default RELIABLE subscriber is QoS-incompatible with a
+        # BEST_EFFORT publisher and silently receives NOTHING — so match it.
+        qos_tags = QoSProfile(
+            reliability=ReliabilityPolicy.BEST_EFFORT,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=5,
+        )
         self.create_subscription(
             AprilTagDetectionArray, cfg.APRILTAG_DETECTIONS_TOPIC,
-            self._apriltag_cb, 10
+            self._apriltag_cb, qos_tags
         )
 
         # --- Shared state ----------------------------------------------
