@@ -459,15 +459,19 @@ APRILTAG_CAMERA_OPTICAL_FRAME = CAMERA_OPTICAL_FRAME
 # --- ViSP tag frame orientation in the world ------------------------------
 # The tag lies flat, face up (surface normal = world +Z). ViSP's DEFAULT frame
 # (align_z=false) has Z out of the tag toward the camera, X=image-right,
-# Y=image-up (verified: cMo == Rot_x(180deg) for a fronto-parallel view). With
-# the texture oriented image-right -> world +X and image-up -> world +Y, the
-# ViSP tag frame coincides in ORIENTATION with the world frame => identity.
-# If, on your Gazebo/OGRE build, the rendered tag turns out rotated in-plane by
-# a multiple of 90 deg (the reconstructed objects would appear rotated about
-# the tag centre in head_plotter), correct it here with a single yaw — nothing
-# else needs to change (the math stays convention-exact).
+# Y=image-up (verified: cMo == Rot_x(180deg) for a fronto-parallel view).
+#
+# MEASURED on the sim (2026-07): the rendered tag's frame in base_footprint is
+# X_tag -> world -Y, Y_tag -> world +X, Z_tag -> world +Z, i.e. a yaw of -90 deg
+# (Gazebo's OGRE box-face UV maps the tag image-right to world -Y, not +X as
+# initially assumed). This is the true fiducial-frame orientation, NOT an
+# error-masking offset. With rpy=[0,0,0] the reconstructed cylinders were
+# rotated 90 deg about the tag centre (the ~40 cm X/Y errors); rpy=[0,0,-pi/2]
+# makes the reconstruction exact. If you re-print / re-orient the physical tag
+# on the real robot, set this to whatever the actual tag-frame yaw in
+# base_footprint then is (read it off the tracker_apriltag TF frame).
 APRILTAG_CENTER_WORLD = np.array([1.000, 0.0, 0.701])   # tag plate centre (world)
-APRILTAG_RPY_WORLD = np.array([0.0, 0.0, 0.0])          # ViSP tag frame RPY in world
+APRILTAG_RPY_WORLD = np.array([0.0, 0.0, -np.pi / 2])   # ViSP tag frame RPY in world
 
 # --- Scene layout (authoring source for the tag-relative model) -----------
 # One entry per reconstructed object. `center`/`rpy` are the object frame pose
