@@ -263,6 +263,15 @@ class TrajectoryGenerator(Node):
         self.data_received = False
         self.current_phase = ""
 
+        # --- Offline-recorder handshake (see timer_callback WAITING branch) ---
+        # Hold in WAITING after the settle window until the offline recorder has
+        # subscribed to the record trigger, so the one-shot VOLATILE rising edge
+        # (t=0) is never fired before a cross-host subscriber has finished DDS
+        # discovery. Bounded by cfg.OFFLINE_RECORD_WAIT_TIMEOUT_S.
+        self._recorder_ready = False
+        self._settle_done_time = None
+        self._recorder_wait_logged = False
+
         self.pos_r = np.zeros(3); self.pos_l = np.zeros(3)
         self.rpy_r = np.zeros(3); self.rpy_l = np.zeros(3)
         self.start_right = np.zeros(3); self.start_left = np.zeros(3)
@@ -426,7 +435,43 @@ class TrajectoryGenerator(Node):
         t_total = current_time - self.t0
 
         # --- PHASE 1: WAITING / SETUP ------------------------------------
-        if t_total < self.delay_start:
+        # The record-start signal (update_phase 'S'->'T', below) is a single
+        # VOLATILE std_msgs/Bool -- a subscriber that joins after it is published
+        # never receives it. Same-host (sim) DDS discovery is instantaneous so the
+        # plotter always caught it; across a network (real robot <-> docker over
+        # Cyclone) discovery takes seconds, longer than delay_start, so the edge
+        # fired before offline_plotter had subscribed and nothing was recorded.
+        # Fix: after the settle window, keep holding in WAITING until the recorder
+        # is discovered (get_subscription_count() > 0) -- guaranteeing it is both
+        # subscribed and, being RELIABLE, delivered the edge -- bounded by
+        # cfg.OFFLINE_RECORD_WAIT_TIMEOUT_S so a recorder-less run still proceeds.
+        settle_done = t_total >= self.delay_start
+        if settle_done and not self._recorder_ready:
+            if self._settle_done_time is None:
+                self._settle_done_time = current_time
+            wait_disabled = cfg.OFFLINE_RECORD_WAIT_TIMEOUT_S <= 0.0
+            has_recorder = self.pub_record_trigger.get_subscription_count() > 0
+            waited = current_time - self._settle_done_time
+            if wait_disabled or has_recorder:
+                self._recorder_ready = True
+                if has_recorder and not wait_disabled:
+                    print("[STATE] Offline recorder subscribed on "
+                          f"'{cfg.OFFLINE_RECORD_TRIGGER_TOPIC}' -- starting motion.",
+                          flush=True)
+            elif waited >= cfg.OFFLINE_RECORD_WAIT_TIMEOUT_S:
+                self._recorder_ready = True   # gave up waiting -- run anyway
+                print("[WARN] No offline recorder on "
+                      f"'{cfg.OFFLINE_RECORD_TRIGGER_TOPIC}' after "
+                      f"{cfg.OFFLINE_RECORD_WAIT_TIMEOUT_S:.0f}s -- starting anyway "
+                      "(this trial will NOT be recorded).", flush=True)
+            elif not self._recorder_wait_logged:
+                self._recorder_wait_logged = True
+                print("[STATE] Settle window done; holding in WAITING for an "
+                      f"offline recorder on '{cfg.OFFLINE_RECORD_TRIGGER_TOPIC}' "
+                      f"(up to {cfg.OFFLINE_RECORD_WAIT_TIMEOUT_S:.0f}s)...",
+                      flush=True)
+
+        if (not settle_done) or (not self._recorder_ready):
             self.start_right = self.pos_r.copy()
             self.start_left = self.pos_l.copy()
             self.start_rpy_r = self.rpy_r.copy()

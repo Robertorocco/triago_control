@@ -58,6 +58,8 @@ triago_control/
 
 **Import convention**: always `import triago_control.qp_controller.config as cfg` (fully-qualified). Never bare `import config` — it collides with system modules.
 
+**Offline-recording trigger contract** (`trajectory_generator.py` → `offline_plotter.py`): a single `std_msgs/Bool` on `cfg.OFFLINE_RECORD_TRIGGER_TOPIC` — **rising** edge at WAITING→TRACKING (defines t=0), **falling** edge at TRACKING→REGULATION; the plotter records between them plus `cfg.OFFLINE_PLOT_POST_TRIGGER_S` of settling. Any source (a teleop "clutch released" signal, a manual `ros2 topic pub`) can drive the same topic. Because that edge is a **one-shot VOLATILE** message, the generator holds in WAITING after its settle window until a recorder has actually subscribed (`pub.get_subscription_count() > 0`), bounded by `cfg.OFFLINE_RECORD_WAIT_TIMEOUT_S` (`0` = disable the wait). This makes the handshake robust to **cross-host DDS discovery latency** (a separate-docker plotter over Cyclone), not just the instantaneous same-host case — without it, the rising edge fired before a networked plotter finished discovery and no trial was ever recorded.
+
 ## 3. Mathematical Core: Arm QP-CLF-CBF (`main_qp_controller.py`)
 
 Decision vector: `x = [q̇ (nv), δ_right, δ_left]` (joint velocities + one CLF slack per arm).

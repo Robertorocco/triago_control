@@ -445,3 +445,15 @@ OFFLINE_PLOT_ROOT_DIR = "~/exchange/ros2-ws/triago_offline_plots"
 # False, before finalizing and saving the figures (captures the settling phase on the
 # same time axis as the tracking motion).
 OFFLINE_PLOT_POST_TRIGGER_S = 10.0
+
+# When trajectory_generator.py is the recording source, the record-start signal
+# (the WAITING->TRACKING rising edge, t=0 of the trial) is a single VOLATILE
+# std_msgs/Bool: a subscriber that joins after it is published never receives it.
+# Same-host (sim) DDS discovery is instantaneous so the plotter always caught it;
+# across a network (real robot <-> a docker offline_plotter over Cyclone)
+# discovery takes seconds -- longer than delay_start -- so the edge fired into the
+# void and no trial was recorded. To prevent that, the generator holds in its
+# WAITING phase after the settle window until the recorder has subscribed
+# (pub.get_subscription_count() > 0), but no longer than this many seconds.
+# 0.0 disables the wait entirely (fire immediately -- the legacy behaviour).
+OFFLINE_RECORD_WAIT_TIMEOUT_S = 10.0
