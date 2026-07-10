@@ -94,6 +94,14 @@ class HeadPerceptionNode(Node):
         # --- Subscriptions ---------------------------------------------
         self.create_subscription(JointState, "/joint_states", self._joint_cb, 50)
 
+        # --- Depth optical-centre frame (SIM vs REAL — see config §1) --
+        # Same fix as head_april_main: Gazebo renders from the camera LINK but
+        # tags the depth image as the depth-optical frame, offset by ~2.5 cm.
+        # Use the link position + optical orientation to remove the sim bias.
+        self.declare_parameter("depth_center_frame", cfg.DEPTH_OPTICAL_CENTER_FRAME)
+        self._depth_center_frame = self.get_parameter("depth_center_frame").value
+        self._center_warned = False
+
         # --- Shared state (control -> perception) ----------------------
         self.T_cam_base = None
         self.J_cam = None
@@ -123,6 +131,7 @@ class HeadPerceptionNode(Node):
             f"  Info  topic : {self.camera.info_topic}\n"
             f"  Table top   : z={cfg.TABLE_TOP_Z_WORLD:.2f} m  "
             f"centre={cfg.TABLE_CENTER_BASE[:2]} (base frame)\n"
+            f"  Centre frm  : {self._depth_center_frame} (depth optical-centre position)\n"
             f"  Scan        : {'ON' if cfg.ENABLE_SCAN else 'OFF'}\n"
             "==================================================================")
 
@@ -181,10 +190,22 @@ class HeadPerceptionNode(Node):
 
         # --- Correct transform: TF lookup of base <- depth_frame AT the depth
         # frame's timestamp. This fixes both (a) the frame mismatch (color vs
-        # depth optical) and (b) the timing skew while the head moves. ----
+        # depth optical) and (b) the timing skew while the head moves.
+        # ORIENTATION from the depth-optical frame; POSITION from the true
+        # optical centre (camera link in sim — Gazebo renders there, see §7.2).
         R_cam_base, t_cam_base = self._lookup_transform(frame_id, stamp)
         if R_cam_base is None:
             return
+
+        if self._depth_center_frame and self._depth_center_frame != frame_id:
+            _, t_center = self._lookup_transform(self._depth_center_frame, stamp)
+            if t_center is not None:
+                t_cam_base = t_center       # link position, optical orientation
+            elif not self._center_warned:
+                self.get_logger().warn(
+                    f"depth_center_frame '{self._depth_center_frame}' not in TF; "
+                    f"falling back to '{frame_id}' position (expect ~cm sim offset).")
+                self._center_warned = True
         self._last_tf_pos = t_cam_base
         self._last_tf_R = R_cam_base
         self._last_depth_frame = frame_id

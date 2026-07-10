@@ -39,6 +39,18 @@ CAMERA_OPTICAL_FRAME = "gripper_head_camera_rgbd_color_optical_frame"
 # Reference frame for control targets and detection outputs.
 BASE_FRAME = "base_footprint"
 
+# --- True optical-CENTRE frame for the DEPTH pipeline (main_head.py) ------
+# Same principle as APRILTAG_OPTICAL_CENTER_FRAME (§15): Gazebo renders from
+# the camera-link origin but tags the depth image as the depth-optical frame,
+# which the URDF offsets from the link by ~2.5 cm. The depth pipeline transforms
+# the point cloud via (R_optical, t_CENTRE), so in sim the POSITION must come
+# from the link, not the optical frame, else every 3D point shifts by the
+# static link→optical offset (measured [-0.011,-0.009,-0.021]).
+# On REAL hardware set this to "" (empty) to disable the correction and use the
+# depth image's own frame_id for both orientation AND position.
+# Override at runtime: --ros-args -p depth_center_frame:=<frame>
+DEPTH_OPTICAL_CENTER_FRAME = "gripper_head_camera_rgbd_link"   # SIM default
+
 # =============================================================================
 # 2. KNOWN PRIOR KNOWLEDGE  (the ONLY thing we tell the algorithm in advance)
 # =============================================================================
