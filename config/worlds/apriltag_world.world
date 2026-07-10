@@ -1,25 +1,25 @@
 <?xml version="1.0" ?>
-<!--
-  apriltag_world.world
-  ---------------------------------------------------------------------------
-  A copy of no_obstacle.world (work table + red/blue graspable cylinders +
-  yellow placement manifold) with ONE addition: a printable AprilTag 36h11
-  id-0 plate lying flat, centred on the table top. Physics, table, cylinders
-  and placement area are byte-for-byte the same as no_obstacle.world /
-  shield_world.world.
+<!-- ====================================================================
+     apriltag_world.world
+     ================================================================
+     A copy of no_obstacle.world (work table + red/blue graspable
+     cylinders + yellow placement manifold) with ONE addition: a
+     printable AprilTag 36h11 id-0 plate lying flat, centred on the
+     table top. Physics, table, cylinders and placement area are exactly
+     the same as no_obstacle.world / shield_world.world.
 
-  From the controller's point of view this world is IDENTICAL to no_obstacle
-  (the tag is a visual-only fiducial, no collision), so the QP controllers
-  are still launched with world_name:=no_obstacle. Only the head AprilTag
-  perception node (head_april_main.py) cares about the tag.
+     From the controller's point of view this world is IDENTICAL to
+     no_obstacle (the tag is a visual-only fiducial, no collision), so the
+     QP controllers are still launched with world_name:=no_obstacle. Only
+     the head AprilTag perception node (head_april_main.py) cares about it.
 
-  LAUNCHING (Gazebo must be able to resolve model://apriltag36_11_00):
-    export GAZEBO_MODEL_PATH=$GAZEBO_MODEL_PATH:\
-        ~/exchange/ros2-ws/src/triago_control/config/models
-  then point the Gazebo launch at this .world file. The tag PNG under
-  config/models/apriltag36_11_00/materials/textures is also directly
-  printable for the real-robot setup.
--->
+     LAUNCHING (Gazebo must be able to resolve model://apriltag36_11_00):
+       export GAZEBO_MODEL_PATH=$GAZEBO_MODEL_PATH:$HOME/exchange/ros2-ws/src/triago_control/config/models
+     then point the Gazebo launch at this .world file. The tag PNG under
+     config/models/apriltag36_11_00/materials/textures is also directly
+     printable for the real-robot setup.
+     ==================================================================== -->
+
 <sdf version="1.4">
   <world name="bimanual_manipulation_world">
 
