@@ -100,8 +100,10 @@ HEAD_JOINTS = [
 # =============================================================================
 # 4. LOOK-AT CONTROL  (point the camera optical +Z axis at the table)
 # =============================================================================
-LOOKAT_LAMBDA = 2.0          # proportional gain on the angular look-at error
-MAX_HEAD_VELOCITY = 0.25     # rad/s per joint (moderate, allows tracking the scan)
+LOOKAT_LAMBDA = 1.0          # proportional gain on the angular look-at error
+MAX_HEAD_VELOCITY = 0.10     # rad/s per joint (slow & smooth — gives the perception
+                              # pipeline time to settle and fuse clean frames; fast
+                              # motion kept the velocity gate permanently closed)
 # Per-joint velocity-regularisation weights: heavier on proximal joints so the
 # coarse pointing is done by the wrist, keeping motion smooth and predictable.
 HEAD_JOINT_WEIGHTS = np.array([50.0, 40.0, 30.0, 10.0, 5.0, 1.0, 1.0])
@@ -159,13 +161,15 @@ LOOKAT_ALIGNED_DEG = 4.0
 # meaningfully suffer, only the (already less important) full-circumference
 # arc-coverage stat will stay lower.
 ENABLE_SCAN = True
-SCAN_DWELL_S = 4.0           # [s] time parked at each waypoint (settle + fuse)
+SCAN_DWELL_S = 8.0           # [s] time parked at each waypoint (settle + fuse);
+                              # increased from 4s so the head fully settles below
+                              # INTEGRATE_VEL_THRESH before the next jump
 SCAN_WAYPOINTS = [
     (0.00, 0.00),
-    (0.08, 0.12),
-    (0.08, -0.12),
-    (-0.05, 0.12),
-    (-0.05, -0.12),
+    (0.05, 0.08),
+    (0.05, -0.08),
+    (-0.03, 0.08),
+    (-0.03, -0.08),
 ]
 
 # =============================================================================
