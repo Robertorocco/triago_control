@@ -68,13 +68,6 @@ class QPFormulator:
         # This GLOBAL scale is shared by both arms (grasp phases are per-active-
         # arm at the orchestrator level already).
         self.posture_scale = 1.0
-        # PER-ARM posture scale multiplier (2026-07-01, local minima escape):
-        # composed (multiplied) with the global posture_scale above so the
-        # escape mechanism (reference_governor.ReferenceGovernor) can boost or
-        # relax ONE arm's posture weight without touching the other arm's or
-        # conflicting with the grasp-phase global ramp. 1.0 = no correction.
-        self.posture_scale_right = 1.0
-        self.posture_scale_left = 1.0
 
         # Soft-task cost decomposition at the last solution (telemetry):
         # [E_damp, E_posture, E_slack] weighted squared energies. See build_and_solve.
@@ -277,21 +270,9 @@ class QPFormulator:
 
         # Effective posture weight (scaled down during autonomous precision phases
         # via self.posture_scale, set by the controller from the grasp state).
-        # PER-ARM (2026-07-01): posture_scale_right/left further multiply the
-        # weight on ONLY that arm's joints, on top of the global posture_scale
-        # -- this is how the local-minima escape (reference_governor) boosts
-        # ("stuck on a joint limit") or relaxes ("stuck on an obstacle") a
-        # SINGLE arm's posture task without affecting the other arm or the
-        # grasp-phase global ramp. Per-joint weight vector, defaulting to the
-        # global value everywhere, then overridden on each arm's own indices.
-        w_center_global = cfg.W_CENTER * self.posture_scale
-        w_center_vec = np.full(self.n_joints, w_center_global)
-        if kin.idx_right:
-            w_center_vec[kin.idx_right] = w_center_global * self.posture_scale_right
-        if kin.idx_left:
-            w_center_vec[kin.idx_left] = w_center_global * self.posture_scale_left
-        H_center = np.diag(mask_center * w_center_vec)
-        g_center = -(mask_center * w_center_vec) * v_ref_center
+        w_center = cfg.W_CENTER * self.posture_scale
+        H_center = np.diag(mask_center * w_center)
+        g_center = -(mask_center * w_center) * v_ref_center
 
         # Top-left (joint) block
         self.H[:self.n_joints, :self.n_joints] = H_brake + H_center
@@ -484,9 +465,7 @@ class QPFormulator:
         # authority is the KKT dual (shadow prices) already published separately.
         dq_post = (q_dot_safe - v_ref_center) * mask_center
         e_damp = cfg.DAMP * float(q_dot_safe @ q_dot_safe)
-        # PER-ARM weight vector (w_center_vec) means this is now a genuine
-        # weighted quadratic form, not a uniform scalar * squared-norm.
-        e_posture = float(np.dot(w_center_vec, dq_post ** 2))
+        e_posture = w_center * float(dq_post @ dq_post)
         e_slack = float(weight_slack_r * slack_r ** 2 + weight_slack_l * slack_l ** 2)
         self.task_energies = np.array([e_damp, e_posture, e_slack])
 

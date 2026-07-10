@@ -4,7 +4,7 @@ The Digital Twin.
 
 Thin wrapper around Pinocchio's model/data that owns everything kinematic:
     * loads the URDF and builds `pin.Model` / `pin.Data`,
-    * caches the right/left arm joint indices and the neutral posture,
+    * caches the right/left arm joint indices,
     * derives a SMOOTHED joint velocity from raw positions (simulation mode),
     * OR uses direct sensor velocities from /joint_states (real hardware mode),
     * runs forward kinematics / frame placements / joint Jacobians each tick,
@@ -57,10 +57,6 @@ class RobotKinematics:
         self.idx_left = []
         self._cache_joint_indices()
 
-        # Anti-tangle posture target (center of each joint's range)
-        self.q_neutral = pin.neutral(self.model)
-        self._define_neutral_posture()
-
         # End-effector frame IDs — inject grasping frames if the URDF lacks them
         self._ensure_grasping_frames()
         self.ee_id_right = self.model.getFrameId(cfg.RIGHT_TCP_FRAME) if self.model.existFrame(cfg.RIGHT_TCP_FRAME) else None
@@ -75,17 +71,6 @@ class RobotKinematics:
             if self.model.existJointName(name):
                 self.idx_left.append(self.model.joints[self.model.getJointId(name)].idx_v)
         print(f"[Init] Mapped {len(self.idx_right)} Right Joints and {len(self.idx_left)} Left Joints.")
-
-    def _define_neutral_posture(self):
-        # Set the posture target to the midpoint of each actuated joint's limits.
-        for joint in self.model.joints:
-            if joint.id == 0 or joint.nq != 1:  # Skip universe / multi-DOF (base) joints
-                continue
-            limit_u = self.model.upperPositionLimit[joint.idx_q]
-            limit_l = self.model.lowerPositionLimit[joint.idx_q]
-            if limit_u < 100.0 and limit_l > -100.0:  # Only when limits are finite
-                self.q_neutral[joint.idx_q] = (limit_u + limit_l) / 2.0
-        print("[Init] Posture Neutral Pose calculated.")
 
     def _ensure_grasping_frames(self):
         """Inject gripper grasping frames into the Pinocchio model if the URDF lacks them.

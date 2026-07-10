@@ -260,7 +260,7 @@ class CollisionManager:
             base_link = f'gripper_{side}_base_link'
             if self.model.existFrame(base_link):
                 frame_id = self.model.getFrameId(base_link)
-                parent_joint = self.model.frames[frame_id].parent
+                parent_joint = self.model.frames[frame_id].parentJoint
                 # Shift the box 5cm forward so it covers the fingers
                 placement = self.model.frames[frame_id].placement * pin.SE3(np.eye(3), np.array([0.0, 0.0, 0.05]))
                 geom = hppfcl.Box(0.05, 0.08, 0.25)
@@ -711,10 +711,9 @@ class CollisionManager:
         v_norm_l = np.linalg.norm(current_v[idx_left]) if idx_left else 0.0
         d_safe_dynamic_r = cfg.D_SAFE_BASE + (cfg.K_V_SAFE * v_norm_r)
         d_safe_dynamic_l = cfg.D_SAFE_BASE + (cfg.K_V_SAFE * v_norm_l)
-        # Backward-compat combined value (grasp-margin shift math below still
-        # uses ONE d_safe_dynamic per pair; a gripper<->cylinder pair belongs
-        # to exactly one arm in practice, so use that arm's own margin -- see
-        # the shift computation, which now picks the right scalar per pair).
+        # The per-pair grasp-margin shift math below picks the correct scalar
+        # per pair (a gripper<->cylinder pair belongs to exactly one arm in
+        # practice, resolved via _arm_membership) -- see the shift computation.
 
         # STEP 1: Collect candidate pairs within range, then keep the K closest
         pair_distances = [(res.min_distance, k, res)

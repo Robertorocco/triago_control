@@ -18,8 +18,6 @@ Design principles:
        for acceleration limiting). No cross-arm coupling.
     4. PRESERVES the QP's math: the governor does NOT modify the QP formulation
        itself (no extra rows/columns); it only pre-conditions the CLF's input.
-    5. FUTURE: exposes a `set_waypoint` interface for high-level planning injection
-       (steer the reference out of local minima without violating the bounds).
 
 The four active features (each independently configurable via config.py):
 
@@ -45,23 +43,16 @@ All four operate on the SE(3) reference BEFORE it reaches extract_task_errors.
 
 import numpy as np
 import pinocchio as pin
-from collections import deque
-import time
 import triago_control.qp_controller.config as cfg
 
 
 class ReferenceGovernor:
     """Per-arm reference governor instance. Stateful (velocity memory for accel limiting)."""
 
-    def __init__(self, arm_side: str, model=None, ee_frame_name=None):
+    def __init__(self, arm_side: str):
         """
         Args:
             arm_side: 'right' or 'left' (used only for logging/debug identity).
-            model: Pinocchio model. Kept as a constructor parameter for
-                   interface stability; not currently used internally (the
-                   RRT-Connect planner that once consumed it was removed --
-                   see the local-minima-escape docstring below).
-            ee_frame_name: e.g. 'gripper_right_grasping_link'. Same note as above.
         """
         self.arm_side = arm_side
 
@@ -71,32 +62,6 @@ class ReferenceGovernor:
         self._v_lin_prev = np.zeros(3)
         self._v_ang_prev = np.zeros(3)
         self._initialized = False  # First tick: skip accel limiting (no history yet)
-
-        # --- Waypoint injection (STUB, 2026-07-01) ---
-        # When active, the governor blends the raw reference toward this target
-        # SE(3) pose, respecting all bounds. None = inactive (pure passthrough
-        # from the raw reference after clamping).
-        self._waypoint_pos = None       # np.ndarray(3) or None
-        self._waypoint_rpy = None       # np.ndarray(3) or None
-        self._waypoint_priority = 0.0   # [0, 1]: 0 = follow user, 1 = follow waypoint
-
-        # --- Local minima escape (2026-07-01) ---
-        # See update_local_minima_escape for the full state machine. Uses an
-        # internally-accumulated virtual clock (sum of dt) rather than wall
-        # time, so it stays consistent regardless of sim/real-time settings.
-        self._lme_elapsed_time = 0.0
-        self._lme_error_history = deque()      # [(t, error_norm), ...] pruned to the trigger window
-        self._lme_state = 'normal'             # 'normal' | 'escaping'
-        self._lme_category = None              # None | 'obstacle' | 'joint' | 'unknown'
-        self._lme_escape_elapsed = 0.0
-        self._lme_posture_scale = 1.0          # ramped actual multiplier (returned to the caller)
-        self._lme_last_console_time = -1e9     # forces an immediate print on the first report
-
-        # NOTE (2026-07-03): an RRT-Connect joint-space planner was attempted
-        # here as a local-minima escape fallback (background planning thread,
-        # Cartesian waypoint queue consumed by govern()). The attempt was
-        # unsuccessful and has been fully removed -- ENABLE_LOCAL_MINIMA_ESCAPE
-        # now offers ONLY the posture-weight + task_dim correction below.
 
     # =====================================================================
     # PUBLIC API
@@ -148,239 +113,6 @@ class ReferenceGovernor:
         self._v_lin_prev = np.zeros(3)
         self._v_ang_prev = np.zeros(3)
         self._initialized = False
-        self._waypoint_pos = None
-        self._waypoint_rpy = None
-        self._waypoint_priority = 0.0
-        # Local minima escape: a freshly-frozen/re-anchored arm has no meaningful
-        # tracking error to speak of, so drop any in-progress escape and clear
-        # the error history (stale samples from before the freeze would otherwise
-        # bias the next "stuck" detection).
-        self._lme_error_history.clear()
-        self._lme_state = 'normal'
-        self._lme_category = None
-        self._lme_escape_elapsed = 0.0
-        self._lme_posture_scale = 1.0
-
-    # =====================================================================
-    # WAYPOINT INJECTION INTERFACE (STUB — future planning hook)
-    # =====================================================================
-
-    def set_waypoint(self, pos, rpy, priority=1.0):
-        """Set a planning waypoint that the governor should steer toward.
-
-        When active (priority > 0), the governor BLENDS the raw user/teleop
-        reference with a smooth trajectory toward this waypoint, respecting all
-        velocity/acceleration/error bounds. This is the mechanism by which a
-        high-level planner (PRM, potential-field escape, etc.) can drive
-        the robot OUT of QP local minima without ever presenting the CLF with
-        an infeasible/discontinuous command. (An RRT-Connect planner was
-        attempted for this role and removed -- 2026-07-03, see the class-level
-        note near __init__.)
-
-        Args:
-            pos: (3,) target position in base_footprint [m], or None to clear.
-            rpy: (3,) target orientation as RPY [rad], or None to clear.
-            priority: float in [0, 1]. 0 = pure user following (waypoint ignored),
-                      1 = pure waypoint following (user reference ignored).
-                      Intermediate values = convex blend.
-
-        Clearing: call set_waypoint(None, None, 0.0) to deactivate.
-
-        NOTE (2026-07-01): this interface is DEFINED but NOT YET WIRED into the
-        govern() output — the blending logic will be implemented when the
-        high-level planning module is built. Currently govern() ignores the
-        waypoint entirely and operates purely on the raw reference.
-        """
-        self._waypoint_pos = np.array(pos, dtype=float) if pos is not None else None
-        self._waypoint_rpy = np.array(rpy, dtype=float) if rpy is not None else None
-        self._waypoint_priority = float(np.clip(priority, 0.0, 1.0))
-
-    def clear_waypoint(self):
-        """Convenience: deactivate the planning waypoint."""
-        self.set_waypoint(None, None, 0.0)
-
-    @property
-    def waypoint_active(self):
-        """True if a planning waypoint is currently set and has nonzero priority."""
-        return self._waypoint_pos is not None and self._waypoint_priority > 0.0
-
-    # =====================================================================
-    # LOCAL MINIMA ESCAPE (2026-07-01)
-    # =====================================================================
-    #
-    # PROBLEM: the CLF-CBF-QP can reach a local minimum of the CLF's landscape
-    # restricted to the CBF-safe set: the CLF's gradient direction (toward the
-    # reference) is blocked by a hard constraint, and no feasible joint
-    # velocity can simultaneously decrease the tracking error AND satisfy every
-    # barrier -- the QP settles on q_dot=0 (or a small residual) with a large,
-    # non-decreasing 3D position error. Two known causes (per design review):
-    #   1. A CBF obstacle blocks the direct path (lambda_cbf shadow price high).
-    #   2. A joint-limit barrier blocks the required joint rotation
-    #      (lambda_joints shadow price high).
-    #   3. Both simultaneously (obstacle takes priority per instruction).
-    #
-    # DETECTION: the 3D position error norm is tracked over a rolling window
-    # (LME_ERROR_STUCK_WINDOW). "Stuck" = error > LME_ERROR_TRIGGER AND has
-    # varied by less than LME_ERROR_STUCK_TOLERANCE across the whole window
-    # (i.e. the QP is not making progress, not just moving slowly).
-    #
-    # CATEGORIZATION: read from the shadow prices produced by the QP's
-    # PREVIOUS solve (fed in by the caller each tick -- see
-    # main_qp_controller.py). Thresholds are OPERATOR-TUNED for the current
-    # parameter set (see config.py's LME_* comment).
-    #
-    # ESCAPE ACTION (posture task ONLY -- verified no other module writes to
-    # qp.posture_scale_right/left, so no conflict):
-    #   - Obstacle:    posture weight -> x0.2 (more redundancy to slip past),
-    #                  task_dim forced to 3.0 (position-only CLF, orientation
-    #                  fully relaxed) for the duration of the escape.
-    #   - Joint limit: posture weight -> x5.0 (push harder away from the
-    #                  limit), task_dim UNCHANGED.
-    #   The posture-scale multiplier is RAMPED (first-order low-pass, same
-    #   technique as the existing grasp-phase POSTURE_SCALE_TAU ramp in
-    #   main_qp_controller.solve_and_publish) rather than stepped, so the QP
-    #   never sees a cost-function discontinuity.
-    #
-    # EXIT: escape ends (returns to 'normal') when the error drops below
-    # LME_ERROR_RECOVERED (success) OR LME_MAX_ESCAPE_DURATION elapses (give
-    # up, avoid holding a distorted posture weight forever if the correction
-    # didn't work) -- whichever comes first. On exit the governor immediately
-    # resumes checking for a NEW local minimum (no cooldown).
-
-    def update_local_minima_escape(self, error_norm, lambda_cbf, lambda_joints, dt, logger=None):
-        """Advance the local-minima detection/escape state machine by one tick.
-
-        Args:
-            error_norm: scalar, ||x_ref - x_real|| (3D position error norm,
-                        computed by the caller from the SAME x_ref/x_real used
-                        for the CLF -- per instruction, 3D-only for now).
-            lambda_cbf: this arm's CBF shadow price from the QP's PREVIOUS
-                        solve (qp.last_lambda_cbf_right / _left).
-            lambda_joints: this arm's joint-limit shadow price from the QP's
-                        PREVIOUS solve (qp.last_lambda_joints_right / _left).
-            dt: control timestep [s] (used both for the ramp and the internal
-                        virtual clock -- NOT wall time, so it stays correct
-                        under SIMULATE_IDEAL_KINEMATICS or non-realtime sim).
-            logger: optional callable(str) for the throttled console report
-                        (e.g. a rclpy logger's .info, or plain print). If None,
-                        no console output is produced.
-
-        Returns:
-            (posture_scale_multiplier, task_dim_override)
-              posture_scale_multiplier: float, RAMPED multiplier to apply on
-                  top of the existing POSTURE_GRASP_SCALE ramp (1.0 = no
-                  correction active). Multiply, don't replace, so this
-                  composes cleanly with the existing grasp-phase scale.
-              task_dim_override: None (no override) or 3.0 (force
-                  position-only CLF) -- the caller should use this INSTEAD OF
-                  the raw task_dim_right/left while non-None.
-        """
-        if not cfg.ENABLE_LOCAL_MINIMA_ESCAPE:
-            return 1.0, None
-
-        self._lme_elapsed_time += dt
-
-        # --- 1. Maintain the rolling error-history window ---
-        t_now = self._lme_elapsed_time
-        self._lme_error_history.append((t_now, error_norm))
-        cutoff = t_now - cfg.LME_ERROR_STUCK_WINDOW
-        while self._lme_error_history and self._lme_error_history[0][0] < cutoff:
-            self._lme_error_history.popleft()
-
-        if self._lme_state == 'normal':
-            # --- 2. STUCK DETECTION: only evaluate once the window is full ---
-            window_full = (len(self._lme_error_history) >= 2 and
-                          (self._lme_error_history[-1][0] - self._lme_error_history[0][0])
-                          >= cfg.LME_ERROR_STUCK_WINDOW * 0.9)
-            if window_full and error_norm > cfg.LME_ERROR_TRIGGER:
-                errs = [e for _, e in self._lme_error_history]
-                variation = max(errs) - min(errs)
-                if variation <= cfg.LME_ERROR_STUCK_TOLERANCE:
-                    # Possible local minimum -- categorize via shadow prices.
-                    # Obstacle takes PRIORITY if both conditions are met.
-                    if lambda_cbf > cfg.LME_LAMBDA_CBF_THRESHOLD:
-                        category = 'obstacle'
-                    elif lambda_joints > cfg.LME_LAMBDA_JOINT_THRESHOLD:
-                        category = 'joint'
-                    else:
-                        category = 'unknown'
-                    self._lme_state = 'escaping'
-                    self._lme_category = category
-                    self._lme_escape_elapsed = 0.0
-                    self._lme_last_console_time = -1e9  # force an immediate report
-                    if logger is not None:
-                        if category == 'obstacle':
-                            logger(f"\033[93m[LOCAL MINIMA][{self.arm_side.upper()}] Possible local minimum "
-                                  f"DETECTED (|e|={error_norm:.3f}m stuck, lambda_cbf={lambda_cbf:.2f}). "
-                                  f"Category: OBSTACLE. Applying escape: posture x{cfg.LME_POSTURE_SCALE_OBSTACLE}, "
-                                  f"task_dim -> {cfg.LME_TASK_DIM_OBSTACLE} (orientation relaxed).\033[0m")
-                        elif category == 'joint':
-                            logger(f"\033[93m[LOCAL MINIMA][{self.arm_side.upper()}] Possible local minimum "
-                                  f"DETECTED (|e|={error_norm:.3f}m stuck, lambda_joints={lambda_joints:.2f}). "
-                                  f"Category: JOINT LIMIT. Applying escape: posture x{cfg.LME_POSTURE_SCALE_JOINT}.\033[0m")
-                        else:
-                            logger(f"\033[93m[LOCAL MINIMA][{self.arm_side.upper()}] Possible local minimum "
-                                  f"DETECTED (|e|={error_norm:.3f}m stuck) but neither lambda_cbf "
-                                  f"({lambda_cbf:.2f}) nor lambda_joints ({lambda_joints:.2f}) exceeds its "
-                                  f"threshold -- category UNKNOWN, no escape action applied.\033[0m")
-
-        if self._lme_state == 'escaping':
-            self._lme_escape_elapsed += dt
-
-            # --- 3. EXIT CONDITIONS ---
-            recovered = error_norm < cfg.LME_ERROR_RECOVERED
-            timed_out = self._lme_escape_elapsed >= cfg.LME_MAX_ESCAPE_DURATION
-            if recovered or timed_out:
-                if logger is not None:
-                    reason = "RECOVERED" if recovered else "TIMED OUT"
-                    logger(f"\033[92m[LOCAL MINIMA][{self.arm_side.upper()}] Escape ended ({reason}, "
-                          f"|e|={error_norm:.3f}m after {self._lme_escape_elapsed:.1f}s). "
-                          f"Resuming normal posture weighting.\033[0m")
-                self._lme_state = 'normal'
-                self._lme_category = None
-                self._lme_error_history.clear()  # don't immediately re-trigger on stale samples
-
-        # --- 4. COMPUTE the target multiplier + ramp it smoothly ---
-        # The ONLY corrective action available is the posture-weight nudge
-        # (+ task_dim=3 for an obstacle-induced minimum). An RRT-Connect
-        # planner fallback was attempted and removed (2026-07-03) -- see the
-        # class-level note near __init__.
-        if self._lme_state == 'escaping' and self._lme_category == 'obstacle':
-            target_scale = cfg.LME_POSTURE_SCALE_OBSTACLE
-            task_dim_override = cfg.LME_TASK_DIM_OBSTACLE
-        elif self._lme_state == 'escaping' and self._lme_category == 'joint':
-            target_scale = cfg.LME_POSTURE_SCALE_JOINT
-            task_dim_override = None
-        else:
-            # 'normal' state, or 'escaping' with category 'unknown' (detected
-            # but no actionable correction -- ramp back to nominal so an
-            # unknown-cause stall doesn't leave a stale distorted weight).
-            target_scale = 1.0
-            task_dim_override = None
-
-        # Smooth first-order ramp (same technique as POSTURE_SCALE_TAU elsewhere)
-        a_ramp = dt / (cfg.LME_RAMP_TAU + dt)
-        self._lme_posture_scale += a_ramp * (target_scale - self._lme_posture_scale)
-
-        # --- 5. Non-spam console reporting while an escape is in progress ---
-        if logger is not None and self._lme_state == 'escaping':
-            if (self._lme_elapsed_time - self._lme_last_console_time) >= cfg.LME_CONSOLE_PERIOD:
-                self._lme_last_console_time = self._lme_elapsed_time
-                if self._lme_category == 'unknown':
-                    logger(f"[LOCAL MINIMA][{self.arm_side.upper()}] Still stuck (|e|={error_norm:.3f}m), "
-                          f"cause UNKNOWN (no shadow-price threshold exceeded) -- no correction applied. "
-                          f"elapsed={self._lme_escape_elapsed:.1f}/{cfg.LME_MAX_ESCAPE_DURATION:.0f}s")
-                else:
-                    logger(f"[LOCAL MINIMA][{self.arm_side.upper()}] Escaping ({self._lme_category}): "
-                          f"posture_scale={self._lme_posture_scale:.3f}, |e|={error_norm:.3f}m, "
-                          f"elapsed={self._lme_escape_elapsed:.1f}/{cfg.LME_MAX_ESCAPE_DURATION:.0f}s")
-
-        return self._lme_posture_scale, task_dim_override
-
-    @property
-    def local_minima_state(self):
-        """('normal'|'escaping', category or None) -- for external telemetry/logging."""
-        return self._lme_state, self._lme_category
 
     # =====================================================================
     # INTERNAL FEATURE IMPLEMENTATIONS

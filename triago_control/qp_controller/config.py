@@ -24,8 +24,6 @@ import numpy as np
 # WALL_COLLIDER: legacy-path only (world_scene=None). For a YAML-loaded world,
 # set that world's `virtual_wall` obstacle's `collision:` field instead.
 WALL_COLLIDER = False          # Enable the virtual collision wall (XZ plane) [legacy path only]
-FLYING_OBSTACLE = False         # Enable the flying obstacle marker / collider
-PINHOLE_TASK = True             # [DEAD FLAG, unused] superseded by the `world_name` ROS parameter
 DEBUG = False                   # Verbose timing / kinematics console tracing
 GRASP_DEBUG = True              # Verbose grasp / CBF-bypass interaction tracing
 DISABLE_CBF = False             # Mathematically delete the collision barrier
@@ -238,7 +236,6 @@ DAMP = 10.0                    # Joint velocity regularization (Lambda) in the Q
 P_GAIN_LIMITS = 2.5            # Joint-limit CBF gamma (braking aggressiveness)
 JOINT_LIMIT_BUFFER_BASE = 0.15  # Base joint-limit braking buffer
 JOINT_LIMIT_K_V = 0.1          # Joint-limit velocity horizon (seconds to look ahead)
-LOCK_THRESHOLD = 0.001         # Below this input energy, the posture lock engages
 
 # Posture / joint-limit avoidance: repulsive potential field, negative gradient of a
 # barrier that diverges at each joint's limits, evaluated on the normalized joint
@@ -285,35 +282,6 @@ GOV_E_MAX_ORI = 0.524                 # [rad] max allowed orientation error norm
 
 GOV_A_MAX_LIN = 2.0                   # [m/s^2] max linear acceleration of the governed reference
 GOV_A_MAX_ANG = 8.0                   # [rad/s^2] max angular acceleration of the governed reference
-
-# =============================================================================
-# 3c. LOCAL MINIMA ESCAPE (governor extension)
-# =============================================================================
-# Detects a possible QP-CLF-CBF local minimum (large, near-constant 3D position
-# tracking error) and applies a temporary, per-arm posture-weight correction to
-# help escape it. See reference_governor.ReferenceGovernor.update_local_minima.
-# Tuned against the CURRENT gains in sections 2/3 -- revisit if those change.
-ENABLE_LOCAL_MINIMA_ESCAPE = False    # Master switch (independent of ENABLE_REFERENCE_GOVERNOR)
-# The only corrective action is the posture-weight + task_dim nudge below (no
-# planner/strategy selector -- an earlier RRT-Connect fallback attempt was removed).
-
-LME_ERROR_TRIGGER = 0.15             # [m] error norm above which "stuck" is considered
-LME_ERROR_STUCK_WINDOW = 2.0         # [s] time window checked for a near-constant error
-LME_ERROR_STUCK_TOLERANCE = 0.02     # [m] max variation within the window to call it "stuck"
-LME_ERROR_RECOVERED = 0.05           # [m] error norm below which the escape ends (success)
-LME_MAX_ESCAPE_DURATION = 10.0       # [s] max time the escape correction is held before giving up
-
-# Categorization uses shadow prices from the previous QP solve. Obstacle takes
-# priority if both conditions are met simultaneously.
-LME_LAMBDA_CBF_THRESHOLD = 10.0      # lambda_cbf > this -> obstacle-induced minimum
-LME_LAMBDA_JOINT_THRESHOLD = 1.0     # lambda_joints > this -> joint-limit-induced minimum
-
-LME_POSTURE_SCALE_OBSTACLE = 0.2     # x1/5 posture weight (more redundancy to slip past)
-LME_POSTURE_SCALE_JOINT = 5.0        # x5 posture weight (push harder away from the limit)
-LME_TASK_DIM_OBSTACLE = 3.0          # force position-only CLF during obstacle escape
-LME_RAMP_TAU = 0.3                   # [s] smooth ramp time-constant for the posture-scale change
-
-LME_CONSOLE_PERIOD = 3.0             # [s] throttle period for the non-spam status print
 
 # =============================================================================
 # 4. LOOP / TELEMETRY SETTINGS

@@ -135,10 +135,8 @@ class SafetyQPController(Node):
         # Bounds position/orientation error, reference velocity/acceleration so
         # the CLF row's demand is always bounded → QP feasibility preserved.
         # One instance per arm (each has its own velocity memory for accel limiting).
-        self.gov_right = ReferenceGovernor('right', model=self.kin.model,
-                                           ee_frame_name=cfg.RIGHT_TCP_FRAME)
-        self.gov_left = ReferenceGovernor('left', model=self.kin.model,
-                                          ee_frame_name=cfg.LEFT_TCP_FRAME)
+        self.gov_right = ReferenceGovernor('right')
+        self.gov_left = ReferenceGovernor('left')
 
         # --- CONTROL MODE / REFERENCES ---
         self.orientation_ctrl = cfg.ORIENTATION_CTRL
@@ -229,9 +227,10 @@ class SafetyQPController(Node):
         self.create_subscription(Bool, '/shared_autonomy/grasp_active', self.grasp_active_cb, 10)
 
         # Active-arm tracking (Option B bimanual): the INACTIVE arm is frozen at
-        # its current EE pose (held by a zero-velocity CLF) with double slack
-        # weight, but is NOT zeroed — its QP-computed motion is ALWAYS sent to
-        # TSID so it can bend to help the active arm avoid collisions.
+        # its current EE pose (held by a zero-velocity CLF) with MAX_WEIGHT_SLACK,
+        # GAMMA_MAX and doubled joint damping, but is NOT zeroed — its QP-computed
+        # motion is ALWAYS sent to TSID so it can bend to help the active arm
+        # avoid collisions.
         self.active_arm = 'right'
         self.right_frozen = False
         self.left_frozen = False
@@ -429,9 +428,9 @@ class SafetyQPController(Node):
         """Snapshot one arm's CURRENT EE pose as its held reference (zero velocity).
 
         Used when an arm becomes inactive (arm switch / stale teleop). The arm
-        keeps imposed_motion=True so its CLF holds it at this pose; with the
-        doubled inactive slack weight it stays put unless yielding helps the
-        active arm. Requires up-to-date FK (call after kinematics update).
+        keeps imposed_motion=True so its CLF holds it at this pose; with its
+        pinned MAX slack weight + doubled damping it stays put unless yielding
+        helps the active arm. Requires up-to-date FK (call after kinematics update).
         """
         if self.kin.current_q is None:
             return
@@ -637,56 +636,11 @@ class SafetyQPController(Node):
             x_gov_l, rpy_gov_l, v_gov_l, w_gov_l = (
                 self.x_ref_left, self.rpy_ref_left, self.xdot_ref_left, self.w_ref_left)
 
-        # --- LOCAL MINIMA ESCAPE (2026-07-01) ---
-        # Detect a possible QP-CLF-CBF local minimum from the 3D position
-        # error (per instruction, position-only for now) and the shadow
-        # prices from the QP's PREVIOUS solve (self.qp.last_lambda_cbf_*
-        # and last_lambda_joints_* are exactly last tick's values -- the
-        # current tick hasn't solved yet). If detected, apply a smooth,
-        # PER-ARM posture-weight correction (and, for an obstacle-induced
-        # minimum, force a position-only task_dim) until the error recovers
-        # or the max escape duration elapses.
-        task_dim_eff_right = self.task_dim_right
-        task_dim_eff_left = self.task_dim_left
-        if cfg.ENABLE_LOCAL_MINIMA_ESCAPE and not cfg.BLENDING:
-            # NOTE (2026-07-03): the local-minima escape is DISABLED in BLENDING
-            # mode. The escape mechanism was designed for the policy-only case
-            # (no human in the loop to redirect) — in BLENDING mode the HUMAN IS
-            # the escape mechanism (reference catch-up + divergence override). The
-            # persistent position gap created by the catch-up term can easily
-            # trigger the stuck-detector false-positive (error > 0.15m for > 2s),
-            # which then forces task_dim=3.0 (drops orientation tracking entirely),
-            # causing the "orientation goes wild" report.
-            if x_gov_r is not None and self.kin.ee_id_right is not None:
-                err_norm_r = float(np.linalg.norm(
-                    x_gov_r - np.array(self.kin.data.oMf[self.kin.ee_id_right].translation)))
-                pscale_r, tdim_override_r = self.gov_right.update_local_minima_escape(
-                    err_norm_r, self.qp.last_lambda_cbf_right, self.qp.last_lambda_joints_right,
-                    dt, logger=print)
-                self.qp.posture_scale_right = pscale_r
-                if tdim_override_r is not None:
-                    task_dim_eff_right = tdim_override_r
-            if x_gov_l is not None and self.kin.ee_id_left is not None:
-                err_norm_l = float(np.linalg.norm(
-                    x_gov_l - np.array(self.kin.data.oMf[self.kin.ee_id_left].translation)))
-                pscale_l, tdim_override_l = self.gov_left.update_local_minima_escape(
-                    err_norm_l, self.qp.last_lambda_cbf_left, self.qp.last_lambda_joints_left,
-                    dt, logger=print)
-                self.qp.posture_scale_left = pscale_l
-                if tdim_override_l is not None:
-                    task_dim_eff_left = tdim_override_l
-        else:
-            self.qp.posture_scale_right = 1.0
-            self.qp.posture_scale_left = 1.0
-
         # Compute CLF task errors from the GOVERNED references (not the raw ones).
-        # task_dim_eff_{right,left} may be overridden to 3.0 (position-only) by
-        # the local-minima escape above when an obstacle-induced minimum is
-        # detected -- this is what "gives up orientation" during the escape.
         e_r, v_r = self._arm_task_error(self.kin.ee_id_right, x_gov_r, rpy_gov_r,
-                                        v_gov_r, w_gov_r, task_dim_eff_right)
+                                        v_gov_r, w_gov_r, self.task_dim_right)
         e_l, v_l = self._arm_task_error(self.kin.ee_id_left, x_gov_l, rpy_gov_l,
-                                        v_gov_l, w_gov_l, task_dim_eff_left)
+                                        v_gov_l, w_gov_l, self.task_dim_left)
 
         # --- 3. Build + solve the CLF-CBF-QP ---
         # Smoothly ramp the posture-task weight scale: drop toward POSTURE_GRASP_SCALE
@@ -740,8 +694,8 @@ class SafetyQPController(Node):
         # The old per-arm zero-overwrite (when an arm had no fresh reference) is
         # removed: it discarded the QP's collision-avoidance motion for the
         # inactive arm, which let the two arms silently inter-penetrate. The
-        # inactive arm is instead held by its frozen-pose CLF (+ doubled slack),
-        # so its commanded motion is meaningful and safe.
+        # inactive arm is instead held by its frozen-pose CLF (pinned MAX slack +
+        # doubled damping), so its commanded motion is meaningful and safe.
         cmd_data_r = [0.0] * 7
         cmd_data_l = [0.0] * 7
         if self.active_controller_mode:
@@ -807,15 +761,6 @@ class SafetyQPController(Node):
                 q_dot_safe, None, None, self.kin.ee_id_right, self.kin.ee_id_left,
                 cfg.JOINT_LIMIT_BUFFER_BASE)
             self.viz.publish_teleop_tether()
-
-        # --- Diagnostic brake tracker ---
-        # --- Diagnostic brake tracker (disabled: console spam) ---
-        # if self.publish_counter % 200 == 0:
-        #     print("\n=== DECOUPLED QP BRAKES ===")
-        #     print(f"Collision Brakes:  {self.qp.last_lambda_col:.4f}")
-        #     print(f"Joint Brakes (R):  {self.qp.last_lambda_joints_right:.4f}")
-        #     print(f"Joint Brakes (L):  {self.qp.last_lambda_joints_left:.4f}")
-        #     print("===========================\n")
 
     def _publish_telemetry(self, q_dot_safe, slack_r, slack_l, b_col_pair, lambda_joints_total,
                            J_soft_r, h_soft_r, J_soft_l, h_soft_l,

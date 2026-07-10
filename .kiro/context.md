@@ -45,7 +45,7 @@ triago_control/
     │   ├── robot_kinematics.py             Pinocchio model, FK, EMA filter, digital twin
     │   ├── collision_manager.py            hppfcl geometry, SoftMin CBF, dynamic margin
     │   ├── qp_formulator.py                CLF-CBF-QP: H/g/C/b assembly, quadprog solver
-    │   ├── reference_governor.py           pre-CLF reference shaping / local-minima escape
+    │   ├── reference_governor.py           pre-CLF reference shaping (vel/pos/accel/orient bounds)
     │   ├── world_loader.py                 YAML world-scene parsing (§6)
     │   ├── shared_autonomy_handler.py      gripper cmds, CBF-bypass, cylinder re-parenting
     │   └── visualization_engine.py         thread-safe Meshcat + RViz markers
@@ -65,7 +65,7 @@ Decision vector: `x = [q̇ (nv), δ_right, δ_left]` (joint velocities + one CLF
 **Cost (minimize)**:
 - Joint velocity regularization (damping λ=10.0).
 - Posture/joint-limit avoidance via a repulsive potential field:
-  `v_ref = -K_GRADIENT · dH/dp`, where `H(p) = 1/(1-p)² + 1/(1+p)²` on normalized joint position `p = (q - mid)/half_range` (clamped to ±`V_MAX_POSTURE`). ~0 mid-range, explodes near a limit. Weighted by `W_CENTER`, with a per-arm multiplier `posture_scale_right/left` (used e.g. to reduce posture priority during precision grasp phases, or as a local-minima-escape action).
+  `v_ref = -K_GRADIENT · dH/dp`, where `H(p) = 1/(1-p)² + 1/(1+p)²` on normalized joint position `p = (q - mid)/half_range` (clamped to ±`V_MAX_POSTURE`). ~0 mid-range, explodes near a limit. Weighted by `W_CENTER`, scaled by a global `posture_scale` that ramps down to `POSTURE_GRASP_SCALE` during autonomous precision grasp phases (tighter tracking, less posture priority) and back to 1.0 otherwise.
 - Slack penalty, adaptively weighted per arm (§8).
 
 **Constraints (`C'x ≥ b`)**:
@@ -73,9 +73,9 @@ Decision vector: `x = [q̇ (nv), δ_right, δ_left]` (joint velocities + one CLF
 - **CBF (collision avoidance) — two independent per-arm rows**: `J_soft_R · q̇ ≥ b_R` and `J_soft_L · q̇ ≥ b_L`, each a SoftMin aggregate over the `K_MAX_PAIRS=60` closest collision pairs touching that arm's own geometry (a pair touching both arms' geometry — genuine inter-arm contact, or two held objects — contributes to both rows). Each row uses its own dynamic safety margin `d_safe_dynamic_X = D_SAFE_BASE + K_V_SAFE·‖v_X‖`, computed from only that arm's own joint velocities (this per-arm independence, at both the Jacobian and the margin level, is what prevents the inactive arm from being spuriously recruited to satisfy a barrier that has nothing to do with it).
 - **Joint limits**: velocity-aware position buffer (CBF-style): every joint index not in `idx_right ∪ idx_left` (torso, base, gripper fingers, head) is hard-locked to `q̇=0` in the solve — this is also what makes the head chain safe to add as a quasi-static CBF obstacle (below) without ever adding a head joint to the decision vector.
 
-Solver: `quadprog.solve_qp` (active-set method). Shadow prices `λ_cbf_right/left`, `λ_joints_right/left` are exposed as telemetry and consumed by the adaptive scheduler (§8) and the reference governor's local-minima-escape logic (§4).
+Solver: `quadprog.solve_qp` (active-set method). Shadow prices `λ_cbf_right/left`, `λ_joints_right/left` are exposed as telemetry and consumed by the adaptive scheduler (§8).
 
-**Bimanual inactive-arm handling**: the inactive arm is never zero-overwritten (that would discard its own collision-avoidance motion); instead it is frozen at its current EE pose via a zero-velocity CLF, with its slack weight doubled (`INACTIVE_SLACK_FACTOR=2.0`) so it holds position but can still yield if that helps the active arm.
+**Bimanual inactive-arm handling**: the inactive arm is never zero-overwritten (that would discard its own collision-avoidance motion); instead it is frozen at its current EE pose via a zero-velocity CLF. While frozen, that arm's slack weight is pinned to `MAX_WEIGHT_SLACK`, its CLF gain to `GAMMA_MAX`, and its joint damping is doubled (`2·DAMP`) — so it holds position rigidly and independently of the active arm, but can still yield if that helps the active arm.
 
 **Head-as-obstacle**: the head chain (`arm_head_1..7_link`) is added to the arm QP's collision model as a quasi-static CBF obstacle via live FK capsules — sound under the assumption the head moves slowly relative to the CBF margin budget (bounded unmodeled term ≈ head's own max commanded speed × one control tick, negligible against `D_SAFE_BASE`). No head joint is added to the decision vector; the pre-existing "everything outside `idx_right/idx_left` is velocity-locked to zero" mechanism makes the barrier satisfiable only through arm motion, by construction.
 
@@ -89,15 +89,6 @@ An intermediate filter between the raw Cartesian reference (from teleop / trajec
 | Position error bounding | Project `x_ref` onto a ball of radius `E_MAX` centered at `x_real` | `GOV_E_MAX_POS` |
 | Acceleration limiting | Rate-limit velocity change per tick: `‖Δv‖ ≤ A_MAX·dt` | `GOV_A_MAX_LIN`, `GOV_A_MAX_ANG` |
 | Orientation clamping | If `‖log3(R_des·R_real^T)‖ > θ_MAX`, shrink via `exp3` on the same axis | `GOV_E_MAX_ORI` |
-
-**Local minima escape** (extension, `cfg.ENABLE_LOCAL_MINIMA_ESCAPE`, one state machine per arm): detects a stuck 3D position error (error `> LME_ERROR_TRIGGER`, not decreasing over a rolling window), categorizes the cause from the QP's previous-tick shadow prices (`λ_cbf` vs `λ_joints`, obstacle takes priority if both are high), and applies a temporary per-arm posture-weight correction, smoothly ramped (first-order LPF):
-
-| Category | Posture weight | Task dimension |
-|---|---|---|
-| Obstacle | ×0.2 (more redundancy to slip past) | forced to 3.0 (position-only, orientation relaxed) |
-| Joint limit | ×5.0 (push harder away from the limit) | unchanged |
-
-Exits on error recovery (`< LME_ERROR_RECOVERED`) or a max duration timeout, whichever comes first.
 
 ## 5. Shared Autonomy & Reference-Level Blending (`main_shared_autonomy.py`)
 
@@ -259,8 +250,8 @@ Publishes the SAME topics `head_plotter.py` consumes (`/head_perception/markers`
 
 ## 8. Adaptive Scheduling (shadow-price feedback)
 
-- **Decoupled slack weighting**: each arm's CLF slack weight drops toward `BASE_WEIGHT_SLACK` as its own shadow price grows (letting slack absorb tracking error near obstacles), and rises toward `MAX_WEIGHT_SLACK` in free space (tighter tracking).
-- **Dynamic CLF gain**: convergence rate γ drops exponentially with the collision Lagrangian λ_cbf, LPF'd (τ=0.125s) — tracking priority in free space, yields to safety near obstacles.
+- **Decoupled slack weighting** (`DYNAMIC_SLACK_WEIGHT`, on by default): each arm's CLF slack weight drops toward `BASE_WEIGHT_SLACK` as its own shadow price grows (letting slack absorb tracking error near obstacles), and rises toward `MAX_WEIGHT_SLACK` in free space (tighter tracking).
+- **Dynamic CLF gain** (`DYNAMIC_GAMMA_CLF`, off by default → γ held at `GAMMA_CLF_DEFAULT`): when enabled, convergence rate γ drops exponentially with the collision Lagrangian λ_cbf, LPF'd (τ=0.125s) — tracking priority in free space, yields to safety near obstacles.
 
 ## 9. Frame Convention (Haption ↔ TRIAGo)
 

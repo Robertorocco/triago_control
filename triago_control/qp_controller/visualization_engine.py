@@ -78,7 +78,6 @@ class VisualizationEngine:
         # --- RViz MARKER PUBLISHERS ---
         self.pub_wall_marker = self.node.create_publisher(Marker, '/qp_debug/virtual_wall_marker', 10)
         self.pub_cyl_obs_marker = self.node.create_publisher(Marker, '/cylinder_obstacle_marker', 10)
-        self.pub_fly_obs_marker = self.node.create_publisher(Marker, '/flying_obstacle_marker', 10)
 
     # Padding added to every dimension of the visual gripper box relative to
     # the COLLISION gripper box it mirrors (see add_gripper_visual_boxes).
@@ -137,7 +136,7 @@ class VisualizationEngine:
             base_link = f'gripper_{side}_base_link'
             if self.model.existFrame(base_link):
                 frame_id = self.model.getFrameId(base_link)
-                parent_joint = self.model.frames[frame_id].parent
+                parent_joint = self.model.frames[frame_id].parentJoint
                 placement = self.model.frames[frame_id].placement * pin.SE3(np.eye(3), np.array([0.0, 0.0, 0.05]))
                 vis_obj = pin.GeometryObject(f"gripper_{side}_visual_box", parent_joint, placement,
                                              hppfcl.Box(0.05 + pad, 0.08 + pad, 0.25 + pad))
