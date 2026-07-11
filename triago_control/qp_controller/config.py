@@ -292,6 +292,23 @@ WATCHDOG_TIMEOUT = 0.5         # Seconds without a reference before motion is fr
 DISTANCE_FILTER_THRESHOLD = 0.15  # Ignore collision pairs farther than this [m]
 K_MAX_PAIRS = 60               # Max number of closest pairs fed into the SoftMin
 
+# --- Real-hardware async execution (main_qp_controller_real.py only) ---------
+# These take effect ONLY in the real-hardware subclass (main_qp_controller_real.py)
+# AND only when REAL_HARDWARE is actually detected from the URDF; the base
+# main_qp_controller.py and every simulation run ignore them entirely. The real
+# subclass moves the SoftMin CBF (the dominant per-tick cost on the robot) onto a
+# worker thread and the RViz debug overlays onto a second thread, so the control
+# tick no longer blocks on either. A staleness watchdog freezes BOTH arms (zero
+# velocity command, auto-resume) if the CBF result is unrefreshed for
+# CBF_STALENESS_MAX_TICKS consecutive ticks -- so async never lets the QP act on
+# an unboundedly-old barrier. Set either flag False to run the real controller
+# synchronously (identical to the base) for a direct A/B comparison, without a
+# code edit.
+REAL_ASYNC_CBF = True          # Run the SoftMin CBF on its own worker thread
+REAL_ASYNC_VIZ = True          # Run the RViz debug overlays on their own thread
+CBF_STALENESS_MAX_TICKS = 3    # Freeze both arms if the CBF is unrefreshed this
+                               # many consecutive ticks (auto-resume on refresh)
+
 # Diagonal task weights [Px,Py,Pz,Roll,Pitch,Yaw]: heavily penalize position, barely
 # penalize orientation (25:1 ratio), so the QP prioritizes closing position error
 # over matching orientation when the two conflict near an obstacle.

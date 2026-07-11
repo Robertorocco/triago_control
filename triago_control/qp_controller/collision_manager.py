@@ -43,6 +43,8 @@ compute_softmin_jacobian):
 ----------------------------------------------------------------------------
 """
 
+import threading
+
 import pinocchio as pin
 try:
     import hppfcl
@@ -65,6 +67,15 @@ class CollisionManager:
         self.data = data
         self.cmodel = pin.GeometryModel()
         self.cdata = None
+
+        # Serializes STRUCTURAL cmodel mutation (add/remove collision pairs on
+        # grasp attach/detach) against a concurrent reader. Only used when the
+        # real-hardware CBF runs on a worker thread (main_qp_controller_real.py):
+        # the worker holds it around its compute, and the subclass's topology
+        # seam holds it around attach/detach, so the two never touch cmodel at
+        # once. Uncontended (and effectively free) in the synchronous/sim path,
+        # where attach/detach is the only accessor and no worker exists.
+        self.geom_lock = threading.Lock()
 
         # Geometry id bookkeeping
         self.right_geom_ids = []
@@ -490,10 +501,17 @@ class CollisionManager:
             print("            - Virtual Wall Protection: ACTIVE (Excl. J1/J2)")
         print("--------------------------------------------------")
 
-    def update_geometry(self, current_q):
+    def update_geometry(self, current_q, data=None, cdata=None):
         # Refresh geometry placements and run all pairwise distance queries.
-        pin.updateGeometryPlacements(self.model, self.data, self.cmodel, self.cdata, current_q)
-        pin.computeDistances(self.cmodel, self.cdata)
+        # data/cdata default to self.* (the shared main-thread pair). The real-
+        # hardware CBF worker (main_qp_controller_real.py) passes its OWN private
+        # pin.Data / GeometryData so it never races the main thread's kinematics
+        # refresh -- see that file's isolation invariant. cmodel/model are shared
+        # read-only structure and stay self.*.
+        data = self.data if data is None else data
+        cdata = self.cdata if cdata is None else cdata
+        pin.updateGeometryPlacements(self.model, data, self.cmodel, cdata, current_q)
+        pin.computeDistances(self.cmodel, cdata)
 
     def add_attached_object_pairs(self, cyl_id, arm_side, current_q):
         """Treat a grasped cylinder as a moving link of `arm_side`.
@@ -649,7 +667,8 @@ class CollisionManager:
     def compute_softmin_jacobian(self, current_v, idx_right, idx_left,
                                  margin_targets, attached_objs, attached_adjacency,
                                  ignored_targets, publish_counter=0,
-                                 attach_ramp_shifts=None, attached_object_arm=None):
+                                 attach_ramp_shifts=None, attached_object_arm=None,
+                                 data=None, cdata=None):
         """
         Aggregate active collision pairs into TWO INDEPENDENT per-arm SoftMin CBFs
         (plus the legacy combined pair for backward-compatible telemetry).
@@ -711,6 +730,16 @@ class CollisionManager:
         an arm that is ITSELF moving fast gets an inflated margin.
         ---------------------------------------------------------------------
         """
+        # data/cdata default to self.* (shared main-thread pair). The real-
+        # hardware CBF worker passes its OWN private pin.Data / GeometryData
+        # (already refreshed via update_geometry on that same data) so this whole
+        # aggregation runs race-free off the main thread. model/cmodel are shared
+        # read-only structure and stay self.*. The self.witness_*/top_active_pairs
+        # writes below are read back SAME-THREAD by the caller right after this
+        # returns (never cross-thread), so they carry no race either.
+        data = self.data if data is None else data
+        cdata = self.cdata if cdata is None else cdata
+
         # --- Dynamic margin: thicken the barrier with EACH ARM'S OWN speed
         # (computed FIRST, before the SoftMin shifts, so high velocity still
         # correctly pushes that arm away from a grasp target -- but no longer
@@ -734,7 +763,7 @@ class CollisionManager:
         pair_distances = []
         witness_dist = float('inf')
         witness_res = None
-        for k, res in enumerate(self.cdata.distanceResults):
+        for k, res in enumerate(cdata.distanceResults):
             d = res.min_distance
             if d < witness_dist:
                 witness_dist = d
@@ -877,9 +906,9 @@ class CollisionManager:
                 j_id = self.cmodel.geometryObjects[geom_id].parentJoint
                 if j_id not in jacobian_cache:
                     jacobian_cache[j_id] = pin.getJointJacobian(
-                        self.model, self.data, j_id, pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)
+                        self.model, data, j_id, pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)
                 J_6D = jacobian_cache[j_id]
-                return J_6D[:3, :] - np.dot(get_skew(p_target - self.data.oMi[j_id].translation), J_6D[3:, :])
+                return J_6D[:3, :] - np.dot(get_skew(p_target - data.oMi[j_id].translation), J_6D[3:, :])
 
             J1_p1 = get_point_jacobian(first, p1)
             J2_p2 = get_point_jacobian(second, p2)
