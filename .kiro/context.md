@@ -32,8 +32,9 @@ triago_control/
 │   │   ├── main_shared_autonomy.py     ★ intent prediction + joystick-mode blending
 │   │   ├── trajectory_generator.py     open-loop quintic reference source
 │   │   ├── base_controller.py / keyboard_teleop.py   mobile base / keyboard jog
-│   │   ├── plotter.py / offline_plotter.py           live / static telemetry dashboards
-│   │   └── drift_evaluator_node.py     tracking error analysis
+│   │   ├── plotter.py / offline_plotter.py           live / static telemetry dashboards (latter also writes summary_metrics.json, §8.3)
+│   │   ├── drift_evaluator_node.py     tracking error analysis
+│   │   └── freq_oscillation_diagnostic.py  buckets a ripple to CBF/CLF-posture/downstream-of-QP (§8.3)
 │   ├── head_controller/
 │   │   ├── qp_head_visual_servo.py     ★ QP-based visual servoing for the head camera
 │   │   └── main_head.py                ★ RANSAC tabletop perception; publishes the perceived-world snapshot (§6.1)
@@ -284,6 +285,14 @@ After §8.1, the CBF was still the largest phase sitting inline on the control t
 - **Viz worker**: publishes the collision-witness line + teleop tethers from a small witness snapshot.
 - **GIL caveat**: Python threads don't run bytecode in parallel; the speedup only comes from `pinocchio`/`hppfcl`/big-numpy calls releasing the GIL while overlapping the main tick's own C-extension work — net gain is uncertain, validate on hardware via `loop_timing_monitor.py` (`REAL_ASYNC_CBF` makes the A/B a one-line flip). If gain is poor, the remaining lever is reducing CBF cost directly (fewer pairs) — needs explicit sign-off (safety-margin trade-off).
 
+### 8.3 Control Frequency: 150 Hz Default
+
+`CONTROL_FREQ_DEFAULT = 150` (not 300): the real robot can't reliably sustain 300 Hz, and a sim A/B (free-space + fast bimanual-convergence trajectories, via `freq_oscillation_diagnostic.py` + `offline_plotter.py`'s `summary_metrics.json`) found no downside — 150 Hz holds its target rate with far lower jitter than 300 Hz (which measurably misses its own target under CBF load), same safety margin, same tracking accuracy. Ongoing: push real-hardware performance to sustain 150 Hz stably.
+
+A ~15-19% `qdot_cmd` ripple (right arm, `CLF/POSTURE-SIDE` per `freq_oscillation_diagnostic.py`) appears only in fast bimanual-convergence trajectories, identically at both rates — frequency-independent, resistant to six tested fixes (governor bounds, slack-weight scheduler tuning, CBF softmin sharpness, joint damping, posture weight, inter-arm closing-margin below). Accepted as inherent to two grippers converging quickly, not a bug.
+
+`compute_softmin_jacobian`'s `cfg.ENABLE_INTER_ARM_CLOSING_MARGIN` (default **False**): when true, an inter-arm pair's margin also reflects the OTHER arm's speed, not just the row-owning arm's own (`d_safe_dynamic_r/l`'s normal basis) — correct for two converging grippers, cost-neutral, but didn't fix the ripple above.
+
 ## 9. Frame Convention (Haption ↔ TRIAGo)
 
 Identical to `haption_teleoperation`'s §7: a pure 180° rotation about Z between the Haption device frame and TRIAGo's `base_footprint` (negate X, negate Y, keep Z — same for force feedback).
@@ -313,6 +322,7 @@ ros2 run triago_control trajectory_generator.py     # open-loop test source
 ros2 run triago_control plotter.py                  # live dashboard
 ros2 run triago_control offline_plotter.py          # static, publication-quality figures
 ros2 run triago_control loop_timing_monitor.py      # real-hardware control-loop jitter / compute-time diagnostic (§10)
+ros2 run triago_control freq_oscillation_diagnostic.py  # buckets a qdot_cmd ripple's source, rides the same trigger as offline_plotter.py (§8.3)
 ```
 
 **Full simulation launch sequence** (robot side, then teleoperation side):

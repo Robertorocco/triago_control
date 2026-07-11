@@ -28,6 +28,7 @@ install(PROGRAMS
   scripts/qp_arm_teleop/main_qp_controller_real.py
   scripts/qp_arm_teleop/trajectory_generator.py
   scripts/qp_arm_teleop/loop_timing_monitor.py
+  scripts/qp_arm_teleop/freq_oscillation_diagnostic.py
   scripts/qp_arm_teleop/sa_coupling_debugger.py
   scripts/qp_arm_teleop/capsule_alignment_audit.py
   scripts/head_controller/main_head.py

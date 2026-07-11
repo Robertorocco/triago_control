@@ -914,10 +914,6 @@ class CollisionManager:
             J2_p2 = get_point_jacobian(second, p2)
             J_dist_k = np.dot(n, (J1_p1 - J2_p2))  # Scalar distance-rate Jacobian for this pair
 
-            # Effective (shifted) distance -- SoftMax weighting itself is now
-            # batched below, after the loop.
-            d_eff = d + shift
-
             # --- PER-ARM ROUTING (the coupling fix) ---
             # A pair contributes to arm X's SoftMin aggregate iff at least one of
             # its two geometries belongs to arm X (own links/gripper, or a
@@ -928,6 +924,24 @@ class CollisionManager:
             # table) NEVER pollutes the other arm's barrier.
             touched = (self._arm_membership(first, attached_object_arm)
                       | self._arm_membership(second, attached_object_arm))
+
+            # --- EXPERIMENTAL: INTER-ARM CLOSING-MARGIN HOOK (see config.py's
+            # ENABLE_INTER_ARM_CLOSING_MARGIN) ---
+            # d_safe_dynamic_r/l (computed once above) already inflate each row's
+            # margin from THAT arm's own speed alone -- correct for a static
+            # obstacle, but for a pair touching BOTH arms this under-estimates the
+            # true closing rate (row R never "sees" the left arm's contribution,
+            # and vice versa). Shrink this pair's effective distance by the
+            # missing term, using the conservative max() since one shared d_eff
+            # feeds both rows' softmin sums below. Static-obstacle pairs (touched
+            # has only one arm) are completely unaffected.
+            if cfg.ENABLE_INTER_ARM_CLOSING_MARGIN and 'right' in touched and 'left' in touched:
+                shift -= cfg.K_V_SAFE * max(v_norm_r, v_norm_l)
+
+            # Effective (shifted) distance -- SoftMax weighting itself is now
+            # batched below, after the loop.
+            d_eff = d + shift
+
             d_eff_list.append(d_eff)
             Jdist_list.append(J_dist_k)
             route_r_list.append('right' in touched)

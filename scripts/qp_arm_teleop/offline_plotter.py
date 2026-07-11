@@ -66,11 +66,25 @@ and the live joint-position slider GUI):
                                     immediately visible when/how much the
                                     governor reshaped the input trajectory.
                                     (only emitted if cfg.ENABLE_REFERENCE_GOVERNOR)
+
+    summary_metrics.json           Up to 10 headline numbers ("was this trial
+                                    smooth / accurate / safe") distilled from
+                                    the same buffers the figures above are
+                                    built from -- meant to be compared side by
+                                    side across runs (e.g. a CONTROL_FREQ_DEFAULT
+                                    300 vs 150 Hz A/B) without having to eyeball
+                                    six figures per trial. Also echoed to the
+                                    console at finalize time. See
+                                    _compute_summary_metrics for the exact
+                                    definitions; NaN means the source topic
+                                    never produced enough data this trial, not
+                                    an error.
 """
 import matplotlib
 matplotlib.use('Agg')  # headless: this script only ever SAVES figures
 
 import os
+import json
 import datetime
 
 import numpy as np
@@ -130,6 +144,31 @@ TRIGGER_LINE_KW = dict(color='0.45', linestyle='--', linewidth=1.1, zorder=0)
 def _draw_trigger_line(ax, t_off):
     if t_off is not None:
         ax.axvline(t_off, **TRIGGER_LINE_KW)
+
+
+def _moving_average(x, win):
+    if win < 3 or len(x) < win:
+        return np.asarray(x, dtype=float).copy()
+    kernel = np.ones(win) / win
+    pad = win // 2
+    xp = np.pad(x, (pad, pad), mode='edge')
+    return np.convolve(xp, kernel, mode='valid')[:len(x)]
+
+
+def _ripple_rms(t, x, detrend_window_s=0.15):
+    """Moving-average-detrend residual RMS -- the SAME ripple definition used
+    by freq_oscillation_diagnostic.py, duplicated here (not imported -- each
+    is an independent `ros2 run` entrypoint) so the two tools' smoothness
+    numbers are directly comparable side by side."""
+    t = np.asarray(t, dtype=float)
+    x = np.asarray(x, dtype=float)
+    if len(x) < 5:
+        return float('nan')
+    duration = max(t[-1] - t[0], 1e-6)
+    fs_hint = len(x) / duration
+    win = max(3, int(round(detrend_window_s * fs_hint)))
+    residual = x - _moving_average(x, win)
+    return float(np.sqrt(np.mean(residual ** 2)))
 
 
 class OfflinePlotter(Node):
@@ -254,6 +293,12 @@ class OfflinePlotter(Node):
         self.err_pos_l = []
         self.err_vel_r = []
         self.err_vel_l = []
+
+        # Raw EE speed (not tracking error -- the actual executed speed), same
+        # tick/timestamps as time_err. Used only by _compute_summary_metrics's
+        # ee_speed_ripple_rms_max metric (see cb_real for where it's appended).
+        self.ee_speed_r = []
+        self.ee_speed_l = []
 
         # 3D trajectory trace (commanded reference vs. executed EE pose),
         # sampled at the SAME rate/callback as the tracking error above
@@ -416,6 +461,8 @@ class OfflinePlotter(Node):
         self.err_pos_l.append(e_p_l)
         self.err_vel_r.append(e_v_r)
         self.err_vel_l.append(e_v_l)
+        self.ee_speed_r.append(float(np.linalg.norm(v_real_r)))
+        self.ee_speed_l.append(float(np.linalg.norm(v_real_l)))
 
         # 3D trajectory trace -- same tick, same anchors as the error above.
         self.traj_time.append(self._t())
@@ -640,12 +687,111 @@ class OfflinePlotter(Node):
         print(f"  figures saved    : {len(figs)}", flush=True)
         print("=" * 70, flush=True)
 
+        # --- Summary metrics (see _compute_summary_metrics) ---
+        metrics = self._compute_summary_metrics(trial_duration)
+        metrics_path = os.path.join(out_dir, 'summary_metrics.json')
+        with open(metrics_path, 'w') as f:
+            json.dump({
+                'trial': f'trial_{timestamp}',
+                'control_freq_hz': cfg.CONTROL_FREQ_DEFAULT,
+                'reason': reason,
+                'metrics': metrics,
+            }, f, indent=2)
+
+        print(" SUMMARY METRICS  (CONTROL_FREQ_DEFAULT="
+              f"{cfg.CONTROL_FREQ_DEFAULT:.0f} Hz, see summary_metrics.json)", flush=True)
+        print("-" * 70, flush=True)
+        for key, m in metrics.items():
+            print(f"  {key:<32}: {m['value']}", flush=True)
+        print("=" * 70, flush=True)
+
         # Reset for the next trial.
         self._reset_buffers()
         self.state = self.STATE_WAITING
         self.t0 = None
         self.t_off = None
         self.post_roll_deadline = None
+
+    # =====================================================================
+    # SUMMARY METRICS
+    # =====================================================================
+    def _compute_summary_metrics(self, trial_duration):
+        """Up to 10 headline numbers summarizing 'how this trial went', built
+        purely from buffers the figures above already populate (no new
+        subscriptions). Meant to be compared side by side across runs -- e.g.
+        a CONTROL_FREQ_DEFAULT 300 vs 150 Hz A/B -- alongside
+        freq_oscillation_diagnostic.py's per-arm bucketed verdict. NaN means
+        the source topic never produced enough data this trial, not an error
+        (e.g. min_observed_distance_m is NaN whenever nothing came within
+        cfg.DISTANCE_FILTER_THRESHOLD of anything all trial).
+        """
+        def _rms(*arrays):
+            vals = [np.asarray(a, dtype=float).ravel() for a in arrays if len(a)]
+            if not vals:
+                return float('nan')
+            allv = np.concatenate(vals)
+            return float(np.sqrt(np.mean(allv ** 2)))
+
+        freq_arr = np.asarray(self.freq_buffer, dtype=float)
+        mean_freq = float(np.mean(freq_arr)) if freq_arr.size else float('nan')
+        freq_jitter_pct = (100.0 * float(np.std(freq_arr)) / mean_freq
+                          if freq_arr.size and mean_freq > 1e-9 else float('nan'))
+
+        ripple_r = _ripple_rms(self.time_err, self.ee_speed_r)
+        ripple_l = _ripple_rms(self.time_err, self.ee_speed_l)
+        ripple_candidates = [v for v in (ripple_r, ripple_l) if not np.isnan(v)]
+        ripple_max = max(ripple_candidates) if ripple_candidates else float('nan')
+
+        n_r = min(len(self.qdot_cmd_r), len(self.qdot_measured_r))
+        n_l = min(len(self.qdot_cmd_l), len(self.qdot_measured_l))
+        mismatch_parts = []
+        if n_r:
+            mismatch_parts.append(np.array(self.qdot_cmd_r[:n_r]) - np.array(self.qdot_measured_r[:n_r]))
+        if n_l:
+            mismatch_parts.append(np.array(self.qdot_cmd_l[:n_l]) - np.array(self.qdot_measured_l[:n_l]))
+        qdot_mismatch_rms = _rms(*mismatch_parts) if mismatch_parts else float('nan')
+
+        slack_arr = np.asarray(self.slack_buffer, dtype=float)
+        mean_abs_slack = float(np.mean(np.abs(slack_arr))) if slack_arr.size else float('nan')
+
+        lambda_arr = np.asarray(self.lambda_cbf_buffer, dtype=float)
+        max_lambda_cbf = float(np.max(lambda_arr)) if lambda_arr.size else float('nan')
+
+        md_arr = np.asarray(self.min_dist_buffer, dtype=float)
+        finite_md = md_arr[np.isfinite(md_arr)] if md_arr.size else md_arr
+        min_observed_distance = float(np.min(finite_md)) if finite_md.size else float('nan')
+
+        gov_activity_frac = float('nan')
+        if self.gov_buffer:
+            gov_arr = np.asarray(self.gov_buffer, dtype=float)
+            gov_activity_frac = float(np.mean(np.linalg.norm(gov_arr, axis=1) > 1e-3))
+
+        def _entry(value, note):
+            v = round(value, 5) if isinstance(value, float) and not np.isnan(value) else value
+            return {'value': v, 'note': note}
+
+        return {
+            'duration_s': _entry(round(trial_duration, 3),
+                'trial length (trajectory-finished marker to post-roll end)'),
+            'mean_loop_freq_hz': _entry(mean_freq,
+                f'measured vs configured CONTROL_FREQ_DEFAULT={cfg.CONTROL_FREQ_DEFAULT:.0f}'),
+            'loop_freq_jitter_pct': _entry(freq_jitter_pct,
+                'std/mean of loop_freq -- timing regularity, lower is steadier'),
+            'ee_pos_tracking_rms_m': _entry(_rms(self.err_pos_r, self.err_pos_l),
+                'combined R+L Cartesian position tracking error (accuracy)'),
+            'ee_speed_ripple_rms_max_mps': _entry(ripple_max,
+                'worse-arm EE-speed ripple (same definition as freq_oscillation_diagnostic.py)'),
+            'qdot_cmd_vs_measured_rms_rads': _entry(qdot_mismatch_rms,
+                'joint-velocity command/execution mismatch, 14 joints both arms (low-level fidelity)'),
+            'mean_abs_slack': _entry(mean_abs_slack,
+                'CLF slack usage -- how much tracking relaxed against constraints'),
+            'max_lambda_cbf': _entry(max_lambda_cbf,
+                'peak CBF shadow price -- how hard the collision barrier engaged'),
+            'min_observed_distance_m': _entry(min_observed_distance,
+                'closest approach seen (NaN = nothing within DISTANCE_FILTER_THRESHOLD all trial)'),
+            'governor_activity_frac': _entry(gov_activity_frac,
+                'fraction of ticks the reference governor visibly reshaped the reference'),
+        }
 
     # =====================================================================
     # FIGURE BUILDERS

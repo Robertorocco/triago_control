@@ -231,6 +231,13 @@ ALPHA_SOFTMIN = 50.0            # Sharpness of the SoftMin collision aggregation
 GAMMA_CBF = 0.75               # CBF class-K gain
 D_SAFE_BASE = 0.015            # Base safety distance for the collision barrier
 K_V_SAFE = 0.1                 # Predictive velocity horizon (brake earlier at high speed)
+
+# In compute_softmin_jacobian, an inter-arm pair's margin normally reflects only
+# the row-owning arm's own speed (d_safe_dynamic_r/l below); when True, it's
+# widened by the OTHER arm's speed too, for pairs that touch both arms (see
+# .kiro/context.md §8.3). Off by default -- didn't fix the ripple it was tested
+# against, kept as an optional, cost-neutral margin refinement.
+ENABLE_INTER_ARM_CLOSING_MARGIN = False
 ALPHA_FILTER = 0.5            # EMA coefficient for hardware velocity filtering (~20ms window)
 DAMP = 10.0                    # Joint velocity regularization (Lambda) in the QP cost
 P_GAIN_LIMITS = 2.5            # Joint-limit CBF gamma (braking aggressiveness)
@@ -286,7 +293,7 @@ GOV_A_MAX_ANG = 8.0                   # [rad/s^2] max angular acceleration of th
 # =============================================================================
 # 4. LOOP / TELEMETRY SETTINGS
 # =============================================================================
-CONTROL_FREQ_DEFAULT = 300.0   # Default control loop frequency [Hz]
+CONTROL_FREQ_DEFAULT = 150.0   # Default control loop frequency [Hz]
 PUBLISH_EVERY_N = 2            # Publish 1 of every N iterations to the dashboard
 WATCHDOG_TIMEOUT = 0.5         # Seconds without a reference before motion is frozen
 DISTANCE_FILTER_THRESHOLD = 0.15  # Ignore collision pairs farther than this [m]
