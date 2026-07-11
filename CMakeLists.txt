@@ -24,6 +24,8 @@ install(PROGRAMS
   scripts/qp_arm_teleop/keyboard_teleop.py
   scripts/qp_arm_teleop/main_shared_autonomy.py
   scripts/qp_arm_teleop/main_qp_controller.py
+  scripts/qp_arm_teleop/main_qp_controller_perceived.py
+  scripts/qp_arm_teleop/main_qp_controller_real.py
   scripts/qp_arm_teleop/trajectory_generator.py
   scripts/qp_arm_teleop/loop_timing_monitor.py
   scripts/qp_arm_teleop/sa_coupling_debugger.py

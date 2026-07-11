@@ -26,13 +26,16 @@ triago_control/
 ├── scripts/
 │   ├── qp_arm_teleop/
 │   │   ├── main_qp_controller.py       ★ QP-CLF-CBF safety loop (arms)
+│   │   ├── main_qp_controller_perceived.py ★ camera-driven variant: CBF world from the head camera (§6.1)
+│   │   ├── main_qp_controller_real.py  ★ real-hardware variant: async CBF + overlay threads + staleness watchdog (§8.2)
 │   │   ├── main_shared_autonomy.py     ★ intent prediction + joystick-mode blending
 │   │   ├── trajectory_generator.py     open-loop quintic reference source
 │   │   ├── base_controller.py / keyboard_teleop.py   mobile base / keyboard jog
 │   │   ├── plotter.py / offline_plotter.py           live / static telemetry dashboards
 │   │   └── drift_evaluator_node.py     tracking error analysis
 │   ├── head_controller/
-│   │   └── qp_head_visual_servo.py     ★ QP-based visual servoing for the head camera
+│   │   ├── qp_head_visual_servo.py     ★ QP-based visual servoing for the head camera
+│   │   └── main_head.py                ★ RANSAC tabletop perception; publishes the perceived-world snapshot (§6.1)
 │   └── analysis/                       user-study data capture + offline analysis (§15)
 │       ├── study_config.py                 study/data settings (paths, topics, thresholds)
 │       ├── study_recorder.py               Tkinter GUI wrapper around `ros2 bag record`
@@ -47,6 +50,7 @@ triago_control/
     │   ├── qp_formulator.py                CLF-CBF-QP: H/g/C/b assembly, quadprog solver
     │   ├── reference_governor.py           pre-CLF reference shaping (vel/pos/accel/orient bounds)
     │   ├── world_loader.py                 YAML world-scene parsing (§6)
+    │   ├── perceived_world_builder.py      camera snapshot → WorldScene (§6.1)
     │   ├── shared_autonomy_handler.py      gripper cmds, CBF-bypass, cylinder re-parenting
     │   └── visualization_engine.py         thread-safe Meshcat + RViz markers
     └── shared_autonomy/                 intent prediction
@@ -193,6 +197,22 @@ Static obstacle layouts (table, graspable cylinders, walls, shields, etc.) are d
 
 An obstacle with `role: "reachable"` and no `<collision>` produces a pure reach/hover goal (`Front` grasp type, §5.4) instead of a graspable one — used for onboarding/movement-tutorial worlds with no real objects.
 
+### 6.1 Camera-Perceived World (`main_qp_controller_perceived.py`, `perceived_world_builder.py`, `head_control/world_convergence.py`)
+
+The *world may be unknown*: an **alternative source** for the exact same collision model (§6), building it from the **head camera** instead of prior YAML. The head RANSAC tabletop pipeline (`head_control/`, run by `scripts/head_controller/main_head.py`) already estimates the table + 2 cylinders to ~1 cm in sim; this pipeline freezes that estimate into a `WorldScene` **once confident** and the arm CBF is built statically on it — **no dynamic per-tick obstacle updates** (a moving obstacle set makes the barrier non-stationary; deliberate). Everything downstream (`CollisionManager`, `VisualizationEngine`, Meshcat, RViz) is byte-for-byte the YAML path — only the *source* of `world_scene` changes.
+
+**The single seam.** `SafetyQPController.__init__` now calls an overridable `self._build_world_scene()` (default = `load_world(world_name)`, base behavior unchanged) instead of `load_world` inline. `main_qp_controller_perceived.py` is a **thin subclass** overriding only that method; the entire CBF/CLF/control-loop/viz stack is inherited verbatim, so the camera-built world renders in the perceived node's own Meshcat/RViz for free.
+
+**The "confident" concept** (`WorldConvergenceMonitor`). The raw per-object confidence (`arc_coverage × exp(-fit_rms/5mm)`) climbs monotonically but never says the pose has *settled*. Convergence therefore requires, **on settled frames only** (the head-still `INTEGRATE_VEL_THRESH` gate): (a) every expected cylinder (`WORLD_EXPECTED_CYLINDERS=2`, red+blue) above `WORLD_CONF_MIN`, **and** (b) the fused geometry's per-frame drift below `WORLD_STABLE_POS_TOL`/`WORLD_STABLE_DIM_TOL` for `WORLD_STABLE_FRAMES` consecutive frames. The table box is **fully camera-derived**: XY footprint = percentile bbox of the RANSAC plane inliers (`table_segmenter.table_box_from_inliers`), top-Z = plane height, solid column down to `PERCEIVED_TABLE_BOTTOM_Z`; it is EMA-smoothed in the monitor (computed per-frame from raw inliers, unlike the already-EMA-tracked cylinders). All config in `head_control/config.py` §16.
+
+**Hand-off contract.** On convergence `main_head` publishes ONE **latched** (`TRANSIENT_LOCAL`) `MarkerArray` on `/perceived_world/snapshot` (`cfg.PERCEIVED_WORLD_TOPIC`): a `ns="table"` CUBE (full box) + one `ns="objects"` CYLINDER per object (radius inflated by `CYL_RADIUS_INFLATION` for collision, colour = class). Markers (not a custom msg) keep the head→QP contract self-describing + RViz-viewable; a `std_msgs/Empty` on `/perceived_world/rescan` re-arms the monitor to re-observe and re-publish. The QP side blocks in `perceived_world_builder.wait_for_scene()` (safe to spin inside `__init__`, before `build_collision_model`) until the latched snapshot arrives, then decodes it → `WorldScene` (`ObstacleSpec` list + `grasp_roles={'red':'red_cylinder','blue':'blue_cylinder'}`, identical to `load_world`'s output).
+
+**Run** (standard Gazebo world; `world_name` ignored by the perceived node). Confidence only climbs with multi-viewpoint arc coverage on settled frames — enable `ENABLE_SCAN` or pose the head across the scene; the monitor simply waits longer otherwise.
+```bash
+ros2 run triago_control main_head.py                       # head perception → converges → latches the snapshot
+ros2 run triago_control main_qp_controller_perceived.py    # blocks for the snapshot, then runs the CBF on it
+```
+
 ## 7. Head Controller — Visual Servoing (`qp_head_visual_servo.py`)
 
 Fully independent from the arm QP (own solver instance, own velocity controller, no shared state, does not participate in arm CBF pairs). Keeps both hands in the camera FOV via 2.5D visual servoing.
@@ -262,6 +282,17 @@ Diagnosed via `/qp_debug/loop_timing`'s per-phase breakdown (§10.6): on real ha
 - **`compute_softmin_jacobian`** now does its filtering + the RViz witness-line's global-closest-pair search in ONE pass (`self.witness_min_distance`/`witness_min_points`, consumed by `publish_debug`'s `witness_info` param instead of a second full scan), caches the static `allowed_grasp_ids` set once instead of rebuilding it via string ops every tick, and batches the per-pair SoftMax weight + per-arm accumulation into 1-2 vectorized numpy calls instead of a Python loop calling `exp()`/accumulating one pair at a time (numpy's per-call overhead dominates at this array size). All four SHARED-AUTONOMY hooks (attached-payload adjacency exclusion, ignored-target bypass, per-pair grasp-margin shift, attach-ramp smoothing) and the nearest-point/Jacobian extraction are UNCHANGED, still per-pair — only the final weighting/summation is batched; verified numerically identical to the original per-pair accumulation.
 - **Real-hardware load shedding** (`self.REAL_HARDWARE`, §10.2): Meshcat is never initialized at all on real hardware (`main()` skips `viz.init_meshcat`; every Meshcat-touching method already no-ops on `viz_meshcat is None`, so this is a pure skip, not a new code path) — its dedicated `_run_viz` thread otherwise renders at 5 Hz regardless of anything else. `publish_every_n`, the RViz obstacle-marker timer, and the joint-limits telemetry timer all halve their rate on real hardware (double the period / double `PUBLISH_EVERY_N`) — sim keeps the original cadence since it has no such CPU-budget pressure. None of this removes any topic, marker, or console output — same data, published/rendered half as often on real hardware only.
 
+### 8.2 Async Execution — `main_qp_controller_real.py` (real-hardware only)
+
+After §8.1, the CBF (`compute_softmin_jacobian`) was still the largest phase sitting **inline** on the control tick. `main_qp_controller_real.py` is a thin **subclass** of `SafetyQPController` (same pattern as `main_qp_controller_perceived.py` §6.1) that moves it — and the RViz debug overlays — onto **worker threads** so the tick no longer blocks on either. **The robot must be launched with `main_qp_controller_real.py` to get this; the plain `main_qp_controller.py` still runs synchronously** (with the §8.1 load-shedding). It is a drop-in A/B: with `REAL_HARDWARE` false (sim) OR either config flag off, every override falls through to `super()` and behavior is byte-identical to the base.
+
+- **Overridable seams (base class):** the base `solve_and_publish` was refactored into four pure-extraction seams — `_compute_cbf()` (returns a `CbfResult` namedtuple), `_gate_command(q_dot_safe)` (identity), `_publish_visual_overlays(cbf, q_dot_safe)`, `_process_deferred_topology()` — each byte-identical to the old inline code, so **the sim path is unchanged**. `CbfResult` carries the barrier the QP consumes (`J_soft_*`, `h_soft_*`, `d_safe_*`, `abs_min_distance`) PLUS the witness-line/top-pairs telemetry and a `fresh` flag.
+- **CBF worker:** runs the full FK + geometry + SoftMin on its **own private `pin.Data`/`GeometryData`** (never races the main tick's shared `self.data`, which keeps serving telemetry/markers). The main tick posts a snapshot (`current_q/v` + shallow-copied HRI grasp dicts) and reads the most-recent result. `compute_softmin_jacobian`/`update_geometry` gained optional `data=`/`cdata=` params (default `self.*`) purely to let the worker target its own data — backward-compatible, sim untouched.
+- **Staleness watchdog (`CBF_STALENESS_MAX_TICKS=3`):** `_gate_command` **freezes BOTH arms (zero velocity command, auto-resume)** whenever the worker result hasn't advanced for ≥3 consecutive ticks — and during the startup window before the first result. So the QP can never drive the arms from an unboundedly-old barrier; a worker crash/stall/slowdown all surface as "seq not advancing" → freeze (fail-safe). Edge-triggered `[SAFETY]` log on the freeze/resume transition. The digital twin (`integrate_simulated_state`) also uses the gated command so a freeze halts it too.
+- **`cmodel` mutation race:** grasp attach/detach STRUCTURALLY mutates the shared collision model (`add_attached_object_pairs`/`detach_object`). `CollisionManager.geom_lock` serializes that mutation (held by `_process_deferred_topology` in the subclass) against the worker's `cmodel` reads/`computeDistances` (worker holds it around its whole compute, and rebuilds its private `cdata` when the pair count changes). Uncontended in the sync/sim path.
+- **Viz worker:** publishes the collision-witness line + teleop tethers from a tiny witness snapshot (`QPVisualizer.publish_debug` otherwise reads all live state from its own ROS subscriptions, so no big state snapshot is needed).
+- **GIL caveat (why this is build-and-measure):** Python threads don't run bytecode in parallel; the speedup comes only from the `pinocchio`/`hppfcl`/big-`numpy` calls that release the GIL overlapping the main tick's own C-extension work — net gain is uncertain and validated on hardware via `loop_timing_monitor.py`, with `REAL_ASYNC_CBF` making the A/B a one-line config flip. If the gain is poor, the remaining lever is reducing CBF cost directly (fewer pairs) — a safety-margin trade-off requiring explicit sign-off.
+
 ## 9. Frame Convention (Haption ↔ TRIAGo)
 
 Identical to `haption_teleoperation`'s §7: a pure 180° rotation about Z between the Haption device frame and TRIAGo's `base_footprint` (negate X, negate Y, keep Z — same for force feedback).
@@ -283,6 +314,7 @@ colcon build --packages-select triago_control
 source install/setup.bash
 
 ros2 run triago_control main_qp_controller.py --ros-args -p world_name:=no_obstacle
+ros2 run triago_control main_qp_controller_real.py --ros-args -p world_name:=no_obstacle  # ON THE ROBOT: async CBF + overlays (§8.2); sync fallback in sim
 ros2 run triago_control main_shared_autonomy.py --ros-args -p world_name:=no_obstacle
 ros2 run triago_control qp_head_visual_servo.py     # independent, can run alongside
 ros2 run triago_control head_active_arm_tracking.py # teleop: head follows the active arm (-p plot:=false to disable dashboard)
