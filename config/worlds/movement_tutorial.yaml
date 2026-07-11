@@ -10,7 +10,7 @@
 # Approach axis for BOTH targets is rigidly locked to world +X (see goal_set.
 # GoalSet.get_dynamic_goal_pose's 'Front' branch) -- unlike the grasp Side/Top
 # types, this does NOT adapt to the user's current position.
-#
+#NO MORE TABLE LOADING
 # Table (center [1.0, 0.0, 0.35], half-extents [0.3, 0.25, 0.35] -> top
 # surface at z=0.70):
 #   red_target  x = table center x (1.0) - 0.20 (closer to robot) = 0.80
@@ -32,13 +32,12 @@ world_name: "movement_tutorial"
 gazebo_world_file: "movement_tutorial.world"
 
 static_obstacles:
-  - name: "work_table"
-    role: "table"
-    shape: "box"
-    pose: [1.0, 0.0, 0.35, 0.0, 0.0, 0.0]
-    size: [0.6, 0.5, 0.7]
-    color: [0.6, 0.4, 0.2, 0.8]
-    collision: true
+ #  role: "table"
+  #  shape: "box"
+   # pose: [1.0, 0.0, 0.35, 0.0, 0.0, 0.0]
+    #size: [0.6, 0.5, 0.7]
+    #color: [0.6, 0.4, 0.2, 0.8]
+    #collision: true
 
   # Pure reach/hover targets -- NOT graspable obstacles. collision: false (no
   # hppfcl geometry created, invisible in RViz/Meshcat collision markers --
