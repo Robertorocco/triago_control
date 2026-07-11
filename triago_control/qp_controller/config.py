@@ -255,6 +255,23 @@ POSTURE_GRASP_SCALE = 0.05     # posture weight scaled to this (x W_CENTER) duri
                                #   precision phases (grasp/align/approach/close/lift)
 POSTURE_SCALE_TAU = 0.2        # s -- first-order ramp time-constant for the posture-scale switch
 
+# Redundant-DOF RATE damping (2026-07-11): penalizes ||dq - dq_prev||^2, on top
+# of (not instead of) DAMP/W_CENTER above -- targets the CLF/POSTURE-SIDE
+# qdot_cmd ripple's TICK-TO-TICK change specifically (see .kiro/context.md).
+# REJECTED after a clean A/B at RATE_WEIGHT=50: it smooths the QP's own
+# commanded dq (E_rate share stays ~0 exactly because it succeeds -- the
+# residual it penalizes gets driven small), but that smoothing is LAG inside
+# a closed loop's forward path (QP -> low-level exec -> measured joint_states
+# -> next tick's error). The lag ate into the loop's phase margin: qdot_cmd
+# ripple dropped (10.8%/7.8%, was 17-20%) but qdot_measured ripple nearly
+# DOUBLED and the measured/commanded ratio flipped from ~0.4x to ~1.3-1.4x --
+# smoother command, noisier real robot. Kept in the code (harmless at False)
+# in case a POST-loop command filter is wanted later; do not re-enable this
+# in-loop version expecting a different weight to fix it -- the mechanism,
+# not the magnitude, is the problem.
+ENABLE_RATE_DAMPING = False
+RATE_WEIGHT = 50.0             # weight on ||dq - dq_prev||^2 in the QP cost (was 5.0)
+
 # =============================================================================
 # 3. DYNAMIC SCALING BOUNDARIES
 # =============================================================================
@@ -287,8 +304,8 @@ GOV_V_MAX_ANG = 1.2                   # [rad/s] max angular reference velocity p
 GOV_E_MAX_POS = 0.30                  # [m] max allowed position error norm (30 cm)
 GOV_E_MAX_ORI = 0.524                 # [rad] max allowed orientation error norm (~30 deg)
 
-GOV_A_MAX_LIN = 2.0                   # [m/s^2] max linear acceleration of the governed reference
-GOV_A_MAX_ANG = 8.0                   # [rad/s^2] max angular acceleration of the governed reference
+GOV_A_MAX_LIN = 1.0                   # [m/s^2] max linear acceleration of the governed reference (was 2.0 -- A/B testing a slower start-of-motion ramp against QP startup oscillation)
+GOV_A_MAX_ANG = 4.0                   # [rad/s^2] max angular acceleration of the governed reference (was 8.0 -- same test)
 
 # =============================================================================
 # 4. LOOP / TELEMETRY SETTINGS
@@ -481,3 +498,41 @@ OFFLINE_PLOT_POST_TRIGGER_S = 10.0
 # (pub.get_subscription_count() > 0), but no longer than this many seconds.
 # 0.0 disables the wait entirely (fire immediately -- the legacy behaviour).
 OFFLINE_RECORD_WAIT_TIMEOUT_S = 10.0
+
+# --- Rosbag capture alongside the figures/metrics above (2026-07-11) ---
+# offline_plotter.py spawns `ros2 bag record` for the trial's exact t=0..end
+# window and writes it into <trial_dir>/bag, so any trial can be replayed
+# offline later (e.g. real-robot vs. sim comparison at CONTROL_FREQ_DEFAULT).
+OFFLINE_BAG_ENABLE = True
+OFFLINE_BAG_STORAGE_ID = "sqlite3"
+
+# QP-controller telemetry only -- deliberately NOT the curated allowlist in
+# scripts/analysis/study_config.py (BAG_TOPICS), which also carries
+# shared_autonomy/* and virtuose/* (teleoperation + shared-autonomy) topics
+# that don't apply to a solo QP-controller trajectory run.
+OFFLINE_BAG_TOPICS = [
+    "/joint_states",
+    "/tf",
+    "/tf_static",
+    "/qp_debug/ee_real",
+    "/qp_debug/xdot_err",
+    "/qp_debug/qdot_err",
+    "/qp_debug/qdot_cmd",
+    "/qp_debug/qdot_measured",
+    "/qp_debug/slacks",
+    "/qp_debug/min_distance",
+    "/qp_debug/safety_margin",
+    "/qp_debug/lambda_cbf",
+    "/qp_debug/lambda_joints",
+    "/qp_debug/d_safe_dynamic",
+    "/qp_debug/dynamic_weights",
+    "/qp_debug/task_authority",
+    "/qp_debug/governor",
+    "/qp_debug/arm_frozen",
+    "/qp_debug/loop_freq",
+    "/collision_constraints",
+    "/arm_right/cartesian_reference",
+    "/arm_left/cartesian_reference",
+    "/qp_debug/reference_effective",
+    OFFLINE_RECORD_TRIGGER_TOPIC,
+]

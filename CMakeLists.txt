@@ -42,6 +42,7 @@ install(PROGRAMS
   scripts/head_controller/cloud_relay_node.py
   scripts/analysis/study_recorder.py
   scripts/analysis/analyze_trial.py
+  scripts/analysis/velocity_filter_calibration.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

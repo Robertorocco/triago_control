@@ -224,7 +224,12 @@ class TrajectoryGenerator(Node):
         #   [p_r(3), v_r(3), p_l(3), v_l(3), rpy_r(3), rpy_l(3)]
         self.create_subscription(Float64MultiArray, '/qp_debug/ee_real',
                                  self.ee_real_callback, 10)
-        self.create_subscription(Float64, '/qp_debug/lambda_cbf',
+        # [lambda_cbf_R, lambda_cbf_L] -- see main_qp_controller.py's
+        # pub_lambda_cbf. Declaring this as a scalar Float64 here (while
+        # every other publisher/subscriber on this topic uses
+        # Float64MultiArray) made rosbag2 refuse to record the topic
+        # ("more than one type associated") -- fixed by matching the real type.
+        self.create_subscription(Float64MultiArray, '/qp_debug/lambda_cbf',
                                  self.lambda_cb, 10)
 
         # --- Publishers ---------------------------------------------------
@@ -394,8 +399,15 @@ class TrajectoryGenerator(Node):
     # SUBSCRIBER CALLBACKS
     # =====================================================================
     def lambda_cb(self, msg):
-        """Latest CBF shadow price; drives the dynamic time scaling."""
-        self.lambda_cbf = msg.data
+        """[lambda_cbf_R, lambda_cbf_L] -- the worse (max) of the two
+        per-arm CBF shadow prices drives the dynamic time scaling (same
+        worst-case convention as qp_formulator.py's last_lambda_col)."""
+        if len(msg.data) >= 2:
+            self.lambda_cbf = float(max(msg.data[0], msg.data[1]))
+        elif len(msg.data) == 1:
+            self.lambda_cbf = float(msg.data[0])
+        else:
+            return
         self.lambda_msg_count += 1
 
     def ee_real_callback(self, msg):

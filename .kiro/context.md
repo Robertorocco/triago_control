@@ -32,7 +32,7 @@ triago_control/
 │   │   ├── main_shared_autonomy.py     ★ intent prediction + joystick-mode blending
 │   │   ├── trajectory_generator.py     open-loop quintic reference source
 │   │   ├── base_controller.py / keyboard_teleop.py   mobile base / keyboard jog
-│   │   ├── plotter.py / offline_plotter.py           live / static telemetry dashboards (latter also writes summary_metrics.json, §8.3)
+│   │   ├── plotter.py / offline_plotter.py           live / static telemetry dashboards (latter also writes summary_metrics.json + a `ros2 bag` per trial, §8.3)
 │   │   ├── drift_evaluator_node.py     tracking error analysis
 │   │   └── freq_oscillation_diagnostic.py  buckets a ripple to CBF/CLF-posture/downstream-of-QP (§8.3)
 │   ├── head_controller/
@@ -292,6 +292,12 @@ After §8.1, the CBF was still the largest phase sitting inline on the control t
 A ~15-19% `qdot_cmd` ripple (right arm, `CLF/POSTURE-SIDE` per `freq_oscillation_diagnostic.py`) appears only in fast bimanual-convergence trajectories, identically at both rates — frequency-independent, resistant to six tested fixes (governor bounds, slack-weight scheduler tuning, CBF softmin sharpness, joint damping, posture weight, inter-arm closing-margin below). Accepted as inherent to two grippers converging quickly, not a bug.
 
 `compute_softmin_jacobian`'s `cfg.ENABLE_INTER_ARM_CLOSING_MARGIN` (default **False**): when true, an inter-arm pair's margin also reflects the OTHER arm's speed, not just the row-owning arm's own (`d_safe_dynamic_r/l`'s normal basis) — correct for two converging grippers, cost-neutral, but didn't fix the ripple above.
+
+`offline_plotter.py` now bags every trial too (`cfg.OFFLINE_BAG_ENABLE`, `cfg.OFFLINE_BAG_TOPICS` — QP-controller telemetry only, no shared-autonomy/teleop topics): `ros2 bag record` starts on the trigger's rising edge and stops at finalize, written to `<trial_dir>/bag` next to the figures/`summary_metrics.json`; the console index is also saved as `trial_summary.txt`. Purpose: sim trials now, matching real-hardware trials later, are both replayable for the 150 Hz rollout push above.
+
+Sim's Gazebo `controller_manager` (hence `/joint_states`) was accidentally running at 100 Hz, not the real robot's 50 Hz — fixed at `update_rate` in `/opt/pal/alum/share/triago_description/ros2_control/gazebo_controller_manager_cfg.yaml` (system path, outside this repo/workspace; the in-repo `pal_sea_arm`/`pal_pro_gripper` copies of that same-named file are NOT the ones actually loaded for the combined robot). Re-validated at the correct 50 Hz: tracking/safety-margin/governor-activity all held up or improved; `ALPHA_FILTER=0.5` still adequate.
+
+`cfg.ENABLE_RATE_DAMPING` (default **False**): penalizes `||dq-dq_prev||^2` on top of DAMP/W_CENTER, tried against the ripple above at weight 5 then 50. Rejected — it smooths the QP's own commanded `dq` (by construction its own cost share reads ~0 even when working), but that smoothing is lag inside the closed tracking loop: `qdot_cmd` ripple fell but real `qdot_measured` ripple nearly doubled. Smoothing the forward path of a closed loop destabilizes the loop; a command-side filter placed *after* the loop would be the sound version of this idea, not this in-loop one.
 
 ## 9. Frame Convention (Haption ↔ TRIAGo)
 

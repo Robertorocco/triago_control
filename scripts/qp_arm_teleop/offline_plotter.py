@@ -41,6 +41,10 @@ exits.
 Figures produced (mirrors plotter.py's content, minus the two windows that
 are meaningless as a static artifact -- the live CBF-active-pairs debug view
 and the live joint-position slider GUI):
+    fig0_summary                   The 10 headline metrics below, rendered as
+                                    a monospace text page (same numbers as
+                                    summary_metrics.json / trial_summary.txt,
+                                    just viewable as PDF/PNG alongside fig1..6)
     fig1_joint_kinematics          Position / Velocity / QP solution, 3x2
                                     (col 0 = Left arm, col 1 = Right arm)
     fig2_qp_data                   Slacks, CBF/joint shadow prices, loop
@@ -79,13 +83,30 @@ and the live joint-position slider GUI):
                                     definitions; NaN means the source topic
                                     never produced enough data this trial, not
                                     an error.
+
+    bag/                        A `ros2 bag record` capture spanning the exact
+                                    same t=0..end window as the figures above
+                                    (cfg.OFFLINE_BAG_TOPICS -- QP-controller
+                                    telemetry only, no shared-autonomy/
+                                    teleoperation topics), so any trial can be
+                                    replayed offline later. Off via
+                                    cfg.OFFLINE_BAG_ENABLE = False.
+    trial_summary.txt           Plain-text copy of the console block printed
+                                    at finalize time (reason, duration, figure
+                                    count, the 10 summary metrics) -- so the
+                                    "index" survives after the terminal scrolls
+                                    away, without having to re-parse
+                                    summary_metrics.json.
 """
 import matplotlib
 matplotlib.use('Agg')  # headless: this script only ever SAVES figures
 
 import os
 import json
+import signal
 import datetime
+import textwrap
+import subprocess
 
 import numpy as np
 import pinocchio as pin
@@ -140,6 +161,10 @@ JOINT_COLORS = plt.cm.jet(np.linspace(0, 1, 7))
 # line (per instruction -- no legend entry, no explanation needed on the plot).
 TRIGGER_LINE_KW = dict(color='0.45', linestyle='--', linewidth=1.1, zorder=0)
 
+# How long to wait for `ros2 bag record` to finalize after SIGINT before
+# forcing (same grace-period pattern as scripts/analysis/study_recorder.py).
+_BAG_STOP_GRACE_S = 15.0
+
 
 def _draw_trigger_line(ax, t_off):
     if t_off is not None:
@@ -191,6 +216,8 @@ class OfflinePlotter(Node):
         self.t_off = None         # trial-relative time [s] of the falling edge
         self.post_roll_deadline = None  # ROS time [s] at which to finalize
         self.trial_index = 0
+        self.out_dir = None       # this trial's output folder (created at t0, not finalize)
+        self.bag_proc = None      # subprocess.Popen for `ros2 bag record`, or None
 
         # Latest real EE pose (position + RPY), kept for the governor figure's
         # tracking-error rows -- deliberately OUTSIDE _reset_buffers: this is
@@ -366,11 +393,19 @@ class OfflinePlotter(Node):
                 self._reset_buffers()
                 self.t0 = now
                 self.state = self.STATE_RECORDING
+                self.trial_index += 1
+                timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+                self.out_dir = os.path.join(
+                    os.path.expanduser(cfg.OFFLINE_PLOT_ROOT_DIR), f"trial_{timestamp}")
+                os.makedirs(self.out_dir, exist_ok=True)
+                self._start_bag_recording()
                 self.get_logger().info(
-                    "[offline_plotter] Trigger TRUE -- recording started (t=0 anchored here).")
+                    f"[offline_plotter] Trigger TRUE -- recording started (t=0 anchored here). "
+                    f"Output: {self.out_dir}")
             elif self.state == self.STATE_POST_ROLL:
                 # Motion resumed before the post-roll window elapsed: extend
-                # the SAME trial rather than finalizing a truncated one.
+                # the SAME trial (and its already-running bag) rather than
+                # finalizing a truncated one.
                 self.state = self.STATE_RECORDING
                 self.t_off = None
                 self.post_roll_deadline = None
@@ -391,6 +426,52 @@ class OfflinePlotter(Node):
     def _check_post_roll_deadline(self):
         if self.state == self.STATE_POST_ROLL and self._now() >= self.post_roll_deadline:
             self._finalize_and_save(reason='post_roll_elapsed')
+
+    # =====================================================================
+    # ROSBAG CAPTURE (raw replay data, alongside the figures/metrics below)
+    # =====================================================================
+    def _start_bag_recording(self):
+        """Spawn `ros2 bag record` for cfg.OFFLINE_BAG_TOPICS into
+        <out_dir>/bag, covering the same t=0..end window as the figures.
+        QP-controller telemetry only -- see cfg.OFFLINE_BAG_TOPICS for why
+        shared-autonomy/teleoperation topics are excluded here."""
+        if not cfg.OFFLINE_BAG_ENABLE:
+            self.bag_proc = None
+            return
+        bag_dir = os.path.join(self.out_dir, 'bag')
+        cmd = ["ros2", "bag", "record", "-s", cfg.OFFLINE_BAG_STORAGE_ID,
+               "-o", bag_dir, *cfg.OFFLINE_BAG_TOPICS]
+        try:
+            # New session so we can SIGINT the whole process group cleanly,
+            # same as scripts/analysis/study_recorder.py.
+            self.bag_proc = subprocess.Popen(cmd, start_new_session=True)
+            self.get_logger().info(f"[offline_plotter] bag recording -> {bag_dir}")
+        except FileNotFoundError:
+            self.get_logger().warn(
+                "[offline_plotter] 'ros2' not found on PATH -- skipping bag "
+                "recording for this trial (figures/metrics are unaffected).")
+            self.bag_proc = None
+
+    def _stop_bag_recording(self):
+        """SIGINT the bag process group so rosbag2 finalizes its files
+        cleanly, waiting up to _BAG_STOP_GRACE_S before forcing."""
+        if self.bag_proc is None:
+            return
+        try:
+            os.killpg(os.getpgid(self.bag_proc.pid), signal.SIGINT)
+        except ProcessLookupError:
+            pass
+        try:
+            self.bag_proc.wait(timeout=_BAG_STOP_GRACE_S)
+        except subprocess.TimeoutExpired:
+            self.get_logger().warn(
+                "[offline_plotter] bag record did not stop in time -- terminating.")
+            self.bag_proc.terminate()
+            try:
+                self.bag_proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                self.bag_proc.kill()
+        self.bag_proc = None
 
     # =====================================================================
     # DATA CALLBACKS (all short-circuit unless a trial is in progress)
@@ -540,10 +621,16 @@ class OfflinePlotter(Node):
         self.d_safe_buffer.append(data)
 
     def task_authority_callback(self, msg):
+        # 3 floats = [damp, posture, slack] (cfg.ENABLE_RATE_DAMPING was False
+        # when this trial was recorded); 4 floats also carries [..., rate].
+        # Padded to 4 either way so _build_fig_task_authority can index freely.
         if not self._recording_active() or len(msg.data) < 3:
             return
+        data = list(msg.data[:4])
+        if len(data) < 4:
+            data.append(0.0)
         self.time_task_auth.append(self._t())
-        self.task_auth_buffer.append(list(msg.data[:3]))
+        self.task_auth_buffer.append(data)
 
     @staticmethod
     def _geodesic_angle(rpy, R_real):
@@ -626,21 +713,29 @@ class OfflinePlotter(Node):
         if self.t0 is None or not self.time_js and not self.time_qdot_cmd:
             self.get_logger().warn(
                 "[offline_plotter] Finalize requested but no data was recorded -- skipping save.")
+            self._stop_bag_recording()
             self.state = self.STATE_WAITING
             self.t0 = None
             self.t_off = None
+            self.out_dir = None
             return
 
-        self.trial_index += 1
-        timestamp = datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
-        out_dir = os.path.join(os.path.expanduser(cfg.OFFLINE_PLOT_ROOT_DIR),
-                               f"trial_{timestamp}")
-        os.makedirs(out_dir, exist_ok=True)
+        out_dir = self.out_dir
+        trial_name = os.path.basename(out_dir)
+        bag_was_running = self.bag_proc is not None
+        self._stop_bag_recording()
 
         self.get_logger().info(
             f"[offline_plotter] Finalizing trial #{self.trial_index} ({reason}) -- saving to {out_dir}")
 
+        trial_duration = self.time_qdot_cmd[-1] if self.time_qdot_cmd else \
+            (self.time_js[-1] if self.time_js else 0.0)
+        metrics = self._compute_summary_metrics(trial_duration)
+        bag_note = 'yes -> bag/' if bag_was_running else 'disabled (cfg.OFFLINE_BAG_ENABLE=False)'
+
         figs = []
+        figs.append(('fig0_summary', self._build_fig_summary(
+            trial_name, reason, out_dir, trial_duration, bag_note, metrics)))
         figs.append(('fig1_joint_kinematics', self._build_fig_joint_kinematics()))
         figs.append(('fig2_qp_data', self._build_fig_qp_data()))
         figs.append(('fig3_task_error_adaptation', self._build_fig_task_error_adaptation()))
@@ -674,42 +769,49 @@ class OfflinePlotter(Node):
                     "[offline_plotter]   skipped interactive 3D HTML export "
                     "('plotly' not installed -- pip install plotly to enable it).")
 
-        trial_duration = self.time_qdot_cmd[-1] if self.time_qdot_cmd else \
-            (self.time_js[-1] if self.time_js else 0.0)
-        print("=" * 70, flush=True)
-        print(" OFFLINE PLOTTER -- TRIAL SAVED", flush=True)
-        print("=" * 70, flush=True)
-        print(f"  reason           : {reason}", flush=True)
-        print(f"  output directory : {out_dir}", flush=True)
-        print(f"  trial duration   : {trial_duration:.2f} s "
-              f"(trajectory-finished marker at "
-              f"{self.t_off if self.t_off is not None else 'N/A'})", flush=True)
-        print(f"  figures saved    : {len(figs)}", flush=True)
-        print("=" * 70, flush=True)
-
-        # --- Summary metrics (see _compute_summary_metrics) ---
-        metrics = self._compute_summary_metrics(trial_duration)
+        # --- Summary metrics (already computed above, for fig0_summary) ---
         metrics_path = os.path.join(out_dir, 'summary_metrics.json')
         with open(metrics_path, 'w') as f:
             json.dump({
-                'trial': f'trial_{timestamp}',
+                'trial': trial_name,
                 'control_freq_hz': cfg.CONTROL_FREQ_DEFAULT,
                 'reason': reason,
                 'metrics': metrics,
             }, f, indent=2)
 
-        print(" SUMMARY METRICS  (CONTROL_FREQ_DEFAULT="
-              f"{cfg.CONTROL_FREQ_DEFAULT:.0f} Hz, see summary_metrics.json)", flush=True)
-        print("-" * 70, flush=True)
+        # --- Console index -- built as lines so the exact text printed below
+        # is ALSO saved to disk (trial_summary.txt), not console-only. ---
+        lines = [
+            "=" * 70,
+            " OFFLINE PLOTTER -- TRIAL SAVED",
+            "=" * 70,
+            f"  reason           : {reason}",
+            f"  output directory : {out_dir}",
+            f"  bag recorded     : {bag_note}",
+            f"  trial duration   : {trial_duration:.2f} s "
+            f"(trajectory-finished marker at "
+            f"{self.t_off if self.t_off is not None else 'N/A'})",
+            f"  figures saved    : {len(figs)}",
+            "=" * 70,
+            " SUMMARY METRICS  (CONTROL_FREQ_DEFAULT="
+            f"{cfg.CONTROL_FREQ_DEFAULT:.0f} Hz, see summary_metrics.json)",
+            "-" * 70,
+        ]
         for key, m in metrics.items():
-            print(f"  {key:<32}: {m['value']}", flush=True)
-        print("=" * 70, flush=True)
+            lines.append(f"  {key:<32}: {m['value']}")
+        lines.append("=" * 70)
+
+        for line in lines:
+            print(line, flush=True)
+        with open(os.path.join(out_dir, 'trial_summary.txt'), 'w') as f:
+            f.write("\n".join(lines) + "\n")
 
         # Reset for the next trial.
         self._reset_buffers()
         self.state = self.STATE_WAITING
         self.t0 = None
         self.t_off = None
+        self.out_dir = None
         self.post_roll_deadline = None
 
     # =====================================================================
@@ -799,6 +901,41 @@ class OfflinePlotter(Node):
     def _max_time(self, *time_lists):
         candidates = [tl[-1] for tl in time_lists if tl]
         return max(candidates) if candidates else 1.0
+
+    def _build_fig_summary(self, trial_name, reason, out_dir, trial_duration, bag_note, metrics):
+        """A publication-styled TEXT page (fig0_summary) rendering the same
+        headline numbers as trial_summary.txt / summary_metrics.json, so
+        'how did this trial go' is visible right alongside fig1..fig6 instead
+        of requiring a separate text-file open."""
+        fig, ax = plt.subplots(figsize=(8.5, 11))
+        ax.axis('off')
+        fig.suptitle(f'Trial Summary -- {trial_name}', fontsize=14, fontweight='bold')
+
+        header_lines = [
+            f"reason            : {reason}",
+            f"control_freq_hz   : {cfg.CONTROL_FREQ_DEFAULT:.0f}",
+            f"bag recorded      : {bag_note}",
+            f"trial duration    : {trial_duration:.2f} s (trajectory-finished "
+            f"marker at {self.t_off if self.t_off is not None else 'N/A'})",
+            f"output directory  : {out_dir}",
+            "",
+            "-" * 78,
+            f"{'METRIC':<32}{'VALUE':<14}NOTE",
+            "-" * 78,
+        ]
+
+        body_lines = []
+        for key, m in metrics.items():
+            wrapped = textwrap.wrap(m['note'], width=44) or ['']
+            body_lines.append(f"{key:<32}{str(m['value']):<14}{wrapped[0]}")
+            for cont in wrapped[1:]:
+                body_lines.append(f"{'':<46}{cont}")
+
+        text = "\n".join(header_lines + body_lines)
+        ax.text(0.01, 0.97, text, transform=ax.transAxes, family='monospace',
+               fontsize=8.5, va='top', ha='left')
+        fig.tight_layout(rect=(0, 0, 1, 0.96))
+        return fig
 
     def _build_fig_joint_kinematics(self):
         """3 rows (Position / Velocity / QP solution) x 2 cols (Left / Right)."""
@@ -994,11 +1131,16 @@ class OfflinePlotter(Node):
             ax.plot(self.time_task_auth, shares[:, 0], color='#888888', label='Damping')
             ax.plot(self.time_task_auth, shares[:, 1], color='#2a9d8f', label='Posture / limit')
             ax.plot(self.time_task_auth, shares[:, 2], color='#e63946', label='Slack (CLF give)')
+            # Rate-damping (cfg.ENABLE_RATE_DAMPING, ||dq-dq_prev||^2 -- see
+            # qp_formulator.py's build_and_solve §A) -- 0 share whenever it was
+            # disabled for this trial, plotted anyway so an A/B is a straight
+            # before/after comparison of the same figure.
+            ax.plot(self.time_task_auth, shares[:, 3], color='#457b9d', label='Rate damping (smoothness)')
 
         ax.set_ylim(-0.02, 1.02)
         ax.set_ylabel('Authority share [-]')
         ax.set_xlabel('Time [s]')
-        ax.legend(loc='upper left', ncol=3)
+        ax.legend(loc='upper left', ncol=4, fontsize=8)
         max_t = self._max_time(self.time_task_auth)
         ax.set_xlim(0, max_t)
         _draw_trigger_line(ax, self.t_off)

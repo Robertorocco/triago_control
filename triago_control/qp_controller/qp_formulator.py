@@ -69,9 +69,16 @@ class QPFormulator:
         # arm at the orchestrator level already).
         self.posture_scale = 1.0
 
+        # Previous tick's solved joint velocity -- reference point for the
+        # cfg.ENABLE_RATE_DAMPING ||dq - dq_prev||^2 cost term (see build_and_solve
+        # §A). Zero-initialized: the very first solve after startup is treated as
+        # if it followed a zero-velocity tick, same convention as a fresh start.
+        self.last_dq_safe = np.zeros(self.n_joints)
+
         # Soft-task cost decomposition at the last solution (telemetry):
-        # [E_damp, E_posture, E_slack] weighted squared energies. See build_and_solve.
-        self.task_energies = np.zeros(3)
+        # [E_damp, E_posture, E_slack, E_rate] weighted squared energies. See
+        # build_and_solve. E_rate is 0 whenever cfg.ENABLE_RATE_DAMPING is False.
+        self.task_energies = np.zeros(4)
 
         # Low-pass-filtered shadow prices used by the slack scheduler (the raw
         # multipliers are noisy tick-to-tick and made the slack weight jump).
@@ -274,9 +281,20 @@ class QPFormulator:
         H_center = np.diag(mask_center * w_center)
         g_center = -(mask_center * w_center) * v_ref_center
 
+        # RATE damping: ||dq - dq_prev||^2, cfg.ENABLE_RATE_DAMPING (see config.py
+        # for the derivation -- this smooths the redundant DOF's tick-to-tick
+        # CHANGE, unlike DAMP/H_brake above which shrinks its whole magnitude
+        # uniformly at every frequency, DC included).
+        if cfg.ENABLE_RATE_DAMPING:
+            H_rate = np.eye(self.n_joints) * cfg.RATE_WEIGHT
+            g_rate = -cfg.RATE_WEIGHT * self.last_dq_safe
+        else:
+            H_rate = 0.0
+            g_rate = 0.0
+
         # Top-left (joint) block
-        self.H[:self.n_joints, :self.n_joints] = H_brake + H_center
-        self.g[:self.n_joints] = g_center
+        self.H[:self.n_joints, :self.n_joints] = H_brake + H_center + H_rate
+        self.g[:self.n_joints] = g_center + g_rate
 
         # Bottom-right (slack) block: first half -> right arm, second half -> left arm
         half_slacks = self.n_slacks // 2
@@ -426,7 +444,8 @@ class QPFormulator:
             self.last_lambda_col = 0.0
             self.last_lambda_cbf_right = 0.0
             self.last_lambda_cbf_left = 0.0
-            self.task_energies = np.zeros(3)
+            self.task_energies = np.zeros(4)
+            self.last_dq_safe = np.zeros(self.n_joints)
             return np.zeros(self.n_joints), 0.0, 0.0, (b_col_r, b_col_l), np.zeros(self.n_joints)
 
         q_dot_safe = sol[:self.n_joints]
@@ -460,6 +479,9 @@ class QPFormulator:
         #   E_damp    = DAMP * ||q_dot||^2                  (regularisation effort)
         #   E_posture = W_CENTER * ||q_dot_arm - v_ref||^2  (posture/limit task)
         #   E_slack   = w_r*delta_r^2 + w_l*delta_l^2        (CLF task relaxation)
+        #   E_rate    = RATE_WEIGHT * ||q_dot - q_dot_prev||^2  (tick-to-tick
+        #               smoothing cost, 0 whenever cfg.ENABLE_RATE_DAMPING is
+        #               False -- see config.py/build_and_solve §A)
         # Their normalised shares (computed in the plotter) show where the QP's
         # objective effort/conflict concentrates each tick. The HARD-constraint
         # authority is the KKT dual (shadow prices) already published separately.
@@ -467,6 +489,9 @@ class QPFormulator:
         e_damp = cfg.DAMP * float(q_dot_safe @ q_dot_safe)
         e_posture = w_center * float(dq_post @ dq_post)
         e_slack = float(weight_slack_r * slack_r ** 2 + weight_slack_l * slack_l ** 2)
-        self.task_energies = np.array([e_damp, e_posture, e_slack])
+        e_rate = (cfg.RATE_WEIGHT * float(np.sum((q_dot_safe - self.last_dq_safe) ** 2))
+                 if cfg.ENABLE_RATE_DAMPING else 0.0)
+        self.task_energies = np.array([e_damp, e_posture, e_slack, e_rate])
+        self.last_dq_safe = q_dot_safe.copy()
 
         return q_dot_safe, slack_r, slack_l, (b_col_r, b_col_l), lambda_joints_total
