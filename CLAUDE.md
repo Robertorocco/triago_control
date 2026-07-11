@@ -2,7 +2,15 @@
 
 Before doing any work in this repo, read `.kiro/context.md` — it holds the current state of the project (architecture, in-progress work, decisions) and is the primary source of truth for Claude sessions here, alongside README.md for user-facing info.
 
-It is Claude's responsibility to keep `.kiro/context.md` accurate and up to date as work happens in this repo: update it when architecture changes, features land, or decisions are made, so a new chat can pick up full context from this file alone.
+It is Claude's responsibility to keep `.kiro/context.md` accurate and up to date as work happens in this repo: update it when architecture changes, features land, or decisions are made, so a new chat can pick up full context from this file alone. **Keep it short** — see its own §0 for the length rule; don't let entries grow back into essays.
+
+## Commit & Push Discipline
+
+- Commit messages: **one line, imperative mood, <72 chars**. No body unless the user asks for one.
+- Do not narrate the commit/push process step by step — run it, then report the result in ≤2 sentences.
+- Never re-read a file immediately after editing/writing it "to verify" — trust the tool; Edit/Write already error loudly on failure.
+- Stage only the files actually changed for the task at hand — never `git add -A`/`git add .`.
+- After push, give the sync command block (§14 of context.md) and stop — no summary of the diff unless asked.
 
 ## Sibling repo: haption_teleoperation
 
