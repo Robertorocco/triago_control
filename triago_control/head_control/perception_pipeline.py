@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 import triago_control.head_control.config as cfg
-from triago_control.head_control.table_segmenter import TableSegmenter
+from triago_control.head_control.table_segmenter import TableSegmenter, table_box_from_inliers
 from triago_control.head_control.object_detector import ObjectDetector, DetectedObject
 from triago_control.head_control.voxel_map import VoxelMap
 from triago_control.head_control.object_tracker import ObjectTracker
@@ -35,6 +35,11 @@ class PerceptionResult:
     cropped_colors: np.ndarray = None       # (N,3) uint8
     above_points: np.ndarray = None         # (M,3) above-plane points (for viz)
     plane_centroid: np.ndarray = None       # (3,) centroid of plane inliers (debug)
+    # Fully camera-derived table BOX (centre + full extents, base frame): XY from
+    # the plane inliers' horizontal spread, top-Z from the plane. Feeds the
+    # perceived-world snapshot -> QP-CLF-CBF collision box. None until a plane fit.
+    table_center: np.ndarray = None         # (3,) box centre
+    table_size: np.ndarray = None           # (3,) box full extents [sx, sy, sz]
     n_raw: int = 0
     map_size: int = 0                       # voxels in the fused map (0 if off)
     proc_ms: float = 0.0
@@ -122,8 +127,13 @@ class PerceptionPipeline:
 
         # Debug: centroid of the plane inliers. If the cloud is correctly
         # placed this should sit near the known table centre (x~1.0, y~0.0).
+        # Also derive the full table BOX (XY footprint from the inliers' spread,
+        # top-Z from the plane) for the perceived-world snapshot / CBF.
         if inlier_mask is not None and inlier_mask.any():
-            res.plane_centroid = work_pts[inlier_mask].mean(axis=0)
+            inliers = work_pts[inlier_mask]
+            res.plane_centroid = inliers.mean(axis=0)
+            res.table_center, res.table_size = table_box_from_inliers(
+                inliers, plane.height)
 
         # 3. Above-plane slab = candidate objects.
         sd = plane.signed_distance(work_pts)

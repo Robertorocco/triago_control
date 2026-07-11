@@ -79,6 +79,12 @@ class HeadPlotterNode(Node):
         self.conf_red = deque(maxlen=self.MAXLEN)
         self.conf_blue = deque(maxlen=self.MAXLEN)
         self.map_size = deque(maxlen=self.MAXLEN)
+        # Perceived-world CONVERGENCE progress (world_convergence.py) -- distinct
+        # from the raw per-object confidence above: "how close is the fused
+        # estimate to being judged STABLE enough to freeze into the CBF world".
+        self.stable_frames = deque(maxlen=self.MAXLEN)
+        self.converged = deque(maxlen=self.MAXLEN)
+        self._converged_t = None   # plot-time [s] of the first convergence
 
         # --- ROS subscriptions -----------------------------------------
         # MarkerArray -> detected cylinder poses; telemetry -> scalar quality.
@@ -90,7 +96,7 @@ class HeadPlotterNode(Node):
 
     def _telemetry_cb(self, msg: Float64MultiArray):
         # [n_raw, n_crop, plane_z, look_err_deg, slack, proc_ms,
-        #  red_conf, blue_conf, map_size]
+        #  red_conf, blue_conf, map_size, stable_frames, converged]
         if len(msg.data) < 6:
             return
         t = time.time() - self.start_time
@@ -103,6 +109,12 @@ class HeadPlotterNode(Node):
                 self.conf_red.append((t, msg.data[6] * 100.0))
                 self.conf_blue.append((t, msg.data[7] * 100.0))
                 self.map_size.append((t, msg.data[8]))
+            if len(msg.data) >= 11:
+                self.stable_frames.append((t, msg.data[9]))
+                is_converged = msg.data[10] > 0.5
+                self.converged.append((t, msg.data[10]))
+                if is_converged and self._converged_t is None:
+                    self._converged_t = t
 
     def _markers_cb(self, msg: MarkerArray):
         t = time.time() - self.start_time
@@ -237,14 +249,20 @@ def main():
     ax_plane.legend(loc="upper right", fontsize=8)
 
     # Confidence over time (estimation quality = arc coverage x fit quality)
-    ax_conf.set_title("Estimation Confidence (arc coverage x fit quality)")
-    ax_conf.set_ylabel("Confidence [%]")
+    # + convergence progress (world_convergence.py's "confident enough to freeze"
+    # stability countdown -- the ROBOT'S OWN belief that the world is ready).
+    ax_conf.set_title("Estimation Confidence & Convergence Toward Freeze")
+    ax_conf.set_ylabel("Confidence / Stability [%]")
     ax_conf.set_xlabel("Time [s]")
     ax_conf.grid(True, alpha=0.3)
     ax_conf.set_ylim(0, 105)
-    line_conf_r, = ax_conf.plot([], [], "r-", linewidth=1.5, label="Red")
-    line_conf_b, = ax_conf.plot([], [], "b-", linewidth=1.5, label="Blue")
-    ax_conf.legend(loc="upper right", fontsize=8)
+    line_conf_r, = ax_conf.plot([], [], "r-", linewidth=1.5, label="Red conf")
+    line_conf_b, = ax_conf.plot([], [], "b-", linewidth=1.5, label="Blue conf")
+    line_stability, = ax_conf.plot([], [], "k--", linewidth=1.2, label="Stability→freeze")
+    ax_conf.legend(loc="upper right", fontsize=7)
+    status_text = ax_conf.text(
+        0.02, 0.95, "", transform=ax_conf.transAxes, fontsize=8, va="top",
+        bbox=dict(boxstyle="round", fc="lightyellow", alpha=0.85))
 
     # Fused voxel-map size (grows as accumulation builds the model)
     ax_map.set_title("Fused Map Size (accumulated voxels)")
@@ -264,6 +282,7 @@ def main():
     plt.show(block=False)
 
     # --- Animation loop ------------------------------------------------
+    converged_line = None   # axvline drawn once, the first time we see convergence
     try:
         while rclpy.ok():
             with node.lock:
@@ -301,6 +320,8 @@ def main():
                 conf_r_list = list(node.conf_red)
                 conf_b_list = list(node.conf_blue)
                 map_list = list(node.map_size)
+                stable_list = list(node.stable_frames)
+                converged_t = node._converged_t
 
             # Update line data
             line_err_r.set_data(rt, r_err)
@@ -318,6 +339,25 @@ def main():
                 line_conf_b.set_data([p[0] for p in conf_b_list], [p[1] for p in conf_b_list])
             if map_list:
                 line_map.set_data([p[0] for p in map_list], [p[1] for p in map_list])
+
+            # Convergence progress + status box (robot's own "is the world ready
+            # to freeze" belief -- see world_convergence.py).
+            if stable_list:
+                st_t = [p[0] for p in stable_list]
+                st_pct = [min(100.0, 100.0 * p[1] / cfg.WORLD_STABLE_FRAMES) for p in stable_list]
+                line_stability.set_data(st_t, st_pct)
+                cur_stable = stable_list[-1][1]
+                if converged_t is not None:
+                    status_text.set_text("WORLD CONVERGED\n(snapshot frozen)")
+                    status_text.get_bbox_patch().set_facecolor("lightgreen")
+                else:
+                    status_text.set_text(
+                        f"Stability: {int(cur_stable)}/{cfg.WORLD_STABLE_FRAMES} frames")
+                    status_text.get_bbox_patch().set_facecolor("lightyellow")
+            if converged_t is not None and converged_line is None:
+                converged_line = ax_conf.axvline(
+                    converged_t, color="green", linestyle=":", linewidth=2)
+                ax_conf.text(converged_t, 101, " frozen", color="green", fontsize=8)
 
             # Auto-scale time axes
             window_lo = max(0, current_t - node.WINDOW)

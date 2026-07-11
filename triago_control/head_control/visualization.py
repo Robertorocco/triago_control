@@ -171,3 +171,63 @@ class PerceptionVisualizer:
         if color_name == "blue":
             return ColorRGBA(r=0.1, g=0.3, b=1.0, a=0.9)
         return ColorRGBA(r=0.6, g=0.6, b=0.6, a=0.9)    # unknown -> grey
+
+
+# ---------------------------------------------------------------------- #
+# Perceived-world SNAPSHOT markers  (camera estimate -> QP-CLF-CBF)       #
+# ---------------------------------------------------------------------- #
+def build_world_snapshot_markers(world, frame_id, stamp, radius_inflation=0.0):
+    """MarkerArray describing a CONVERGED perceived world for the CBF snapshot.
+
+    This is the self-describing, latched hand-off published on
+    cfg.PERCEIVED_WORLD_TOPIC once WorldConvergenceMonitor fires, and decoded by
+    the QP side (qp_controller/perceived_world_builder.py) into ObstacleSpecs:
+        * one CUBE  ns="table"   — the FULL table box (centre + full extents),
+        * one CYLINDER ns="objects" per object, radius = perceived + radius_
+          inflation (a conservative collision volume; 0 = raw), colour by class
+          (the decoder classifies red vs blue by the r/b channel, exactly like
+          head_plotter).
+
+    Kept SEPARATE from PerceptionVisualizer.build (the live per-tick debug markers
+    on /head_perception/markers) so the snapshot contract is unambiguous, stable,
+    and independently latched.
+    """
+    arr = MarkerArray()
+
+    tbl = Marker()
+    tbl.header.frame_id = frame_id
+    tbl.header.stamp = stamp
+    tbl.ns = "table"
+    tbl.id = 0
+    tbl.type = Marker.CUBE
+    tbl.action = Marker.ADD
+    tbl.pose.position.x = float(world.table_center[0])
+    tbl.pose.position.y = float(world.table_center[1])
+    tbl.pose.position.z = float(world.table_center[2])
+    tbl.pose.orientation.w = 1.0
+    tbl.scale.x = float(world.table_size[0])
+    tbl.scale.y = float(world.table_size[1])
+    tbl.scale.z = float(world.table_size[2])
+    tbl.color = ColorRGBA(r=0.6, g=0.4, b=0.2, a=0.4)
+    arr.markers.append(tbl)
+
+    for i, obj in enumerate(world.cylinders):
+        cyl = Marker()
+        cyl.header.frame_id = frame_id
+        cyl.header.stamp = stamp
+        cyl.ns = "objects"
+        cyl.id = 10 + i
+        cyl.type = Marker.CYLINDER
+        cyl.action = Marker.ADD
+        cyl.pose.position.x = float(obj.center[0])
+        cyl.pose.position.y = float(obj.center[1])
+        cyl.pose.position.z = float(obj.center[2])
+        cyl.pose.orientation.w = 1.0
+        r = float(obj.radius) + float(radius_inflation)
+        cyl.scale.x = 2.0 * r
+        cyl.scale.y = 2.0 * r
+        cyl.scale.z = float(obj.height)
+        cyl.color = PerceptionVisualizer._class_color(obj.color_name)
+        arr.markers.append(cyl)
+
+    return arr

@@ -104,3 +104,49 @@ class TableSegmenter:
         # Recompute the inlier mask with the refined plane.
         final_mask = np.abs(plane.signed_distance(points)) < cfg.PLANE_DIST_THRESH
         return plane, final_mask
+
+
+def table_box_from_inliers(inlier_pts, plane_height,
+                           xy_margin=None, bottom_z=None, pct=None):
+    """Derive a full table BOX (centre, size) from the RANSAC plane inliers.
+
+    This is what makes the perceived-world table fully camera-derived (rather than
+    reusing a prior XY footprint): the table's XY extent comes from the horizontal
+    spread of the plane inliers, its top-Z from the fitted plane, and its bottom
+    from a ground reference. Used to build the /perceived_world/snapshot the QP-
+    CLF-CBF stack turns into a collision box (see world_convergence.py).
+
+    A PERCENTILE trim (not raw min/max) rejects RGB-D flying-pixel outliers at the
+    table edges the same way object_detector's rim extraction does — a couple of
+    stray points must not blow up the footprint. Occlusion can only make the
+    perceived footprint SMALLER than the true table; PERCEIVED_TABLE_XY_MARGIN
+    lets a caller inflate it outward for a conservative collision volume.
+
+    Parameters
+    ----------
+    inlier_pts   : (K, 3) plane-inlier points in base_footprint.
+    plane_height : float, the fitted plane's Z (table top surface).
+
+    Returns
+    -------
+    (centre (3,), size (3,))  box centre + full extents, or (None, None) if the
+    inlier set is too small to bound.
+    """
+    if inlier_pts is None or len(inlier_pts) < 3:
+        return None, None
+    xy_margin = cfg.PERCEIVED_TABLE_XY_MARGIN if xy_margin is None else xy_margin
+    bottom_z = cfg.PERCEIVED_TABLE_BOTTOM_Z if bottom_z is None else bottom_z
+    pct = cfg.PERCEIVED_TABLE_BBOX_PCT if pct is None else pct
+
+    x_lo, x_hi = np.percentile(inlier_pts[:, 0], [pct, 100.0 - pct])
+    y_lo, y_hi = np.percentile(inlier_pts[:, 1], [pct, 100.0 - pct])
+    cx = 0.5 * (x_lo + x_hi)
+    cy = 0.5 * (y_lo + y_hi)
+    sx = float((x_hi - x_lo) + 2.0 * xy_margin)
+    sy = float((y_hi - y_lo) + 2.0 * xy_margin)
+
+    z_top = float(plane_height)
+    sz = max(z_top - float(bottom_z), 1e-3)      # solid column from ground to top
+    cz = 0.5 * (z_top + float(bottom_z))
+    return (np.array([cx, cy, cz], dtype=float),
+            np.array([sx, sy, sz], dtype=float))

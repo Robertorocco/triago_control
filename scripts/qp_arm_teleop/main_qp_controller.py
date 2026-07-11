@@ -35,6 +35,7 @@ import numpy as np
 import time
 import tempfile
 import os
+from collections import namedtuple
 
 import triago_control.qp_controller.config as cfg
 from triago_control.qp_controller.robot_kinematics import RobotKinematics
@@ -44,6 +45,22 @@ from triago_control.qp_controller.qp_formulator import QPFormulator
 from triago_control.qp_controller.visualization_engine import VisualizationEngine
 from triago_control.qp_controller.reference_governor import ReferenceGovernor
 from triago_control.qp_controller.world_loader import load_world
+
+
+# One control tick's collision-barrier result, produced by _compute_cbf() and
+# consumed by the QP + telemetry + RViz overlays downstream. The base
+# (sim/synchronous) controller builds it inline every tick with fresh=True; the
+# real-hardware subclass (main_qp_controller_real.py) fills it from an async
+# worker and sets fresh=False whenever the worker result is stale -- which is
+# what trips the staleness watchdog freeze in _gate_command.
+#   J_soft_r/l, h_soft_r/l, d_safe_r/l, abs_min_distance : the CBF the QP consumes
+#   witness_distance, witness_points                     : RViz collision-line overlay
+#   top_active_pairs                                     : /qp_debug/top_pairs debug string
+#   fresh                                                : False => watchdog zeroes the command
+CbfResult = namedtuple('CbfResult', [
+    'J_soft_r', 'h_soft_r', 'J_soft_l', 'h_soft_l',
+    'd_safe_r', 'd_safe_l', 'abs_min_distance',
+    'witness_distance', 'witness_points', 'top_active_pairs', 'fresh'])
 
 
 class SafetyQPController(Node):
@@ -66,8 +83,7 @@ class SafetyQPController(Node):
         #   ros2 run triago_control main_qp_controller.py --ros-args \
         #        -p world_name:=no_obstacle
         self.declare_parameter('world_name', 'no_obstacle')
-        world_name = self.get_parameter('world_name').get_parameter_value().string_value
-        self.world_scene = load_world(world_name)
+        self.world_scene = self._build_world_scene()
         self.get_logger().info(
             f"\033[96m[World] Loaded scene '{self.world_scene.world_name}' "
             f"({len(self.world_scene.static_obstacles)} static obstacles; "
@@ -262,6 +278,23 @@ class SafetyQPController(Node):
         # halved on real hardware -- see the publish_every_n comment above).
         self.timer_obs = self.create_timer(
             1.0 if self.REAL_HARDWARE else 0.5, lambda: self.viz.publish_obstacle_marker(self.hri))
+
+    # =====================================================================
+    # WORLD-SCENE SOURCE (overridable seam)
+    # =====================================================================
+    def _build_world_scene(self):
+        """Return the WorldScene the CBF collision model + viz are built from.
+
+        This is the SINGLE place "where the obstacle world comes from" is decided;
+        everything downstream (build_collision_model, VisualizationEngine, Meshcat,
+        RViz markers) consumes self.world_scene generically. The base reads the
+        YAML world named by the `world_name` ROS param (behavior unchanged). A
+        subclass overrides ONLY this method to source the world elsewhere — e.g.
+        main_qp_controller_perceived.py builds it from the head camera's latched
+        perceived-world snapshot instead of a YAML file.
+        """
+        world_name = self.get_parameter('world_name').get_parameter_value().string_value
+        return load_world(world_name)
 
     # =====================================================================
     # CONFIGURABLE FREQUENCY GOVERNOR
@@ -564,6 +597,79 @@ class SafetyQPController(Node):
         return e_r, v_r, e_l, v_l
 
     # =====================================================================
+    # OVERRIDABLE SEAMS (async-execution hooks)
+    # =====================================================================
+    # These four methods are the ONLY points where the real-hardware subclass
+    # (main_qp_controller_real.py) diverges from this synchronous controller.
+    # Each base implementation here is exactly the inline code the tick used to
+    # run, so the simulation path stays behavior-identical; the subclass
+    # overrides them to move the CBF + overlays onto worker threads with a
+    # staleness watchdog (see that file).
+    def _process_deferred_topology(self):
+        # Apply any grasp attach/detach queued by shared autonomy (deferred to
+        # here because it needs fresh oMi/oMg). This STRUCTURALLY mutates the
+        # shared collision model, so the real subclass overrides it to hold
+        # col.geom_lock around the mutation (serialized vs. the CBF worker).
+        if self.hri.pending_attach is not None:
+            arm_side, color = self.hri.pending_attach
+            self.hri.pending_attach = None
+            try:
+                self.hri.attach_object_visually(arm_side, color)
+            except Exception as e:
+                self.get_logger().warn(f"[TOPOLOGY] Attach failed: {e}")
+        if self.hri.pending_detach is not None:
+            arm_side, color, world_pos = self.hri.pending_detach
+            self.hri.pending_detach = None
+            try:
+                self.hri.detach_object_visually(arm_side, color, world_pos)
+            except Exception as e:
+                self.get_logger().warn(f"[TOPOLOGY] Detach failed: {e}")
+
+    def _compute_cbf(self):
+        # Synchronous SoftMin CBF for THIS tick, returned as a CbfResult (always
+        # fresh here). The real subclass overrides this to return the latest
+        # async worker result and drive the staleness watchdog.
+        (J_soft_r, h_soft_r, J_soft_l, h_soft_l,
+         d_safe_dynamic_r, d_safe_dynamic_l, abs_min_distance) = \
+            self.col.compute_softmin_jacobian(
+                self.kin.current_v, self.kin.idx_right, self.kin.idx_left,
+                self.hri.grasp_margin_targets, self.hri.attached_objects,
+                self.hri.attached_adjacency, self.hri.ignored_targets, self.publish_counter,
+                attach_ramp_shifts=self.hri.get_attach_ramp_shifts(),
+                attached_object_arm=self.hri.attached_object_arm)
+        return CbfResult(
+            J_soft_r, h_soft_r, J_soft_l, h_soft_l,
+            d_safe_dynamic_r, d_safe_dynamic_l, abs_min_distance,
+            self.col.witness_min_distance, self.col.witness_min_points,
+            getattr(self.col, 'top_active_pairs', []), True)
+
+    def _gate_command(self, q_dot_safe):
+        # Final gate on the joint-velocity command actually sent to hardware.
+        # Identity here; the real subclass zeroes it (freeze) while the async CBF
+        # result is stale, so a stale barrier can never drive the arms.
+        return q_dot_safe
+
+    def _publish_visual_overlays(self, cbf, q_dot_safe):
+        # RViz debug overlays: safety-margin scalar, collision-witness line and
+        # teleop tethers. Runs inline here (already downsampled by the caller);
+        # the real subclass dispatches it to a viz worker thread. Reads the
+        # witness/margin from `cbf`, not self.col, so it is thread-snapshot-safe.
+        if not cfg.DISABLE_CBF:
+            # Legacy single scalar: the WORSE (smaller) margin of the two arms.
+            # Each arm uses its OWN dynamic margin (see the coupling audit in
+            # collision_manager.compute_softmin_jacobian).
+            margin_r = cbf.h_soft_r - cbf.d_safe_r
+            margin_l = cbf.h_soft_l - cbf.d_safe_l
+            self.pub_debug_h.publish(Float64(data=float(min(margin_r, margin_l))))
+        self.viz.publish_debug(
+            self.kin.model, self.kin.data,
+            (cbf.witness_distance, cbf.witness_points),
+            self.kin.current_q,
+            q_dot_safe, None, None, self.kin.ee_id_right, self.kin.ee_id_left,
+            cfg.JOINT_LIMIT_BUFFER_BASE)
+        self.viz.publish_teleop_tether()
+
+    # =====================================================================
     # MAIN CONTROL LOOP
     # =====================================================================
     def solve_and_publish(self):
@@ -603,23 +709,8 @@ class SafetyQPController(Node):
             self._freeze_arm('left')
             self._refs_initialized = True
 
-        # --- Deferred attachment (needs fresh oMi / oMg) ---
-        if self.hri.pending_attach is not None:
-            arm_side, color = self.hri.pending_attach
-            self.hri.pending_attach = None
-            try:
-                self.hri.attach_object_visually(arm_side, color)
-            except Exception as e:
-                self.get_logger().warn(f"[TOPOLOGY] Attach failed: {e}")
-
-        # --- Deferred detachment (needs fresh oMi / oMg to freeze release pose) ---
-        if self.hri.pending_detach is not None:
-            arm_side, color, world_pos = self.hri.pending_detach
-            self.hri.pending_detach = None
-            try:
-                self.hri.detach_object_visually(arm_side, color, world_pos)
-            except Exception as e:
-                self.get_logger().warn(f"[TOPOLOGY] Detach failed: {e}")
+        # --- Deferred attach/detach (needs fresh oMi / oMg) ---
+        self._process_deferred_topology()
 
         # --- Grasp contact distance telemetry ---
         self.hri.publish_contact_distances()
@@ -628,14 +719,15 @@ class SafetyQPController(Node):
         qdot_err_14, xdot_err_6 = self.kin.compute_tracking_errors(self.last_qdot_cmd_14)
 
         # --- 1. SoftMin CBF aggregation (TWO independent per-arm barriers) ---
+        # _compute_cbf() is the async seam: synchronous here, worker-fed on real
+        # hardware. It returns a CbfResult carrying the barrier the QP consumes
+        # plus the witness/top-pairs telemetry captured in that same pass. Names
+        # are unpacked back into locals so the governor/QP block below is unchanged.
         _cbf_start = time.perf_counter()
-        J_soft_r, h_soft_r, J_soft_l, h_soft_l, d_safe_dynamic_r, d_safe_dynamic_l, abs_min_distance = \
-            self.col.compute_softmin_jacobian(
-                self.kin.current_v, self.kin.idx_right, self.kin.idx_left,
-                self.hri.grasp_margin_targets, self.hri.attached_objects,
-                self.hri.attached_adjacency, self.hri.ignored_targets, self.publish_counter,
-                attach_ramp_shifts=self.hri.get_attach_ramp_shifts(),
-                attached_object_arm=self.hri.attached_object_arm)
+        cbf = self._compute_cbf()
+        J_soft_r, h_soft_r, J_soft_l, h_soft_l = cbf.J_soft_r, cbf.h_soft_r, cbf.J_soft_l, cbf.h_soft_l
+        d_safe_dynamic_r, d_safe_dynamic_l = cbf.d_safe_r, cbf.d_safe_l
+        abs_min_distance = cbf.abs_min_distance
         _cbf_ms = (time.perf_counter() - _cbf_start) * 1000.0
 
         # --- 2. Task errors ---
@@ -714,7 +806,7 @@ class SafetyQPController(Node):
             self._publish_telemetry(q_dot_safe, slack_r, slack_l, b_col_pair, lambda_joints_total,
                                     J_soft_r, h_soft_r, J_soft_l, h_soft_l,
                                     d_safe_dynamic_r, d_safe_dynamic_l, abs_min_distance,
-                                    qdot_err_14, xdot_err_6)
+                                    qdot_err_14, xdot_err_6, cbf.top_active_pairs)
             # Generic measured joint velocity (14 floats: R7+L7), same
             # environment-dependent signal the QP itself consumes -- see the
             # publisher's own comment above.
@@ -730,14 +822,19 @@ class SafetyQPController(Node):
         # inactive arm, which let the two arms silently inter-penetrate. The
         # inactive arm is instead held by its frozen-pose CLF (pinned MAX slack +
         # doubled damping), so its commanded motion is meaningful and safe.
+        #
+        # Final safety gate: identity in sim, but on real hardware it returns a
+        # zeroed vector (freeze BOTH arms) while the async CBF result is stale,
+        # so a stale barrier can never drive the arms (staleness watchdog).
+        q_dot_cmd = self._gate_command(q_dot_safe)
         cmd_data_r = [0.0] * 7
         cmd_data_l = [0.0] * 7
         if self.active_controller_mode:
             if self.kin.idx_right:
-                cmd_data_r = q_dot_safe[self.kin.idx_right].tolist()
+                cmd_data_r = q_dot_cmd[self.kin.idx_right].tolist()
                 self.pub_right.publish(Float64MultiArray(data=cmd_data_r))
             if self.kin.idx_left:
-                cmd_data_l = q_dot_safe[self.kin.idx_left].tolist()
+                cmd_data_l = q_dot_cmd[self.kin.idx_left].tolist()
                 self.pub_left.publish(Float64MultiArray(data=cmd_data_l))
 
         # Save the exact command sent to hardware for next tick's tracking-error math
@@ -778,25 +875,15 @@ class SafetyQPController(Node):
                 dt_sim = current_time - self.last_sim_time
             if dt_sim > 0.1:
                 dt_sim = 0.001
-            self.kin.integrate_simulated_state(q_dot_safe, dt_sim)
+            # Use the GATED command so a staleness freeze halts the twin too (else
+            # the internal state would drift while the hardware is held). Identity
+            # to q_dot_safe in sim (the gate is a passthrough there).
+            self.kin.integrate_simulated_state(q_dot_cmd, dt_sim)
             self.last_sim_time = current_time
 
         # --- 7. External debug visualizer (optional tethers / overlays) ---
         if self.publish_counter % self.publish_every_n == 0:
-            if not cfg.DISABLE_CBF:
-                # Legacy single scalar: the WORSE (smaller) margin of the two arms.
-                # Each arm now uses its OWN dynamic margin (see the coupling audit
-                # in collision_manager.compute_softmin_jacobian).
-                margin_r = h_soft_r - d_safe_dynamic_r
-                margin_l = h_soft_l - d_safe_dynamic_l
-                self.pub_debug_h.publish(Float64(data=float(min(margin_r, margin_l))))
-            self.viz.publish_debug(
-                self.kin.model, self.kin.data,
-                (self.col.witness_min_distance, self.col.witness_min_points),
-                self.kin.current_q,
-                q_dot_safe, None, None, self.kin.ee_id_right, self.kin.ee_id_left,
-                cfg.JOINT_LIMIT_BUFFER_BASE)
-            self.viz.publish_teleop_tether()
+            self._publish_visual_overlays(cbf, q_dot_safe)
 
         # Per-tick timing breakdown (see pub_loop_timing above): localizes the
         # tick_dt cost into its constituent phases, so a real-hardware compute
@@ -813,7 +900,7 @@ class SafetyQPController(Node):
     def _publish_telemetry(self, q_dot_safe, slack_r, slack_l, b_col_pair, lambda_joints_total,
                            J_soft_r, h_soft_r, J_soft_l, h_soft_l,
                            d_safe_dynamic_r, d_safe_dynamic_l, abs_min_distance,
-                           qdot_err_14, xdot_err_6):
+                           qdot_err_14, xdot_err_6, top_active_pairs):
         # Publish the full dashboard telemetry set (downsampled, off the hot path).
         # Slacks + shadow prices
         self.pub_slacks.publish(Float64MultiArray(data=[float(abs(slack_r)), float(abs(slack_l))]))
@@ -883,8 +970,10 @@ class SafetyQPController(Node):
         self.pub_task_authority.publish(
             Float64MultiArray(data=[float(e) for e in self.qp.task_energies]))
 
-        # Top-3 actually-enabled collision pairs (for the debug plot)
-        top = getattr(self.col, 'top_active_pairs', [])
+        # Top-3 actually-enabled collision pairs (for the debug plot). Passed in
+        # from the CbfResult (captured in the same CBF pass), not read off
+        # self.col, so the real-hardware worker thread never shares it live.
+        top = top_active_pairs
         pairs_str = ";".join(f"{n1}|{n2}|{d:.4f}" for (n1, n2, d) in top)
         self.pub_top_pairs.publish(String(data=pairs_str))
 

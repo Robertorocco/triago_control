@@ -42,8 +42,9 @@ import rclpy
 from rclpy.node import Node
 from rclpy.time import Time
 from rclpy.duration import Duration
+from rclpy.qos import QoSProfile, DurabilityPolicy, ReliabilityPolicy
 from sensor_msgs.msg import JointState
-from std_msgs.msg import Float64MultiArray
+from std_msgs.msg import Float64MultiArray, Empty
 from sensor_msgs.msg import PointCloud2
 from visualization_msgs.msg import MarkerArray
 from scipy.spatial.transform import Rotation as Rot
@@ -55,8 +56,10 @@ from triago_control.head_control.camera_interface import CameraInterface
 from triago_control.head_control.head_kinematics import HeadKinematics
 from triago_control.head_control.look_at_controller import LookAtController
 from triago_control.head_control.perception_pipeline import PerceptionPipeline
+from triago_control.head_control.world_convergence import WorldConvergenceMonitor
 from triago_control.head_control.visualization import (
     PerceptionVisualizer,
+    build_world_snapshot_markers,
     make_pointcloud2,
 )
 
@@ -83,6 +86,21 @@ class HeadPerceptionNode(Node):
         # slack, proc_ms]. Lets the plotter show cloud size / quality directly.
         self.pub_telemetry = self.create_publisher(
             Float64MultiArray, "/head_perception/telemetry", 10
+        )
+        # --- Perceived-world snapshot (camera estimate -> QP-CLF-CBF) ---------
+        # LATCHED (TRANSIENT_LOCAL): published ONCE the estimate converges, so a
+        # perceived-world QP controller started AFTER convergence still receives
+        # the last snapshot on subscribe. See world_convergence.py / config §16.
+        self.world_monitor = WorldConvergenceMonitor()
+        latched_qos = QoSProfile(depth=1)
+        latched_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        latched_qos.reliability = ReliabilityPolicy.RELIABLE
+        self.pub_world = self.create_publisher(
+            MarkerArray, cfg.PERCEIVED_WORLD_TOPIC, latched_qos
+        )
+        # Re-arm: an empty message re-observes and re-publishes a fresh snapshot.
+        self.create_subscription(
+            Empty, cfg.PERCEIVED_WORLD_RESCAN_TOPIC, self._rescan_cb, 1
         )
 
         # --- TF2 (correct camera pose at the depth frame's timestamp) --
@@ -240,6 +258,14 @@ class HeadPerceptionNode(Node):
         )
         self.latest_result = result
 
+        # --- Perceived-world convergence: once the fused estimate is confident
+        # AND stable over several settled frames, freeze it and publish the
+        # latched snapshot the QP-CLF-CBF stack builds its collision world from.
+        # Only settled frames advance the stability check (allow_integrate gate).
+        snapshot = self.world_monitor.update(result, allow_update=allow_integrate)
+        if snapshot is not None:
+            self._publish_world_snapshot(snapshot, stamp)
+
         # --- Publish PointCloud2 (cropped coloured cloud) --------------
         if result.cropped_points is not None and len(result.cropped_points) > 0:
             pc = make_pointcloud2(
@@ -258,11 +284,18 @@ class HeadPerceptionNode(Node):
         # Per-colour confidence (so the plotter can show estimation quality).
         red_conf = next((o.confidence for o in result.objects if o.color_name == "red"), 0.0)
         blue_conf = next((o.confidence for o in result.objects if o.color_name == "blue"), 0.0)
+        # [9]/[10]: perceived-world CONVERGENCE progress (world_convergence.py) --
+        # distinct from the raw per-object confidence above: this is "how close is
+        # the fused estimate to being judged stable enough to freeze into the CBF
+        # world", not just the soft arc-coverage x fit-quality score. Lets
+        # head_plotter show the countdown toward /perceived_world/snapshot firing.
         tel.data = [
             float(result.n_raw), float(n_crop), float(plane_z),
             float(self.controller.last_angle_deg), float(self.controller.last_slack_norm),
             float(result.proc_ms), float(red_conf), float(blue_conf),
             float(result.map_size),
+            float(self.world_monitor.stable_frames),
+            1.0 if self.world_monitor.converged else 0.0,
         ]
         self.pub_telemetry.publish(tel)
 
@@ -289,6 +322,74 @@ class HeadPerceptionNode(Node):
                 f"TF lookup base<-{frame_id} failed (is robot_state_publisher up?).")
             self._tf_warned = True
         return None, None
+
+    # ================================================================== #
+    # Perceived-world snapshot (camera estimate -> QP-CLF-CBF)            #
+    # ================================================================== #
+    def _rescan_cb(self, _msg):
+        """Re-arm the convergence monitor so it re-observes and re-publishes."""
+        self.world_monitor.reset()
+        self.get_logger().info(
+            "[PerceivedWorld] Re-arm requested — re-observing; will re-publish "
+            "the snapshot once the estimate re-converges.")
+
+    def _publish_world_snapshot(self, snapshot, stamp):
+        """Build + latch-publish the converged perceived world for the QP stack."""
+        markers = build_world_snapshot_markers(
+            snapshot, cfg.BASE_FRAME, stamp,
+            radius_inflation=cfg.CYL_RADIUS_INFLATION,
+        )
+        self.pub_world.publish(markers)
+        summary = ", ".join(
+            f"{c.color_name} r={c.radius * 100:.1f}cm h={c.height * 100:.1f}cm "
+            f"@({c.center[0]:.2f},{c.center[1]:.2f},{c.center[2]:.2f}) "
+            f"conf={c.confidence * 100:.0f}%"
+            for c in snapshot.cylinders
+        ) or "none"
+        self.get_logger().info(
+            "\n============================================================\n"
+            " PERCEIVED WORLD CONVERGED — latched snapshot published on\n"
+            f"   {cfg.PERCEIVED_WORLD_TOPIC}\n"
+            f"   table  centre={np.round(snapshot.table_center, 3)} "
+            f"size={np.round(snapshot.table_size, 3)}\n"
+            f"   objects: {summary}\n"
+            " The perceived-world QP controller can now build its CBF from this.\n"
+            "------------------------------------------------------------\n"
+            " [DIAGNOSTIC, sim-only -- compares the FROZEN snapshot against the\n"
+            "  known Gazebo GT (config.py §14); the estimator itself never reads\n"
+            "  GT_*, this is purely 'how accurate was the world we just handed\n"
+            "  to the safety controller']\n"
+            f"{self._gt_diagnostic_summary(snapshot)}\n"
+            "============================================================")
+
+    def _gt_diagnostic_summary(self, snapshot) -> str:
+        """DIAGNOSTIC ONLY (sim ground truth, config.py §14): how close is the
+        FROZEN snapshot -- the exact numbers that became the CBF -- to the known
+        answer? Never fed back into estimation, convergence, or the CBF itself."""
+        gt_by_color = {
+            "red": (cfg.GT_RED_CENTER, cfg.GT_RED_RADIUS, cfg.GT_RED_HEIGHT),
+            "blue": (cfg.GT_BLUE_CENTER, cfg.GT_BLUE_RADIUS, cfg.GT_BLUE_HEIGHT),
+        }
+        lines = []
+        for c in snapshot.cylinders:
+            gt = gt_by_color.get(c.color_name)
+            if gt is None:
+                continue
+            gt_center, gt_radius, gt_height = gt
+            pos_err_cm = float(np.linalg.norm(c.center - gt_center)) * 100.0
+            r_err_cm = (c.radius - gt_radius) * 100.0
+            h_err_cm = (c.height - gt_height) * 100.0
+            lines.append(
+                f"   {c.color_name:5s} cylinder: pos_err={pos_err_cm:5.2f} cm  "
+                f"radius_err={r_err_cm:+5.2f} cm  height_err={h_err_cm:+5.2f} cm")
+
+        tpos_err_cm = float(np.linalg.norm(snapshot.table_center - cfg.TABLE_CENTER_WORLD)) * 100.0
+        tsize_err_cm = (snapshot.table_size - cfg.TABLE_SIZE) * 100.0
+        lines.append(
+            f"   table          : pos_err={tpos_err_cm:5.2f} cm  "
+            f"size_err=[x{tsize_err_cm[0]:+.2f}, y{tsize_err_cm[1]:+.2f}, "
+            f"z{tsize_err_cm[2]:+.2f}] cm")
+        return "\n".join(lines)
 
     # ================================================================== #
     # Console report (low frequency — no per-tick spam)                   #

@@ -548,3 +548,46 @@ APRILTAG_SCENE = {
 # Consider a detection stale (drop its markers) if no fresh tag has been seen
 # for this long — so a lost fiducial doesn't leave a ghost pose on screen.
 APRILTAG_DETECTION_TIMEOUT_S = 1.0
+
+
+# =============================================================================
+# 16. PERCEIVED-WORLD SNAPSHOT  (camera estimate -> QP-CLF-CBF collision world)
+# =============================================================================
+# The QP-CLF-CBF safety stack (qp_controller/) normally builds its collision
+# world from a STATIC YAML (config/worlds/<name>.yaml). The camera-driven variant
+# main_qp_controller_perceived.py instead builds it from THIS perception node's
+# estimate: once the fused estimate is judged "confident" (stable + high-
+# confidence over several settled frames — see world_convergence.py), main_head
+# publishes ONE latched snapshot describing the table + cylinders, and the QP node
+# builds its collision model from it ONCE, statically (no per-tick CBF updates —
+# a deliberate design choice; a moving obstacle set would make the barrier
+# non-stationary). This section holds the convergence criterion + snapshot config.
+#
+# The "confident concept": rather than thresholding the raw per-object soft
+# confidence alone (arc_coverage x fit-quality, which climbs monotonically), we
+# require BOTH (a) every expected cylinder above WORLD_CONF_MIN AND (b) the fused
+# geometry to have STOPPED MOVING (per-tick drift below the tolerances below) for
+# WORLD_STABLE_FRAMES consecutive SETTLED frames. Stability is the honest "the
+# estimate has converged" signal; confidence alone can be high while the pose is
+# still drifting in early frames.
+PERCEIVED_WORLD_TOPIC = "/perceived_world/snapshot"   # latched MarkerArray, TRANSIENT_LOCAL
+PERCEIVED_WORLD_RESCAN_TOPIC = "/perceived_world/rescan"  # std_msgs/Empty -> re-arm + re-publish
+
+WORLD_EXPECTED_CYLINDERS = 2      # red + blue on the table
+WORLD_CONF_MIN = 0.85             # each cylinder's tracker confidence must reach this
+WORLD_STABLE_POS_TOL = 0.005      # [m] max per-settled-frame centre drift to count as "stable"
+WORLD_STABLE_DIM_TOL = 0.003      # [m] max per-settled-frame radius/height drift
+WORLD_STABLE_FRAMES = 15          # consecutive stable settled frames required (~3 s @ 5 Hz)
+
+# Table box (fully camera-derived, decision 3): XY footprint from the RANSAC plane
+# inliers, top-Z from the plane. The box spans from PERCEIVED_TABLE_BOTTOM_Z up to
+# the perceived top (conservative solid volume — the arm works above the table, so
+# blocking the full column below the top is the safe choice and needs no prior).
+PERCEIVED_TABLE_BBOX_PCT = 2.0    # percentile trim on inlier X/Y (rejects flying-pixel outliers)
+# The percentile trim above rejects OUTLIERS (which would over-size the box) but
+# also shaves ~PCT% of the true span off each edge on clean data — the UNSAFE
+# direction for a collision obstacle. A small outward margin offsets that and
+# keeps the perceived table conservatively sized (safe) by default; occlusion can
+# only ever make the raw footprint smaller, so a conservative bias is desirable.
+PERCEIVED_TABLE_XY_MARGIN = 0.02  # [m] outward inflation of the perceived footprint (per side)
+PERCEIVED_TABLE_BOTTOM_Z = 0.0    # [m] base-frame Z of the table box bottom (ground)
