@@ -239,7 +239,11 @@ K_V_SAFE = 0.1                 # Predictive velocity horizon (brake earlier at h
 # against, kept as an optional, cost-neutral margin refinement.
 ENABLE_INTER_ARM_CLOSING_MARGIN = False
 ALPHA_FILTER = 0.5            # EMA coefficient for hardware velocity filtering (~20ms window)
-DAMP = 10.0                    # Joint velocity regularization (Lambda) in the QP cost
+DAMP = 12.0                    # Joint velocity regularization (Lambda) in the QP cost
+                               # (2026-07-11 A/B: was 10.0, +20% -- simplest lever to test
+                               # against the CLF/POSTURE-SIDE ripple after the in-loop rate-
+                               # damping cost term was rejected, see .kiro/context.md §8.3.
+                               # Revert to 10.0 if it doesn't help -- no other change needed.)
 P_GAIN_LIMITS = 2.5            # Joint-limit CBF gamma (braking aggressiveness)
 JOINT_LIMIT_BUFFER_BASE = 0.15  # Base joint-limit braking buffer
 JOINT_LIMIT_K_V = 0.1          # Joint-limit velocity horizon (seconds to look ahead)
