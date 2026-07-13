@@ -42,8 +42,8 @@
 # =============================================================================
 
 # --- WHICH TEST TO RUN -------------------------------------------------------
-active_preset: "home"
-
+active_preset: "s_curve_right_infeasible_regression"
+#crossing_swap
 # --- GLOBAL BEHAVIOUR FLAGS --------------------------------------------------
 # Lambda-driven time scaling (dynamic_trajectory / DYNAMIC_TRAJECTORY flag).
 # When true: the trajectory virtual clock slows as the CBF shadow price grows.
@@ -66,7 +66,7 @@ task_dimension: 6.0
 ref_frame: "base_footprint"
 
 # --- TRAJECTORY SHAPE / TIMING ----------------------------------------------
-duration: 1.0        # [s] virtual time to complete the quintic motion (fast → instantaneous feel)
+duration: 15.0        # [s] virtual time to complete the quintic motion (fast → instantaneous feel)
 delay_start: 1.0     # [s] settle window used to sample the real start pose
 cube_size: 0.1       # [m] edge of the random perturbation cube (swap_perturbed)
 
@@ -82,6 +82,7 @@ cube_size: 0.1       # [m] edge of the random perturbation cube (swap_perturbed)
 #   mode        : absolute        -> use explicit right/left xyz + rpy
 #                 swap            -> right -> left start, left -> right start
 #                 swap_perturbed  -> swap + uniform noise within +/- cube_size/2
+#                 path            -> smooth multi-waypoint spline, see below
 #   right/left  : [x, y, z] absolute target position in base_footprint
 #   rpy_right/rpy_left : [roll, pitch, yaw] target orientation in base_footprint
 #                        If omitted, the sampled start orientation is held.
@@ -89,6 +90,17 @@ cube_size: 0.1       # [m] edge of the random perturbation cube (swap_perturbed)
 # For swap/swap_perturbed modes:
 #   rpy_right/rpy_left define the target orientation at the swapped position.
 #   Omitting them holds the start orientation (each arm keeps its own).
+#
+# For mode: path:
+#   waypoints_right/waypoints_left : list of [x, y, z] points (base_footprint)
+#     visited IN ORDER after the sampled start; the LAST point is the final
+#     target (used the same way `right`/`left` are in absolute mode -- also
+#     drives rpy_right/rpy_left / the inactive-arm hold). trajectory_generator
+#     threads a cubic spline through [sampled_start] + this list, arc-length
+#     parametrized so it still rides the same quintic timing profile as every
+#     other preset -- this is a shape change only, not a timing change. Only
+#     set the waypoint list for the ACTIVE arm(s); the field can simply be
+#     omitted for an inactive one (it holds its sampled start as usual).
 # =============================================================================
 presets:
 
@@ -216,4 +228,99 @@ presets:
     right: [1.0, -0.2, 0.75]
     left:  [0.6,  0.5, 0.8]
     rpy_right: [0.0, 1.5708, 0.0]       # top-grasp (approach axis pointing DOWN)
+    rpy_left:  [3.1416, 0.0, 0.0]       # left holds forward-down (inactive)
+
+  # ==========================================================================
+  # SINGLE-ARM 'S' PATH -- encircles both graspable cylinders (mode: path)
+  # ==========================================================================
+  # world: no_obstacle. Cylinders at [0.80, -/+0.20, 0.775], r=0.02, top z=0.85;
+  # table top z=0.70. Waypoints: 9 samples of x = 0.8 + 0.18*sin(2*pi*u),
+  # y = -0.38 + 0.76*u, z = 0.93, u = 0..1 (right hand; left is the Y-mirror).
+  #
+  # CLEARANCE RULE: the CBF enforces h = distance - CAPSULE_RADIUS(0.06)
+  # - D_SAFE_BASE(0.015), NOT distance-to-obstacle-surface. Budget any hand-
+  # authored path against h (this shape: min h ~ +0.077 at the cylinders,
+  # +0.154 at the table). The first cut (z=0.775, +/-0.08m bulge) ignored
+  # that, was infeasible the whole sweep (h ~ -0.03), and caused heavy CBF
+  # saturation + qdot oscillation -- it is preserved below as
+  # s_curve_right_infeasible_regression. Full story: .kiro/context.md §2.
+  #
+  # HOW TO RUN: active_preset "home" first (samples a clean start), then one
+  # of these; bump the top-level `duration:` to ~10-15s (the path is long).
+  # --------------------------------------------------------------------------
+  s_curve_right:
+    category: collision_risk
+    description: "Right hand only. Starts right of the red cylinder (0.08m
+                  above cylinder-top height), arcs smoothly around it, crosses
+                  the gap at the midline, arcs around the blue cylinder the
+                  opposite way, ends left of it. Left hand holds its sampled
+                  start (inactive). Gripper reorients to top-grasp (pointing
+                  down) over the course of the sweep."
+    arms: right
+    mode: path
+    waypoints_right:
+      - [0.800, -0.380, 0.930]   # right of red (entry)
+      - [0.927, -0.285, 0.930]
+      - [0.980, -0.190, 0.930]   # around red (bulge away from robot)
+      - [0.927, -0.095, 0.930]
+      - [0.800,  0.000, 0.930]   # middle (gap between the two cylinders)
+      - [0.673,  0.095, 0.930]
+      - [0.620,  0.190, 0.930]   # around blue (bulge toward robot)
+      - [0.673,  0.285, 0.930]
+      - [0.800,  0.380, 0.930]   # left of blue (exit)
+    rpy_right: [0.0, 1.5708, 0.0]       # top-grasp, held for the whole sweep
+    rpy_left:  [3.1416, 0.0, 0.0]       # left holds forward-down (inactive)
+
+  s_curve_left:
+    category: collision_risk
+    description: "Left hand only -- the mirror image of s_curve_right (Y
+                  negated, same x/z). Starts left of the blue cylinder, arcs
+                  around it, crosses the gap at the midline, arcs around the
+                  red cylinder the opposite way, ends right of it. Right hand
+                  holds its sampled start (inactive)."
+    arms: left
+    mode: path
+    waypoints_left:
+      - [0.800,  0.380, 0.930]   # left of blue (entry)
+      - [0.927,  0.285, 0.930]
+      - [0.980,  0.190, 0.930]   # around blue (bulge away from robot)
+      - [0.927,  0.095, 0.930]
+      - [0.800,  0.000, 0.930]   # middle (gap between the two cylinders)
+      - [0.673, -0.095, 0.930]
+      - [0.620, -0.190, 0.930]   # around red (bulge toward robot)
+      - [0.673, -0.285, 0.930]
+      - [0.800, -0.380, 0.930]   # right of red (exit)
+    rpy_left:  [0.0, 1.5708, 0.0]       # top-grasp, held for the whole sweep
+    rpy_right: [3.1416, 0.0, 0.0]       # right holds forward-down (inactive)
+
+  # ==========================================================================
+  # REGRESSION STRESS TEST -- DO NOT "FIX" THESE NUMBERS.
+  # ==========================================================================
+  # Deliberately the first-cut infeasible s_curve_right waypoints (see the
+  # CLEARANCE RULE above): h ~ -0.03 at the cylinders, ~0 over the table --
+  # a reference the CBF must permanently refuse. Acceptance test for any
+  # controller-side smoothness/robustness change: run it and compare
+  # summary_metrics.json -- the controller must degrade gracefully (no
+  # oscillation) even against a reference that is infeasible by design.
+  # --------------------------------------------------------------------------
+  s_curve_right_infeasible_regression:
+    category: collision_risk
+    description: "REGRESSION TEST -- intentionally the pre-fix, geometrically
+                  infeasible s_curve_right waypoints (cylinder mid-height,
+                  +/-0.08m bulge). Verifies the controller degrades gracefully
+                  under a bad reference instead of oscillating. Do not adjust
+                  the waypoints to make this 'pass' -- that defeats the point."
+    arms: right
+    mode: path
+    waypoints_right:
+      - [0.800, -0.300, 0.775]   # right of red (entry, mid-Z)
+      - [0.857, -0.225, 0.775]
+      - [0.880, -0.150, 0.775]   # around red (bulge away from robot)
+      - [0.857, -0.075, 0.775]
+      - [0.800,  0.000, 0.775]   # middle (gap between the two cylinders)
+      - [0.743,  0.075, 0.775]
+      - [0.720,  0.150, 0.775]   # around blue (bulge toward robot)
+      - [0.743,  0.225, 0.775]
+      - [0.800,  0.300, 0.775]   # left of blue (exit)
+    rpy_right: [0.0, 1.5708, 0.0]       # top-grasp, held for the whole sweep
     rpy_left:  [3.1416, 0.0, 0.0]       # left holds forward-down (inactive)

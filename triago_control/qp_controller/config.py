@@ -29,6 +29,7 @@ GRASP_DEBUG = True              # Verbose grasp / CBF-bypass interaction tracing
 DISABLE_CBF = False             # Mathematically delete the collision barrier
 DYNAMIC_CBF = False             # Dynamically remove pairs for interaction
 DYNAMIC_SLACK_WEIGHT = True    # Increase slack weights in free space, drop near obstacles
+                               # (keep True: disabling costs tracking, gains nothing -- context.md)
 COMPARISON_CLF = True           # Use the normalized (unit-error) scalar CLF formulation
 DYNAMIC_GAMMA_CLF = False       # Vary CLF convergence rate with the safety margin
 SIMULATE_IDEAL_KINEMATICS = False  # True = pure math digital twin, False = real hardware
@@ -239,14 +240,16 @@ K_V_SAFE = 0.1                 # Predictive velocity horizon (brake earlier at h
 # against, kept as an optional, cost-neutral margin refinement.
 ENABLE_INTER_ARM_CLOSING_MARGIN = False
 ALPHA_FILTER = 0.5            # EMA coefficient for hardware velocity filtering (~20ms window)
-DAMP = 12.0                    # Joint velocity regularization (Lambda) in the QP cost
-                               # (2026-07-11 A/B: was 10.0, +20% -- simplest lever to test
-                               # against the CLF/POSTURE-SIDE ripple after the in-loop rate-
-                               # damping cost term was rejected, see .kiro/context.md §8.3.
-                               # Revert to 10.0 if it doesn't help -- no other change needed.)
+DAMP = 12.0                    # Joint velocity regularization (Lambda) in the QP cost.
+                               # 12 is tuned: 10 left a bimanual-convergence ripple, 15 bought
+                               # nothing more and cost tracking (see .kiro/context.md).
 P_GAIN_LIMITS = 2.5            # Joint-limit CBF gamma (braking aggressiveness)
 JOINT_LIMIT_BUFFER_BASE = 0.15  # Base joint-limit braking buffer
 JOINT_LIMIT_K_V = 0.1          # Joint-limit velocity horizon (seconds to look ahead)
+# NOTE: do NOT add a hard slew-rate box on q_dot here -- tried and removed
+# (2026-07-12): it cannot relieve the CBF row and it genuinely breaks QP
+# feasibility when the CBF row's required direction changes faster than the
+# box allows. Details in .kiro/context.md §2 (oscillation digest).
 
 # Posture / joint-limit avoidance: repulsive potential field, negative gradient of a
 # barrier that diverges at each joint's limits, evaluated on the normalized joint
@@ -259,22 +262,20 @@ POSTURE_GRASP_SCALE = 0.05     # posture weight scaled to this (x W_CENTER) duri
                                #   precision phases (grasp/align/approach/close/lift)
 POSTURE_SCALE_TAU = 0.2        # s -- first-order ramp time-constant for the posture-scale switch
 
-# Redundant-DOF RATE damping (2026-07-11): penalizes ||dq - dq_prev||^2, on top
-# of (not instead of) DAMP/W_CENTER above -- targets the CLF/POSTURE-SIDE
-# qdot_cmd ripple's TICK-TO-TICK change specifically (see .kiro/context.md).
-# REJECTED after a clean A/B at RATE_WEIGHT=50: it smooths the QP's own
-# commanded dq (E_rate share stays ~0 exactly because it succeeds -- the
-# residual it penalizes gets driven small), but that smoothing is LAG inside
-# a closed loop's forward path (QP -> low-level exec -> measured joint_states
-# -> next tick's error). The lag ate into the loop's phase margin: qdot_cmd
-# ripple dropped (10.8%/7.8%, was 17-20%) but qdot_measured ripple nearly
-# DOUBLED and the measured/commanded ratio flipped from ~0.4x to ~1.3-1.4x --
-# smoother command, noisier real robot. Kept in the code (harmless at False)
-# in case a POST-loop command filter is wanted later; do not re-enable this
-# in-loop version expecting a different weight to fix it -- the mechanism,
-# not the magnitude, is the problem.
-ENABLE_RATE_DAMPING = False
-RATE_WEIGHT = 50.0             # weight on ||dq - dq_prev||^2 in the QP cost (was 5.0)
+# Rate damping: + RATE_WEIGHT * ||dq - dq_measured||^2 on the ARM joints' QP
+# cost. Gives the task-null wrist DOFs (weakly pinned by the 25:1 pos:ori task
+# weights, previously resolved by a memoryless cost) tick-to-tick memory
+# anchored to the arm's REAL state -- this is what eliminated the qdot
+# oscillation (validated across free space / safe S-curve / infeasible-
+# regression, 2026-07-12; digest in .kiro/context.md §2). Known trade-off at
+# weight 50: extra caution near obstacles (higher lambda peaks, more governor
+# clamping, slower traversal) -- 25 is the snappier compromise (14% worst-case
+# cmd ripple vs 8.3%). RATE_DAMPING_VS_MEASURED=False anchors on last_dq_safe
+# (the QP's own previous output) instead: REJECTED -- a self-referential
+# low-pass in the loop's forward path; smoother command, ~2x worse real motion.
+ENABLE_RATE_DAMPING = True
+RATE_DAMPING_VS_MEASURED = True
+RATE_WEIGHT = 50.0             # 10 -> 26.6% / 25 -> 14.0% / 50 -> 8.3% worst-case cmd ripple
 
 # =============================================================================
 # 3. DYNAMIC SCALING BOUNDARIES
@@ -528,6 +529,7 @@ OFFLINE_BAG_TOPICS = [
     "/qp_debug/safety_margin",
     "/qp_debug/lambda_cbf",
     "/qp_debug/lambda_joints",
+    "/qp_debug/joint_limits",
     "/qp_debug/d_safe_dynamic",
     "/qp_debug/dynamic_weights",
     "/qp_debug/task_authority",

@@ -43,6 +43,7 @@ install(PROGRAMS
   scripts/analysis/study_recorder.py
   scripts/analysis/analyze_trial.py
   scripts/analysis/velocity_filter_calibration.py
+  scripts/analysis/s_curve_diagnostic.py
   DESTINATION lib/${PROJECT_NAME}
 )
 

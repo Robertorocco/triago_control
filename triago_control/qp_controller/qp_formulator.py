@@ -62,6 +62,10 @@ class QPFormulator:
         # Lazy cache for the posture-field joint indexing (built on first solve).
         self._posture_cache = None
 
+        # Lazy active-arm mask for the rate-damping term (built on first solve;
+        # see build_and_solve §A for why this MUST be masked to the arm joints).
+        self._rate_mask = None
+
         # Live scale on the posture-task weight (1.0 = nominal). Dropped toward
         # POSTURE_GRASP_SCALE during autonomous precision phases (grasp/lift) so
         # the QP devotes the redundancy to precise tracking instead of posture.
@@ -185,6 +189,85 @@ class QPFormulator:
 
         return weight_slack_r, weight_slack_l
 
+    def _joint_name_by_idx_v(self, idx_v):
+        """Human-readable joint name for a velocity index (lazily cached)."""
+        if not hasattr(self, '_idx_v_name_map'):
+            self._idx_v_name_map = {}
+            for joint in self.model.joints:
+                if joint.id == 0 or joint.nv != 1:
+                    continue
+                self._idx_v_name_map[joint.idx_v] = self.model.names[joint.id]
+        return self._idx_v_name_map.get(idx_v, f"idx_v={idx_v}")
+
+    def _diagnose_infeasibility(self, kin, C_final, b_final,
+                                J_soft_r, b_col_r, h_soft_r, d_safe_r,
+                                J_soft_l, b_col_l, h_soft_l, d_safe_l):
+        """Console post-mortem for an infeasible solve (throttled to 1/s).
+
+        The CLF task rows carry an unbounded slack variable, so they can NEVER
+        cause infeasibility -- only these can, each with a distinct fingerprint:
+          1. non-finite values anywhere in the QP arrays (upstream numerics),
+          2. an inverted per-joint velocity box (dq_min > dq_max),
+          3. a CBF row unreachable within the velocity box,
+          4. the two CBF rows jointly incompatible inside the box (arms pushed
+             in irreconcilable directions -- no per-row check can see this).
+        Also prints the LIVE config flags: if these differ from config.py on
+        disk, the running process never reloaded it (rebuild is not enough --
+        the node must be fully restarted; recurring lesson in this repo).
+        """
+        import time as _time
+        now = _time.monotonic()
+        if now - getattr(self, '_last_infeas_diag', 0.0) < 1.0:
+            return
+        self._last_infeas_diag = now
+
+        print("\033[93m[QP Infeasibility Diagnosis]\033[0m")
+        print(f"  live flags: ENABLE_RATE_DAMPING={cfg.ENABLE_RATE_DAMPING}  "
+              f"RATE_WEIGHT={cfg.RATE_WEIGHT}  DAMP={cfg.DAMP}  "
+              f"(if these do not match config.py on disk, the running node was "
+              f"never restarted after the edit)")
+
+        # 1. Non-finite values (a single NaN in C or b breaks quadprog outright)
+        clean = True
+        for name, arr in (("C", C_final), ("b", b_final), ("H", self.H), ("g", self.g)):
+            n_bad = int((~np.isfinite(np.asarray(arr))).sum())
+            if n_bad:
+                clean = False
+                print(f"  -> {n_bad} NON-FINITE entries in {name} -- upstream "
+                      f"numerics (h_soft_r={h_soft_r}, h_soft_l={h_soft_l})")
+
+        # 2. Inverted per-joint velocity boxes
+        inverted = np.where(self.dq_min_safe > self.dq_max_safe + 1e-12)[0]
+        for idx_v in inverted:
+            clean = False
+            v_now = float(kin.current_v[idx_v]) if kin.current_v is not None else float('nan')
+            print(f"  -> INVERTED velocity box on {self._joint_name_by_idx_v(idx_v)}: "
+                  f"dq_min={self.dq_min_safe[idx_v]:+.4f} > dq_max={self.dq_max_safe[idx_v]:+.4f}  "
+                  f"(measured v={v_now:+.4f} rad/s -- a large |v| inflates the "
+                  f"joint-limit buffer on BOTH sides; a velocity SPIKE from a "
+                  f"q jump, e.g. a sim reset, can invert the box transiently)")
+
+        # 3. Per-CBF-row achievability over the velocity box
+        for side, J, b_c, h, dsafe in (("RIGHT", J_soft_r, b_col_r, h_soft_r, d_safe_r),
+                                       ("LEFT", J_soft_l, b_col_l, h_soft_l, d_safe_l)):
+            J = np.asarray(J, dtype=float)
+            if not np.isfinite(J).all() or not np.isfinite(b_c):
+                continue  # already reported in check 1
+            best = float(np.sum(np.where(J > 0, J * self.dq_max_safe, J * self.dq_min_safe)))
+            if best + 1e-12 < b_c:
+                clean = False
+                print(f"  -> {side} CBF row UNSATISFIABLE within the velocity box: "
+                      f"needs J.dq >= {b_c:+.4f}, best achievable {best:+.4f}  "
+                      f"(h_soft={h:.4f}, d_safe={dsafe:.4f}, barrier deficit "
+                      f"{dsafe - h:+.4f} m -- the box cannot brake/retreat fast enough)")
+
+        if clean:
+            print("  -> no single check fired: the conflict is JOINT -- most "
+                  "likely the two CBF rows demand incompatible directions inside "
+                  "the shared velocity box (inter-arm geometry), or a numerical "
+                  "degeneracy in quadprog's active-set path. Log the current "
+                  "q/h values and inspect fig2/fig4 for this instant.")
+
     def build_and_solve(self, kin, J_soft_r, h_soft_r, J_soft_l, h_soft_l,
                         d_safe_dynamic_r, d_safe_dynamic_l,
                         right_motion, left_motion, xdot_r, xdot_l,
@@ -281,14 +364,32 @@ class QPFormulator:
         H_center = np.diag(mask_center * w_center)
         g_center = -(mask_center * w_center) * v_ref_center
 
-        # RATE damping: ||dq - dq_prev||^2, cfg.ENABLE_RATE_DAMPING (see config.py
-        # for the derivation -- this smooths the redundant DOF's tick-to-tick
-        # CHANGE, unlike DAMP/H_brake above which shrinks its whole magnitude
-        # uniformly at every frequency, DC included).
+        # RATE damping: ||dq - dq_prev||^2 (cfg.ENABLE_RATE_DAMPING, see config.py).
+        # dq_prev = the MEASURED velocity (kin.current_v) when
+        # cfg.RATE_DAMPING_VS_MEASURED; the last_dq_safe fallback (the QP's own
+        # previous output) is the rejected variant -- self-referential in-loop
+        # filter, made real motion worse.
+        # The term MUST stay masked to the 14 arm joints: locked joints are
+        # pinned to dq=0 by two OPPOSING box inequalities, and kin.current_v
+        # carries head motion + differentiation noise on them -- an unmasked
+        # g_rate contests that pin, forcing two exactly linearly dependent rows
+        # into quadprog's active set, which fails its dual method with
+        # "constraints are inconsistent" despite a satisfiable constraint set.
+        if self._rate_mask is None:
+            self._rate_mask = np.zeros(self.n_joints)
+            if kin.idx_right:
+                self._rate_mask[kin.idx_right] = 1.0
+            if kin.idx_left:
+                self._rate_mask[kin.idx_left] = 1.0
         if cfg.ENABLE_RATE_DAMPING:
-            H_rate = np.eye(self.n_joints) * cfg.RATE_WEIGHT
-            g_rate = -cfg.RATE_WEIGHT * self.last_dq_safe
+            if cfg.RATE_DAMPING_VS_MEASURED and kin.current_v is not None:
+                dq_prev_rate = kin.current_v
+            else:
+                dq_prev_rate = self.last_dq_safe
+            H_rate = np.diag(self._rate_mask * cfg.RATE_WEIGHT)
+            g_rate = -(self._rate_mask * cfg.RATE_WEIGHT) * dq_prev_rate
         else:
+            dq_prev_rate = self.last_dq_safe
             H_rate = 0.0
             g_rate = 0.0
 
@@ -417,6 +518,10 @@ class QPFormulator:
             if q_l > -1e10:
                 self.dq_min_safe[idx_v] = max(self.dq_min_safe[idx_v],
                                               -cfg.P_GAIN_LIMITS * (q_now - q_l - dynamic_buffer))
+            # Do NOT tighten this box with a hard slew-rate limit around the
+            # previous solution: tried and removed (2026-07-12) -- when the CBF
+            # row's required direction changes faster than such a box allows,
+            # NO q_dot satisfies both and the QP goes genuinely infeasible.
 
         # =========================================================
         # E. ASSEMBLE ALL CONSTRAINTS (collision x2, limits, task)
@@ -440,12 +545,19 @@ class QPFormulator:
         # =========================================================
         sol, lagrangians = self._solve_qp(self.H, self.g, C_final, b_final)
         if sol is None:
-            # Infeasible: halt motion and reset the collision shadow-price memory
+            # Infeasible: halt motion and reset the collision shadow-price memory.
+            # last_dq_safe is deliberately NOT zeroed here: anything that anchors
+            # on it next tick must see the last SUCCESSFUL solve -- zeroing it
+            # turned single infeasible ticks into self-sustaining failure when a
+            # hard constraint depended on it (2026-07-12). The commanded output
+            # this tick is still zero regardless (returned below).
+            self._diagnose_infeasibility(kin, C_final, b_final,
+                                         J_soft_r, b_col_r, h_soft_r, d_safe_dynamic_r,
+                                         J_soft_l, b_col_l, h_soft_l, d_safe_dynamic_l)
             self.last_lambda_col = 0.0
             self.last_lambda_cbf_right = 0.0
             self.last_lambda_cbf_left = 0.0
             self.task_energies = np.zeros(4)
-            self.last_dq_safe = np.zeros(self.n_joints)
             return np.zeros(self.n_joints), 0.0, 0.0, (b_col_r, b_col_l), np.zeros(self.n_joints)
 
         q_dot_safe = sol[:self.n_joints]
@@ -489,7 +601,11 @@ class QPFormulator:
         e_damp = cfg.DAMP * float(q_dot_safe @ q_dot_safe)
         e_posture = w_center * float(dq_post @ dq_post)
         e_slack = float(weight_slack_r * slack_r ** 2 + weight_slack_l * slack_l ** 2)
-        e_rate = (cfg.RATE_WEIGHT * float(np.sum((q_dot_safe - self.last_dq_safe) ** 2))
+        # E_rate uses the SAME active-arm mask as the cost term itself (§A) --
+        # unmasked, the head chain's measured velocity (q_dot locked at 0 there)
+        # counted into the residual and spuriously inflated E_rate's authority
+        # share whenever RATE_DAMPING_VS_MEASURED anchors on kin.current_v.
+        e_rate = (cfg.RATE_WEIGHT * float(np.sum(((q_dot_safe - dq_prev_rate) * self._rate_mask) ** 2))
                  if cfg.ENABLE_RATE_DAMPING else 0.0)
         self.task_energies = np.array([e_damp, e_posture, e_slack, e_rate])
         self.last_dq_safe = q_dot_safe.copy()

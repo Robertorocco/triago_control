@@ -25,6 +25,15 @@ Everything that defines a test -- endpoints, categories, the DYNAMIC_TRAJECTORY
 flag, timing -- lives in `config/trajectory_endpoints.yaml`. Editing that file
 is all that is needed to change behaviour.
 
+Two spatial-path modes are supported for the active arm(s):
+  - 2-point (absolute/swap/swap_perturbed): straight line, start -> target.
+  - 'path' (waypoints_right/waypoints_left in the preset): a smooth cubic
+    spline threaded through the sampled start + every listed waypoint, still
+    driven by the SAME quintic tau(t) timing profile -- see
+    `_build_path_spline`/timer_callback. Lets a preset define a curved,
+    multi-point shape (e.g. an 'S' around workspace obstacles) instead of
+    only a start/end pair.
+
 Pipeline
 --------
 1. WAITING  : sample the real start pose from /qp_debug/ee_real for `delay_start`
@@ -47,6 +56,7 @@ import time
 
 import numpy as np
 import yaml
+from scipy.interpolate import CubicSpline
 
 import rclpy
 from rclpy.node import Node
@@ -288,6 +298,10 @@ class TrajectoryGenerator(Node):
         self.q_start_l = np.array([0, 0, 0, 1.0])
         self.q_end_r = np.array([0, 0, 0, 1.0])
         self.q_end_l = np.array([0, 0, 0, 1.0])
+        # Optional smooth multi-waypoint path per arm (mode: 'path' presets
+        # only). None -> the original straight-line start->target formula.
+        self.path_spline_r = None
+        self.path_spline_l = None
 
         # --- Diagnostics counters -----------------------------------------
         self.ee_msg_count = 0       # how many /qp_debug/ee_real msgs arrived
@@ -505,9 +519,16 @@ class TrajectoryGenerator(Node):
             self.q_start_l = euler_to_quaternion(*self.start_rpy_l)
             self.q_end_r = euler_to_quaternion(*self.end_rpy_r)
             self.q_end_l = euler_to_quaternion(*self.end_rpy_l)
+            self.path_spline_r = self._build_path_spline('right')
+            self.path_spline_l = self._build_path_spline('left')
             self.targets_generated = True
             print(f"[STATE] Targets generated (preset '{self.preset_name}', "
                   f"mode '{self.mode}')", flush=True)
+            if self.path_spline_r is not None or self.path_spline_l is not None:
+                print(f"  Path waypoints: right="
+                      f"{len(self.preset.get('waypoints_right', []))} "
+                      f"left={len(self.preset.get('waypoints_left', []))}",
+                      flush=True)
             print(f"  Right: pos {self.start_right.round(3)} "
                   f"-> {self.end_right.round(3)}", flush=True)
             print(f"         rpy {np.degrees(self.start_rpy_r).round(1)} "
@@ -557,11 +578,23 @@ class TrajectoryGenerator(Node):
             s = 10 * tau**3 - 15 * tau**4 + 6 * tau**5
             s_dot = (30 * tau**2 - 60 * tau**3 + 30 * tau**4) / self.duration
 
-            # Position interpolation
-            x_ref_r = self.start_right + s * (self.end_right - self.start_right)
-            xdot_ref_r = (s_dot * sigma) * (self.end_right - self.start_right)
-            x_ref_l = self.start_left + s * (self.end_left - self.start_left)
-            xdot_ref_l = (s_dot * sigma) * (self.end_left - self.start_left)
+            # Position interpolation -- straight line, unless a 'path' preset
+            # built a smooth spline through intermediate waypoints for this
+            # arm (see _build_path_spline). Either way `s` is the SAME
+            # quintic-in-tau scalar, so timing/dynamic_trajectory behaviour
+            # is identical; only the spatial shape changes.
+            if self.path_spline_r is not None:
+                x_ref_r = self.path_spline_r(s)
+                xdot_ref_r = self.path_spline_r(s, 1) * (s_dot * sigma)
+            else:
+                x_ref_r = self.start_right + s * (self.end_right - self.start_right)
+                xdot_ref_r = (s_dot * sigma) * (self.end_right - self.start_right)
+            if self.path_spline_l is not None:
+                x_ref_l = self.path_spline_l(s)
+                xdot_ref_l = self.path_spline_l(s, 1) * (s_dot * sigma)
+            else:
+                x_ref_l = self.start_left + s * (self.end_left - self.start_left)
+                xdot_ref_l = (s_dot * sigma) * (self.end_left - self.start_left)
 
             # Orientation interpolation (SLERP with same quintic scalar)
             q_r = slerp(self.q_start_r, self.q_end_r, s)
@@ -599,6 +632,17 @@ class TrajectoryGenerator(Node):
             half = self.cube_size / 2.0
             end_r = self.start_left + np.random.uniform(-half, half, 3)
             end_l = self.start_right + np.random.uniform(-half, half, 3)
+        elif self.mode == 'path':
+            # Final target = last listed waypoint; the intermediate points
+            # are consumed separately by _build_path_spline.
+            if 'waypoints_right' in self.preset:
+                end_r = np.array(self.preset['waypoints_right'][-1], dtype=float)
+            else:
+                end_r = self.start_right.copy()
+            if 'waypoints_left' in self.preset:
+                end_l = np.array(self.preset['waypoints_left'][-1], dtype=float)
+            else:
+                end_l = self.start_left.copy()
         else:  # 'absolute'
             end_r = np.array(self.preset.get('right', self.start_right), dtype=float)
             end_l = np.array(self.preset.get('left', self.start_left), dtype=float)
@@ -609,6 +653,33 @@ class TrajectoryGenerator(Node):
         elif self.arms == 'left':
             end_r = self.start_right.copy()
         return end_r, end_l
+
+    def _build_path_spline(self, side):
+        """For mode=='path' presets: a cubic spline through
+        [sampled_start] + waypoints_<side> (last entry == the resolved
+        end_right/end_left target), arc-length parametrized onto s in [0, 1]
+        so it plugs directly into the existing quintic tau(t) timing (s below
+        is the SAME scalar the straight-line formula used). Returns None for
+        every 2-point preset (absolute/swap/swap_perturbed) or an inactive
+        arm -- those keep the original straight-line interpolation untouched.
+        """
+        if self.mode != 'path':
+            return None
+        if (side == 'right' and self.arms == 'left') or \
+           (side == 'left' and self.arms == 'right'):
+            return None
+        key = f'waypoints_{side}'
+        if key not in self.preset:
+            return None
+        start = self.start_right if side == 'right' else self.start_left
+        pts = np.array([start] + [np.array(p, dtype=float)
+                                   for p in self.preset[key]])
+        seg_lengths = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+        cum = np.concatenate(([0.0], np.cumsum(seg_lengths)))
+        if cum[-1] < 1e-9:
+            return None  # degenerate: every waypoint coincides with start
+        knots = cum / cum[-1]
+        return CubicSpline(knots, pts, axis=0)
 
     def _compute_orientation_targets(self):
         """Resolve per-hand target RPY from the active preset.

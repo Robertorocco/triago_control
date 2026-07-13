@@ -464,9 +464,13 @@ class SafetyQPController(Node):
         via RobotKinematics.get_joint_limits -- the SAME limits enforced by
         the joint-limit CBF rows in qp_formulator.build_and_solve. A plain
         String (semicolon/colon encoded) is used to avoid introducing a new
-        custom message type for a low-rate (2s), non-critical debug topic.
-        Runs on a slow timer (not the hot loop) and self-cancels after the
-        first successful publish -- the URDF/model never changes at runtime.
+        custom message type for a low-rate (2-4s), non-critical debug topic.
+        Runs on a slow timer (not the hot loop). Publishes PERIODICALLY, not
+        one-shot (2026-07-12): it used to self-cancel after the first publish,
+        but offline_plotter's bag only starts recording at the trial's t=0
+        (long after controller startup), so no bag ever contained this topic
+        and s_curve_diagnostic.py's near-limit checks were always skipped.
+        The model never changes at runtime; the payload is just repeated.
         """
         if self.kin.model is None:
             return
@@ -474,7 +478,6 @@ class SafetyQPController(Node):
         lower, upper = self.kin.get_joint_limits(names)
         payload = ";".join(f"{n}:{lo:.4f}:{hi:.4f}" for n, lo, hi in zip(names, lower, upper))
         self.pub_joint_limits.publish(String(data=payload))
-        self.timer_joint_limits.cancel()
 
     def _freeze_arm(self, side):
         """Snapshot one arm's CURRENT EE pose as its held reference (zero velocity).
