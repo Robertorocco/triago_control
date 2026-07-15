@@ -52,7 +52,6 @@ Telemetry mirrors the legacy generator so the existing dashboard keeps working:
 """
 
 import os
-import time
 
 import numpy as np
 import yaml
@@ -234,11 +233,8 @@ class TrajectoryGenerator(Node):
         #   [p_r(3), v_r(3), p_l(3), v_l(3), rpy_r(3), rpy_l(3)]
         self.create_subscription(Float64MultiArray, '/qp_debug/ee_real',
                                  self.ee_real_callback, 10)
-        # [lambda_cbf_R, lambda_cbf_L] -- see main_qp_controller.py's
-        # pub_lambda_cbf. Declaring this as a scalar Float64 here (while
-        # every other publisher/subscriber on this topic uses
-        # Float64MultiArray) made rosbag2 refuse to record the topic
-        # ("more than one type associated") -- fixed by matching the real type.
+        # [lambda_cbf_R, lambda_cbf_L]; must match main_qp_controller.py's
+        # Float64MultiArray type or rosbag2 refuses to record the topic.
         self.create_subscription(Float64MultiArray, '/qp_debug/lambda_cbf',
                                  self.lambda_cb, 10)
 
@@ -254,22 +250,14 @@ class TrajectoryGenerator(Node):
             Float64MultiArray, '/trajectory/reference_state', 10)
         self.pub_time_scale = self.create_publisher(
             Float64, '/trajectory/time_scale', 10)
-        # Generic offline-recording trigger (cfg.OFFLINE_RECORD_TRIGGER_TOPIC,
-        # std_msgs/Bool -- see config.py section 7 and offline_plotter.py).
-        # True the instant WAITING->TRACKING (motion actually starts, this is
-        # "t=0" for the paper plot); False the instant TRACKING->REGULATION
-        # (quintic motion has concluded -- offline_plotter.py itself decides
-        # how much of REGULATION to keep recording afterward, via
-        # cfg.OFFLINE_PLOT_POST_TRIGGER_S). This node knows nothing about who
-        # consumes the flag -- any future trigger source (e.g. a teleoperation
-        # "handle grasped, clutch released" signal) can drive the SAME topic
-        # without touching offline_plotter.py at all.
+        # Offline-recording trigger: True on WAITING->TRACKING (t=0), False on
+        # TRACKING->REGULATION. See cfg.OFFLINE_RECORD_TRIGGER_TOPIC / offline_plotter.py.
         self.pub_record_trigger = self.create_publisher(
             Bool, cfg.OFFLINE_RECORD_TRIGGER_TOPIC, 10)
 
         # --- State --------------------------------------------------------
-        self.t0 = time.time()
-        self.last_loop_time = time.time()
+        self.t0 = self._now()
+        self.last_loop_time = self.t0
         self.virtual_time = 0.0
         self.lambda_cbf = 0.0
         self.current_sigma = 1.0
@@ -278,11 +266,8 @@ class TrajectoryGenerator(Node):
         self.data_received = False
         self.current_phase = ""
 
-        # --- Offline-recorder handshake (see timer_callback WAITING branch) ---
-        # Hold in WAITING after the settle window until the offline recorder has
-        # subscribed to the record trigger, so the one-shot VOLATILE rising edge
-        # (t=0) is never fired before a cross-host subscriber has finished DDS
-        # discovery. Bounded by cfg.OFFLINE_RECORD_WAIT_TIMEOUT_S.
+        # Hold in WAITING until the recorder subscribes (VOLATILE trigger edge
+        # would be missed otherwise), bounded by OFFLINE_RECORD_WAIT_TIMEOUT_S.
         self._recorder_ready = False
         self._settle_done_time = None
         self._recorder_wait_logged = False
@@ -317,9 +302,13 @@ class TrajectoryGenerator(Node):
         self.timer = self.create_timer(0.01, self.timer_callback)
         # Watchdog/diagnostics at 1 Hz: tells you *why* nothing is moving.
         self.diag_timer = self.create_timer(1.0, self._diagnostics_callback)
-        self.last_print_time = time.time()
+        self.last_print_time = self.t0
 
         self._print_banner()
+
+    def _now(self):
+        """Wall-clock time [s]."""
+        return self.get_clock().now().nanoseconds / 1e9
 
     # =====================================================================
     # CONFIG LOADING
@@ -455,10 +444,14 @@ class TrajectoryGenerator(Node):
         if self.should_stop or not self.data_received:
             return
 
-        current_time = time.time()
+        current_time = self._now()
         dt = current_time - self.last_loop_time
         self.last_loop_time = current_time
         t_total = current_time - self.t0
+
+        # Clamp an outlier dt so a host stall can't snap virtual_time forward.
+        if dt > 0.1 or dt <= 0.0:
+            dt = 0.01
 
         # --- PHASE 1: WAITING / SETUP ------------------------------------
         # The record-start signal (update_phase 'S'->'T', below) is a single
@@ -782,6 +775,9 @@ def main():
               file=sys.stderr, flush=True)
         rclpy.shutdown()
         raise
+
+    # Wall-clock control loop by design -- do not set use_sim_time here.
+
     try:
         while rclpy.ok() and not node.should_stop:
             rclpy.spin_once(node, timeout_sec=0.1)

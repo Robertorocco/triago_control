@@ -26,12 +26,8 @@ class TriagoDashboard(Node):
         self.right_joints = [f'arm_right_{i}_joint' for i in range(1, 8)]
         self.all_joints = self.left_joints + self.right_joints
 
-        # --- Live joint-position slider GUI (2026-07-01) ---
-        # Superset of joints tracked ONLY for the slider panel (Window 6),
-        # independent of the strict all_joints gate below (arm+head+gripper
-        # fingers are not guaranteed to arrive in the SAME /joint_states
-        # message as the two arms on every robot config, so this set is
-        # updated opportunistically per-message rather than gated).
+        # Slider-panel joint set (arm+head+gripper), updated opportunistically
+        # per-message since these aren't guaranteed in the same /joint_states msg.
         self.head_joints = [f'arm_head_{i}_joint' for i in range(1, 8)]
         self.gripper_finger_joints = ['gripper_left_finger_joint', 'gripper_right_finger_joint']
         self.slider_joint_names = (self.left_joints + self.head_joints +
@@ -42,11 +38,8 @@ class TriagoDashboard(Node):
         # their raw value straight through (no lag observed there).
         self.slider_display = {name: 0.0 for name in self.slider_joint_names}
 
-        # --- Topic sanity tracking (2026-07-01): per-joint update timestamps
-        # + a short rolling window of inter-arrival intervals, used to
-        # diagnose whether the reported gripper-slider "lag" is caused by
-        # gripper_{left,right}_finger_joint arriving in /joint_states at a
-        # genuinely lower rate than the arm joints (see _check_topic_sanity). ---
+        # Per-joint update timestamps + inter-arrival intervals, for
+        # _check_topic_sanity to diagnose gripper-slider update rate.
         self.slider_last_update_time = {name: None for name in self.slider_joint_names}
         self.slider_update_intervals = {name: deque(maxlen=30) for name in self.slider_joint_names}
         
@@ -155,13 +148,13 @@ class TriagoDashboard(Node):
         
         # [ADD] Performance and Safety Subscribers
         self.create_subscription(Float64, '/qp_debug/loop_freq', self.freq_callback, qos_profile)
-        self.create_subscription(Float64, '/qp_debug/safety_margin', self.h_callback, qos_profile)
+        self.create_subscription(Float64MultiArray, '/qp_debug/safety_margin', self.h_callback, qos_profile)
 
         # [ADD] Adaptive Controller Subscribers
         self.create_subscription(Float64MultiArray, '/qp_debug/dynamic_weights', self.dyn_weights_callback, qos_profile)
         self.create_subscription(Float64, '/trajectory/time_scale', self.time_scale_callback, qos_profile)
 
-        # --- Dynamic CBF margin subscriber (PER-ARM, 2026-07-01: [d_safe_R, d_safe_L]) ---
+        # [d_safe_R, d_safe_L]
         self.d_safe_buffer = deque(maxlen=self.history_len)
         self.d_safe_time = deque(maxlen=self.history_len)
         self.create_subscription(Float64MultiArray, '/qp_debug/d_safe_dynamic', self.d_safe_callback, qos_profile)
@@ -204,16 +197,15 @@ class TriagoDashboard(Node):
         self.joint_limits = {}   # name -> (lower, upper)
         self.create_subscription(String, '/qp_debug/joint_limits', self.joint_limits_callback, qos_profile)
 
-        # --- Reference Governor telemetry (2026-07-01) ---
+        # Reference governor telemetry
         # [pos_diff_R(3), ori_diff_R(3), vel_diff_R(3), wvel_diff_R(3),
         #  pos_diff_L(3), ori_diff_L(3), vel_diff_L(3), wvel_diff_L(3)] = 24 floats
         self.gov_buffer = deque(maxlen=self.history_len)
         self.gov_time = deque(maxlen=self.history_len)
         self.create_subscription(Float64MultiArray, '/qp_debug/governor', self.gov_callback, qos_profile)
 
-        # --- Topic sanity check (2026-07-01): logs once, ~6s after startup,
-        # comparing the /joint_states update rate of a representative arm
-        # joint against the two gripper finger joints. ---
+        # Logs once ~6s after startup: compares /joint_states update rate of
+        # an arm joint against the two gripper finger joints.
         self._sanity_timer = self.create_timer(6.0, self._check_topic_sanity)
 
     def _check_topic_sanity(self):
@@ -322,10 +314,8 @@ class TriagoDashboard(Node):
 
     # --- NEW: Adaptive Controller Callbacks ---
     def dyn_weights_callback(self, msg):
-        """[weight_slack_r, weight_slack_l, gamma_clf] -- PER-ARM slack weights
-        (2026-07-01; was [weight_slack_avg, gamma_clf]). Confirmed: weight_slack_r
-        weights ONLY delta_r and weight_slack_l weights ONLY delta_l in the QP
-        Hessian's slack block (qp_formulator.build_and_solve)."""
+        """[weight_slack_r, weight_slack_l, gamma_clf]: weight_slack_r weights
+        only delta_r, weight_slack_l only delta_l (build_and_solve's slack block)."""
         t = self.get_time()
         data = list(msg.data)
         if len(data) < 3:
@@ -381,8 +371,11 @@ class TriagoDashboard(Node):
 
     def h_callback(self, msg):
         t = self.get_time()
+        data = list(msg.data)
+        if len(data) < 2:
+            data = (data + [float('nan'), float('nan')])[:2]
         self.h_time.append(t)
-        self.h_buffer.append(msg.data)
+        self.h_buffer.append(data)
 
     def min_dist_callback(self, msg):
         t = self.get_time()
@@ -482,10 +475,8 @@ class TriagoDashboard(Node):
         if len(msg.name) != len(msg.position): return
         name_to_idx = {name: i for i, name in enumerate(msg.name)}
 
-        # --- Live joint-position slider GUI (2026-07-01): opportunistic update,
-        # independent of the strict all_joints gate below. Whatever subset of
-        # {arms, head, gripper fingers} is present in THIS message updates its
-        # own slider; missing joints simply keep their last known value. ---
+        # Update whatever subset of {arms, head, gripper} is in this message;
+        # missing joints keep their last known value.
         now_wall = self.get_clock().now().nanoseconds / 1e9
         for name in self.slider_joint_names:
             if name in name_to_idx:
@@ -537,8 +528,7 @@ def update_plot(frame, node, lines_map, axs1, axs2, axs3, ax_pairs, dyn_plots, f
     window = 10.0
 
     # --- PART 1: Joint velocity from driver (row 0 of axs1) ---
-    # (Position rows REMOVED 2026-07-01 -- live positions now shown in the
-    # dedicated slider GUI, Window 6. See update_sliders below.)
+    # Live positions are shown in the slider GUI (Window 6, update_sliders).
     if node.time_buffer:
         t = list(node.time_buffer)
 
@@ -688,14 +678,18 @@ def update_plot(frame, node, lines_map, axs1, axs2, axs3, ax_pairs, dyn_plots, f
             lines_map['loop_freq'].set_data(t_f[:m_f], y_f[:m_f])
             artists.append(lines_map['loop_freq'])
 
-    # 3E. Safety Margin h
+    # 3E. Safety Margin h (TWO independent per-arm traces)
     if node.h_time:
         t_h = list(node.h_time)
-        y_h = list(node.h_buffer)
-        m_h = min(len(t_h), len(y_h))
+        data_h = list(node.h_buffer)   # each entry: [margin_R, margin_L]
+        m_h = min(len(t_h), len(data_h))
         if m_h > 0:
-            lines_map['margin_h'].set_data(t_h[:m_h], y_h[:m_h])
-            artists.append(lines_map['margin_h'])
+            y_h_r = [d[0] for d in data_h[:m_h]]
+            y_h_l = [d[1] for d in data_h[:m_h]]
+            lines_map['margin_h_r'].set_data(t_h[:m_h], y_h_r)
+            lines_map['margin_h_l'].set_data(t_h[:m_h], y_h_l)
+            artists.append(lines_map['margin_h_r'])
+            artists.append(lines_map['margin_h_l'])
 
     # 3F. Min Distance
     if node.min_dist_time:
@@ -753,12 +747,7 @@ def update_plot(frame, node, lines_map, axs1, axs2, axs3, ax_pairs, dyn_plots, f
 
         for idx, (key, ylabel, title) in enumerate(dyn_plots):
             if key == 'weight_slack':
-                # PER-ARM (2026-07-01): data_dw entries are
-                # [weight_slack_r, weight_slack_l, gamma_clf]. Confirmed these
-                # are the EXACT weights the QP applies to delta_r / delta_l
-                # independently (see qp_formulator.build_and_solve's slack
-                # block) -- so plot both, red=R blue=L like every other
-                # per-arm quantity in this dashboard.
+                # data_dw: [weight_slack_r, weight_slack_l, gamma_clf].
                 min_len = min(len(t_dw), len(data_dw))
                 if min_len > 0:
                     y_r = [d[0] for d in data_dw[:min_len]]
@@ -865,7 +854,7 @@ def main(args=None):
     rclpy.init(args=args)
     node = TriagoDashboard()
 
-    # --- Auto-detect sim vs real hardware (2026-07-03) ---
+    # Auto-detect sim vs real hardware
     # If /clock is being published (Gazebo sim), use sim time so the
     # dashboard's time-axis stays synchronised with the simulated world.
     # On real hardware there is NO /clock topic, so we must use the wall
@@ -899,11 +888,8 @@ def main(args=None):
     # ===================================================================
     # WINDOW 1 (left): "Joint Data" — 4x2 subplot matrix
     # ===================================================================
-    # (2026-07-01) "L/R- Position" rows REMOVED from this time-series figure --
-    # a scrolling 14-line position plot was too hard to read at a glance. Live
-    # joint positions now live in their OWN dedicated slider GUI (Window 6,
-    # "Joint Positions" -- see below), matching the reference control-panel
-    # layout. Figure 1 is now a 3x2 grid: velocity / QP solution / servo error.
+    # Positions live in the slider GUI (Window 6); this is velocity / QP
+    # solution / servo error only, 3x2 grid.
     fig1, axs1 = plt.subplots(3, 2, sharex=True)
     fig1.suptitle('Joint Data')
 
@@ -1020,13 +1006,16 @@ def main(args=None):
     axs2[4].legend(loc='upper left', fontsize='x-small')
     lines_map['loop_freq'] = l_freq
 
-    # Row 5: Safety Margin (with y=0 red dashed line)
-    l_h, = axs2[5].plot([], [], 'm-', label='Softmin h')
-    axs2[5].axhline(y=0, color='r', linestyle='--', linewidth=1)
+    # Row 5: Safety Margin -- TWO independent per-arm SoftMin margins on the
+    # SAME axes (with y=0 red dashed line), same per-arm split as CBF Lambda above.
+    l_h_r, = axs2[5].plot([], [], 'r-', label=r'$h_R - d_{safe,R}$')
+    l_h_l, = axs2[5].plot([], [], 'b-', label=r'$h_L - d_{safe,L}$')
+    axs2[5].axhline(y=0, color='k', linestyle='--', linewidth=1)
     axs2[5].set_ylabel('Margin [m]', rotation=0, ha='left', labelpad=10)
     axs2[5].yaxis.set_label_position('right')
     axs2[5].legend(loc='upper left', fontsize='x-small')
-    lines_map['margin_h'] = l_h
+    lines_map['margin_h_r'] = l_h_r
+    lines_map['margin_h_l'] = l_h_l
 
     # Row 6: Min Distance (with y=0 red dashed line)
     l_min_dist, = axs2[6].plot([], [], 'c-', label='Abs Min Dist')
@@ -1088,8 +1077,7 @@ def main(args=None):
         ax.yaxis.set_label_position('right')
         ax.grid(True, alpha=0.3)
         if key in ('d_safe_dynamic', 'weight_slack'):
-            # PER-ARM (2026-07-01): two independent traces, R (red) and L (blue),
-            # matching the convention used everywhere else in this dashboard.
+            # Per-arm: R (red) and L (blue), matching the dashboard convention.
             label_r = r'$d_{safe,R}^{dyn}$' if key == 'd_safe_dynamic' else r'$w_{\delta,R}$'
             label_l = r'$d_{safe,L}^{dyn}$' if key == 'd_safe_dynamic' else r'$w_{\delta,L}$'
             l_r, = ax.plot([], [], 'r-', linewidth=1.2, label=label_r)
@@ -1164,17 +1152,10 @@ def main(args=None):
     # ===================================================================
     # WINDOW 6: "Joint Positions" — live slider GUI (control-panel style)
     # ===================================================================
-    # Read-only telemetry display mimicking the reference control-panel image:
-    # one row per joint index (1..7), one column per chain (left arm / head /
-    # right arm) -- see cfg.SLIDER_LAYOUT. The two gripper finger joints get
-    # their OWN dedicated row BELOW this grid (cfg.GRIPPER_SLIDER_ROW),
-    # deliberately laid out with a visual gap and NOT column-aligned to the
-    # 3-column arm/head grid above (2026-07-01, per instruction). Torso lift
-    # + joystick remain INTENTIONALLY NOT encoded (per instruction). Slider
-    # RANGE = the REAL joint limits from the live Pinocchio model
-    # (RobotKinematics.get_joint_limits, published on /qp_debug/joint_limits
-    # -- the SAME limits the joint-limit CBF enforces) -- falling back to
-    # [-3.15, 3.15] until that message arrives.
+    # Read-only telemetry: one row per joint index, one column per chain
+    # (cfg.SLIDER_LAYOUT); gripper fingers get their own row below
+    # (cfg.GRIPPER_SLIDER_ROW). Slider range is the live joint-limit CBF's
+    # own limits (/qp_debug/joint_limits), falling back to [-3.15, 3.15].
     #
     # These Slider widgets are DISPLAY-ONLY: eventson=False and the handles
     # are moved programmatically from live /joint_states data each frame, not
@@ -1293,9 +1274,6 @@ def main(args=None):
     # ===================================================================
     # WINDOW PLACEMENT (from wmctrl, slightly aligned)
     # ===================================================================
-    # NOTE (2026-07-03): Window 8 ("RRT Planner Performance") was removed --
-    # an RRT-Connect local-minima-escape fallback was attempted and abandoned;
-    # see reference_governor.py's class-level note.
     figs = [fig1, fig2, fig3, fig4, fig5, fig6, fig7]
 
     place_window(fig1, 86, 126, 851, 1131)    # Left: Joint Data

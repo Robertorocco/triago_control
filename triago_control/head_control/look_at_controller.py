@@ -40,12 +40,22 @@ class LookAtController:
         self.last_angle_deg = 180.0  # most recent look-at error (for telemetry)
         self.last_slack_norm = 0.0   # QP slack magnitude (>0 means joint limits bite)
 
+        # --- Active-vision state (perception-driven head motion) ----------
+        self.phase = 0               # 0 SWEEP, 1 REFINE, 2 HOLD (telemetry)
+        self.weakest_coverage = 0.0  # arc coverage of the least-observed object (telemetry)
+        self._wp_idx = 0             # current SCAN_WAYPOINTS index in Phase 0
+        self._noprog = 0             # consecutive aligned+fresh frames with no coverage gain
+        self._prev_total_cov = None  # total arc coverage at the current dwell (reset on retarget)
+        self._refine_done = set()    # colours whose refinement has plateaued
+        self._last_result_id = None  # detect a fresh perception frame (vs. control-rate re-calls)
+        self._last_target = cfg.TABLE_TOP_CENTER_BASE.copy()
+
     # ------------------------------------------------------------------ #
     # Scan target generation                                              #
     # ------------------------------------------------------------------ #
     @staticmethod
     def scan_target(t: float):
-        """Return the look-at point in base_footprint at time t [s].
+        """FIXED time-based scan (fallback when ENABLE_ACTIVE_VISION is False).
 
         STEPPED scan: hold each waypoint for SCAN_DWELL_S so the head settles
         and the velocity-gated accumulation can fuse clean, well-registered
@@ -58,6 +68,129 @@ class LookAtController:
         idx = int(t / cfg.SCAN_DWELL_S) % len(wps)
         ox, oy = wps[idx]
         return base + np.array([ox, oy, 0.0])
+
+    # ------------------------------------------------------------------ #
+    # Active vision: perception-driven look-at target                     #
+    # ------------------------------------------------------------------ #
+    def active_vision_target(self, t: float, latest_result):
+        """Return the look-at point in base_footprint, LED BY PERCEPTION.
+
+        Two-phase policy (see config §5c):
+          Phase 0 SWEEP : cycle SCAN_WAYPOINTS, advancing off a waypoint once its
+                          incremental arc-coverage gain plateaus (not a fixed dwell).
+          Phase 1 REFINE: aim at the weakest (least-covered) object, nudged toward
+                          its unseen-sector azimuth, until it plateaus / clears the
+                          floor; then re-pick the next weakest.
+          Phase 2 HOLD  : freeze the aim so the rate-based convergence check can run.
+
+        Progress is only accounted on a FRESH perception frame while the head is
+        ALIGNED (arrived + holding) — so slewing between targets is never mistaken
+        for a coverage plateau, and the move->settle->fuse discipline is preserved.
+        """
+        base = cfg.TABLE_TOP_CENTER_BASE.copy()
+        if not cfg.ENABLE_ACTIVE_VISION:
+            return self.scan_target(t)
+
+        objs = list(latest_result.objects) if latest_result is not None else []
+        cov_by_color, obj_by_color = {}, {}
+        for o in objs:
+            cname = getattr(o, "color_name", "unknown")
+            if cname in ("red", "blue"):
+                cov_by_color[cname] = float(getattr(o, "arc_coverage", 0.0))
+                obj_by_color[cname] = o
+        if cov_by_color:
+            self.weakest_coverage = min(cov_by_color.values())
+
+        # Budget cap: stop searching and hold wherever we are (real hardware can't
+        # scan forever). A never-covered object is left to the convergence gate,
+        # which will simply not converge until re-armed / re-observed.
+        if t > cfg.ACTIVE_VISION_TIME_BUDGET_S:
+            self.phase = 2
+            return self._last_target
+
+        # Only account progress on a genuinely NEW perception frame while aligned.
+        fresh = latest_result is not None and id(latest_result) != self._last_result_id
+        aligned = self.is_aligned()
+        self._last_result_id = id(latest_result) if latest_result is not None else self._last_result_id
+        total_cov = sum(cov_by_color.values())
+        plateaued = self._account_progress(fresh and aligned, total_cov)
+
+        # -------- Phase 0: SWEEP to discover plane + all objects ----------
+        if self.phase == 0:
+            if plateaued:
+                self._retarget()
+                self._wp_idx += 1
+                if self._wp_idx >= len(cfg.SCAN_WAYPOINTS):
+                    self._wp_idx = 0
+                    if len(cov_by_color) >= cfg.WORLD_EXPECTED_CYLINDERS:
+                        self.phase = 1          # everything seen -> refine the weakest
+            ox, oy = cfg.SCAN_WAYPOINTS[self._wp_idx]
+            self._last_target = base + np.array([ox, oy, 0.0])
+            return self._last_target
+
+        # -------- Phase 1: REFINE the weakest object ----------------------
+        if self.phase == 1:
+            # Which colours still need work (below the coverage floor + not done)?
+            pending = [c for c, cov in cov_by_color.items()
+                       if cov < cfg.WORLD_MIN_ARC_COVERAGE and c not in self._refine_done]
+            if not pending:
+                self.phase = 2                  # nothing left to improve -> hold
+                return self._last_target
+            weak = min(pending, key=lambda c: cov_by_color[c])
+            if plateaued:
+                self._refine_done.add(weak)     # this one stopped improving; move on
+                self._retarget()
+                return self._last_target
+            o = obj_by_color[weak]
+            center = np.asarray(o.center, dtype=float)
+            off = cfg.ACTIVE_VISION_REFINE_OFFSET * self._unseen_azimuth_dir(
+                getattr(o, "arc_bins", None))
+            self._last_target = np.array([center[0] + off[0], center[1] + off[1], base[2]])
+            return self._last_target
+
+        # -------- Phase 2: HOLD (let convergence run) ---------------------
+        return self._last_target
+
+    def _account_progress(self, evaluate: bool, total_cov: float) -> bool:
+        """Track coverage-gain plateau at the current dwell. Returns True once
+        PLATEAU_PATIENCE consecutive evaluated frames show < EPS gain."""
+        if not evaluate:
+            return False
+        if self._prev_total_cov is None:
+            self._prev_total_cov = total_cov
+            return False
+        gain = total_cov - self._prev_total_cov
+        self._prev_total_cov = total_cov
+        if gain < cfg.ACTIVE_VISION_PLATEAU_EPS:
+            self._noprog += 1
+        else:
+            self._noprog = 0
+        return self._noprog >= cfg.ACTIVE_VISION_PLATEAU_PATIENCE
+
+    def _retarget(self):
+        """Reset the plateau accounting when the aim is about to change (the head
+        will slew, so within-dwell coverage progress starts fresh)."""
+        self._noprog = 0
+        self._prev_total_cov = None
+
+    @staticmethod
+    def _unseen_azimuth_dir(arc_bins):
+        """Mean base-frame XY unit direction of the UNSEEN arc sectors, i.e. the
+        side of the object we have NOT yet observed. Returns [0,0] if fully seen or
+        unknown. arc_bins[i] marks azimuth (-pi + (i+0.5)*2pi/N) about the object
+        centre where points WERE seen (object_detector.py)."""
+        if arc_bins is None:
+            return np.zeros(2)
+        arc_bins = np.asarray(arc_bins, dtype=bool)
+        unseen = ~arc_bins
+        if not unseen.any() or unseen.all():
+            return np.zeros(2)
+        n = len(arc_bins)
+        idx = np.nonzero(unseen)[0]
+        ang = -np.pi + (idx + 0.5) * (2.0 * np.pi / n)
+        v = np.array([np.cos(ang).sum(), np.sin(ang).sum()])
+        norm = np.linalg.norm(v)
+        return v / norm if norm > 1e-6 else np.zeros(2)
 
     # ------------------------------------------------------------------ #
     # Main solve                                                          #

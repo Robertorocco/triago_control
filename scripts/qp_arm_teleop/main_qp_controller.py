@@ -47,19 +47,12 @@ from triago_control.qp_controller.reference_governor import ReferenceGovernor
 from triago_control.qp_controller.world_loader import load_world
 
 
-# One control tick's collision-barrier result, produced by _compute_cbf() and
-# consumed by the QP + telemetry + RViz overlays downstream. The base
-# (sim/synchronous) controller builds it inline every tick with fresh=True; the
-# real-hardware subclass (main_qp_controller_real.py) fills it from an async
-# worker and sets fresh=False whenever the worker result is stale -- which is
-# what trips the staleness watchdog freeze in _gate_command.
-#   J_soft_r/l, h_soft_r/l, d_safe_r/l, abs_min_distance : the CBF the QP consumes
-#   witness_distance, witness_points                     : RViz collision-line overlay
-#   top_active_pairs                                     : /qp_debug/top_pairs debug string
-#   fresh                                                : False => watchdog zeroes the command
+# One control tick's collision-barrier result: J_soft/h_soft/d_safe feed the
+# QP; active_r/l marks a real pair (vs. h_soft's safe 1.0 sentinel) for
+# telemetry only; fresh=False triggers the watchdog freeze.
 CbfResult = namedtuple('CbfResult', [
     'J_soft_r', 'h_soft_r', 'J_soft_l', 'h_soft_l',
-    'd_safe_r', 'd_safe_l', 'abs_min_distance',
+    'd_safe_r', 'd_safe_l', 'abs_min_distance', 'active_r', 'active_l',
     'witness_distance', 'witness_points', 'top_active_pairs', 'fresh'])
 
 
@@ -69,19 +62,12 @@ class SafetyQPController(Node):
     def __init__(self):
         super().__init__('safety_qp_controller')
 
-        # Configurable control frequency (replaces the hard-coded 1/300 target dt)
         self._control_freq = cfg.CONTROL_FREQ_DEFAULT
         self.loop_timer = None
 
-        # --- WORLD SCENE (2026-07-04) -----------------------------------
-        # Which obstacle layout (table + red/blue cylinders + optional extra
-        # obstacles) to build into the CBF's collision model. Independent of
-        # which Gazebo world was actually launched -- see world_loader.py's
-        # module docstring: the Gazebo launch command is UNCHANGED, this
-        # parameter only tells the QP/RViz/Meshcat side which YAML to mirror
-        # it with. Override at runtime, e.g.:
-        #   ros2 run triago_control main_qp_controller.py --ros-args \
-        #        -p world_name:=no_obstacle
+        # Obstacle layout for the CBF collision model, independent of the
+        # launched Gazebo world (see world_loader.py). Override with
+        # --ros-args -p world_name:=no_obstacle.
         self.declare_parameter('world_name', 'no_obstacle')
         self.world_scene = self._build_world_scene()
         self.get_logger().info(
@@ -126,12 +112,8 @@ class SafetyQPController(Node):
 
         right_offsets = self.col.calculate_offsets(cfg.RIGHT_CHAIN, 'gripper_right_base_link')
         left_offsets = self.col.calculate_offsets(cfg.LEFT_CHAIN, 'gripper_left_base_link')
-        # Head chain (2026-07-01): SAME hardware/geometry recipe as the arms
-        # (calculate_offsets is reused verbatim), added as a quasi-static CBF
-        # obstacle for the arms -- see cfg.HEAD_CHAIN's docstring. The head is
-        # NEVER added to idx_right/idx_left (RobotKinematics never maps
-        # HEAD_JOINTS into the QP's actuated velocity indices), so this adds
-        # zero rows/columns to the QP decision vector.
+        # Head added as a quasi-static CBF obstacle only (cfg.HEAD_CHAIN);
+        # never mapped into idx_right/idx_left, so it adds no QP DOF.
         head_offsets = None
         if self.kin.model.existFrame(cfg.HEAD_CHAIN[0]):
             head_offsets = self.col.calculate_offsets(cfg.HEAD_CHAIN, cfg.HEAD_TOOL_LINK)
@@ -147,10 +129,8 @@ class SafetyQPController(Node):
         self.hri = SharedAutonomyHandler(self, self.col, self.kin, self.viz)
         self.qp = QPFormulator(self.kin.model)
 
-        # --- REFERENCE GOVERNOR (2026-07-01, per-arm CLF-safety layer) ---
-        # Bounds position/orientation error, reference velocity/acceleration so
-        # the CLF row's demand is always bounded → QP feasibility preserved.
-        # One instance per arm (each has its own velocity memory for accel limiting).
+        # Bounds ref position/velocity/acceleration so the CLF demand stays
+        # QP-feasible; one instance per arm (separate accel-limit memory).
         self.gov_right = ReferenceGovernor('right')
         self.gov_left = ReferenceGovernor('left')
 
@@ -164,8 +144,8 @@ class SafetyQPController(Node):
         # --- WATCHDOGS ---
         self.right_imposed_motion = False
         self.left_imposed_motion = False
-        self.last_right_msg_time = time.time()
-        self.last_left_msg_time = time.time()
+        self.last_right_msg_time = self._now()
+        self.last_left_msg_time = self._now()
 
         # --- LOOP / SIM STATE ---
         self.active_controller_mode = False
@@ -180,6 +160,13 @@ class SafetyQPController(Node):
         self.last_qdot_cmd_14 = np.zeros(14)
         # Per-tick jitter/compute-time diagnostic (see /qp_debug/loop_timing below).
         self._last_tick_perf = None
+        # Opt-in tick-cadence log (TRIAGO_DEBUG_TICKS=1): ticks/s, bunched
+        # (<1ms gap) count, and max gap, once per wall second. Zero cost if unset.
+        self._dbg_ticks = os.environ.get('TRIAGO_DEBUG_TICKS') == '1'
+        self._dbg_win_start = None
+        self._dbg_n = 0
+        self._dbg_n_bunched = 0
+        self._dbg_max_gap_ms = 0.0
 
         # --- COMMAND PUBLISHERS ---
         self.pub_right = self.create_publisher(Float64MultiArray, f'/{cfg.RIGHT_CONTROLLER}/joint_velocity_cmd', 1)
@@ -198,7 +185,7 @@ class SafetyQPController(Node):
         # [x_r(3), rpy_r(3), x_l(3), rpy_l(3)] (raw reference, pre-governor).
         self.pub_reference_effective = self.create_publisher(
             Float64MultiArray, '/qp_debug/reference_effective', 10)
-        self.pub_debug_h = self.create_publisher(Float64, '/qp_debug/safety_margin', 10)
+        self.pub_debug_h = self.create_publisher(Float64MultiArray, '/qp_debug/safety_margin', 10)
         self.pub_loop_freq = self.create_publisher(Float64, '/qp_debug/loop_freq', 10)
         # Per-tick diagnostic (NOT downsampled -- every tick, unlike loop_freq's
         # running average): [tick_dt_ms, kin_ms, cbf_ms, gov_ms, solve_ms,
@@ -217,22 +204,11 @@ class SafetyQPController(Node):
         self.pub_dynamic_weights = self.create_publisher(Float64MultiArray, '/qp_debug/dynamic_weights', 10)
         self.pub_d_safe_dynamic = self.create_publisher(Float64MultiArray, '/qp_debug/d_safe_dynamic', 10)
         self.pub_qdot_cmd = self.create_publisher(Float64MultiArray, '/qp_debug/qdot_cmd', 10)
-        # Generic measured joint velocity (2026-07-04, for offline_plotter.py):
-        # kin.current_v is ALREADY the environment-correct signal -- EMA-filtered
-        # differentiated velocity in Gazebo (self.REAL_HARDWARE=False) or the
-        # direct sensor reading on real hardware (self.REAL_HARDWARE=True); see
-        # robot_kinematics.update_from_joint_state. No new logic is needed here,
-        # only a publisher: this was previously computed every tick but never
-        # put on a topic. Named generically ("measured", not "filtered") since
-        # the SAME topic means different things in sim vs. real hardware.
+        # kin.current_v: EMA-filtered diff in sim, direct sensor on real HW.
         self.pub_qdot_measured = self.create_publisher(Float64MultiArray, '/qp_debug/qdot_measured', 10)
         self.pub_task_authority = self.create_publisher(Float64MultiArray, '/qp_debug/task_authority', 10)
         self.pub_shared_col = self.create_publisher(Float64MultiArray, '/collision_constraints', 10)
-        # Per-arm frozen/active ground truth for the RViz visualizer (2026-07-01):
-        # [right_frozen, left_frozen] as 0.0/1.0. Lets qp_visualizer_tutorial draw
-        # BOTH grippers blue when both arms are actively driven (e.g. by
-        # trajectory_generator.py), not just whichever arm a stale single
-        # "active_arm" notion pointed at.
+        # [right_frozen, left_frozen] as 0.0/1.0, for the RViz gripper color.
         self.pub_arm_frozen = self.create_publisher(Float64MultiArray, '/qp_debug/arm_frozen', 10)
         # Live joint limits for the plotter's slider GUI (latched, published
         # once + on every late-subscriber via a slow timer): the REAL limits
@@ -242,11 +218,7 @@ class SafetyQPController(Node):
         self.timer_joint_limits = self.create_timer(
             4.0 if self.REAL_HARDWARE else 2.0, self._publish_joint_limits)
 
-        # Reference governor telemetry (2026-07-01): publishes the DIFFERENCE
-        # between raw and governed references (6D each arm: [dx,dy,dz,droll,dpitch,dyaw])
-        # so the dedicated plotter window can show when/where the governor clamps.
-        # Layout: [pos_diff_R(3), ori_diff_R(3), vel_diff_R(3), wvel_diff_R(3),
-        #          pos_diff_L(3), ori_diff_L(3), vel_diff_L(3), wvel_diff_L(3)] = 24 floats
+        # Raw-vs-governed reference diff, 24 floats: [pos/ori/vel/wvel]x[R,L], 3 each.
         self.pub_gov_telemetry = self.create_publisher(Float64MultiArray, '/qp_debug/governor', 10)
 
         # --- SUBSCRIBERS ---
@@ -278,6 +250,29 @@ class SafetyQPController(Node):
         # halved on real hardware -- see the publish_every_n comment above).
         self.timer_obs = self.create_timer(
             1.0 if self.REAL_HARDWARE else 0.5, lambda: self.viz.publish_obstacle_marker(self.hri))
+
+    def _now(self):
+        """Wall-clock time [s], used by the reference-staleness watchdog."""
+        return self.get_clock().now().nanoseconds / 1e9
+
+    def _dbg_tick_diag(self, tick_start, tick_dt_ms):
+        """Log tick-cadence stats once per second (TRIAGO_DEBUG_TICKS=1)."""
+        if self._dbg_win_start is None:
+            self._dbg_win_start = tick_start
+        self._dbg_n += 1
+        if 0.0 < tick_dt_ms < 1.0:
+            self._dbg_n_bunched += 1
+        if tick_dt_ms > self._dbg_max_gap_ms:
+            self._dbg_max_gap_ms = tick_dt_ms
+        if tick_start - self._dbg_win_start >= 1.0:
+            self.get_logger().warn(
+                f"[TICK-DIAG] {self._dbg_n} ticks/s | bunched(<1ms)="
+                f"{self._dbg_n_bunched} | max_gap={self._dbg_max_gap_ms:.1f}ms "
+                "(bunched>0 or large max_gap => timer catch-up bursts)")
+            self._dbg_win_start = tick_start
+            self._dbg_n = 0
+            self._dbg_n_bunched = 0
+            self._dbg_max_gap_ms = 0.0
 
     # =====================================================================
     # WORLD-SCENE SOURCE (overridable seam)
@@ -459,19 +454,9 @@ class SafetyQPController(Node):
         self.grasp_active = bool(msg.data)
 
     def _publish_joint_limits(self):
-        """Publish [name:lower:upper;...] for every joint the slider GUI needs
-        (arms + head + gripper fingers), read from the live Pinocchio model
-        via RobotKinematics.get_joint_limits -- the SAME limits enforced by
-        the joint-limit CBF rows in qp_formulator.build_and_solve. A plain
-        String (semicolon/colon encoded) is used to avoid introducing a new
-        custom message type for a low-rate (2-4s), non-critical debug topic.
-        Runs on a slow timer (not the hot loop). Publishes PERIODICALLY, not
-        one-shot (2026-07-12): it used to self-cancel after the first publish,
-        but offline_plotter's bag only starts recording at the trial's t=0
-        (long after controller startup), so no bag ever contained this topic
-        and s_curve_diagnostic.py's near-limit checks were always skipped.
-        The model never changes at runtime; the payload is just repeated.
-        """
+        """Publish [name:lower:upper;...] for the slider GUI, the same limits
+        the joint-limit CBF rows enforce. Repeats periodically (not one-shot)
+        so late bag recorders still capture it."""
         if self.kin.model is None:
             return
         names = cfg.RIGHT_JOINTS + cfg.LEFT_JOINTS + cfg.HEAD_JOINTS + cfg.GRIPPER_FINGER_JOINTS
@@ -498,14 +483,14 @@ class SafetyQPController(Node):
             self.x_ref_right = pos; self.rpy_ref_right = rpy
             self.xdot_ref_right = np.zeros(3); self.w_ref_right = np.zeros(3)
             self.right_imposed_motion = True
-            self.last_right_msg_time = time.time()
+            self.last_right_msg_time = self._now()
             self.right_frozen = True
             self.gov_right.reset()  # Clear velocity memory (arm is now stationary)
         else:
             self.x_ref_left = pos; self.rpy_ref_left = rpy
             self.xdot_ref_left = np.zeros(3); self.w_ref_left = np.zeros(3)
             self.left_imposed_motion = True
-            self.last_left_msg_time = time.time()
+            self.last_left_msg_time = self._now()
             self.left_frozen = True
             self.gov_left.reset()  # Clear velocity memory (arm is now stationary)
 
@@ -534,13 +519,13 @@ class SafetyQPController(Node):
             self.task_dim_right = msg.data[12] if len(msg.data) >= 13 else 6.0
             self.right_imposed_motion = True
             self.right_frozen = False
-            self.last_right_msg_time = time.time()
+            self.last_right_msg_time = self._now()
         elif len(msg.data) >= 6:
             self.x_ref_right = np.array(msg.data[0:3])
             self.xdot_ref_right = np.array(msg.data[3:6])
             self.right_imposed_motion = True
             self.right_frozen = False
-            self.last_right_msg_time = time.time()
+            self.last_right_msg_time = self._now()
 
     def ref_cb_left(self, msg):
         # Left-arm cartesian reference (12+ float protocol, 6-float fallback).
@@ -553,13 +538,13 @@ class SafetyQPController(Node):
             self.task_dim_left = msg.data[12] if len(msg.data) >= 13 else 6.0
             self.left_imposed_motion = True
             self.left_frozen = False
-            self.last_left_msg_time = time.time()
+            self.last_left_msg_time = self._now()
         elif len(msg.data) >= 6:
             self.x_ref_left = np.array(msg.data[0:3])
             self.xdot_ref_left = np.array(msg.data[3:6])
             self.left_imposed_motion = True
             self.left_frozen = False
-            self.last_left_msg_time = time.time()
+            self.last_left_msg_time = self._now()
 
     # =====================================================================
     # TASK ERROR EXTRACTION (5D / 6D / 3D)
@@ -570,11 +555,9 @@ class SafetyQPController(Node):
             return np.zeros(3), np.zeros(3)
         x_real = self.kin.data.oMf[ee_id].translation
         e_pos = x_ref - x_real
-        # task_dim == 3.0: POSITION-ONLY CLF, orientation fully relaxed. Used by
-        # the local-minima escape (2026-07-01) to give up the orientation task
-        # entirely during an obstacle-induced escape (see solve_and_publish's
-        # task_dim_eff_right/left override). Checked BEFORE the normal
-        # orientation_ctrl branch so it applies even when orientation_ctrl=True.
+        # task_dim == 3.0: position-only CLF (orientation relaxed for a
+        # local-minima escape); checked before orientation_ctrl so it applies
+        # even when orientation_ctrl=True.
         if task_dim == 3.0:
             return e_pos, xdot_ref
         if self.orientation_ctrl and rpy_ref is not None:
@@ -602,12 +585,8 @@ class SafetyQPController(Node):
     # =====================================================================
     # OVERRIDABLE SEAMS (async-execution hooks)
     # =====================================================================
-    # These four methods are the ONLY points where the real-hardware subclass
-    # (main_qp_controller_real.py) diverges from this synchronous controller.
-    # Each base implementation here is exactly the inline code the tick used to
-    # run, so the simulation path stays behavior-identical; the subclass
-    # overrides them to move the CBF + overlays onto worker threads with a
-    # staleness watchdog (see that file).
+    # The only points where main_qp_controller_real.py diverges: it overrides
+    # these to move CBF + overlays onto worker threads with a staleness watchdog.
     def _process_deferred_topology(self):
         # Apply any grasp attach/detach queued by shared autonomy (deferred to
         # here because it needs fresh oMi/oMg). This STRUCTURALLY mutates the
@@ -633,7 +612,8 @@ class SafetyQPController(Node):
         # fresh here). The real subclass overrides this to return the latest
         # async worker result and drive the staleness watchdog.
         (J_soft_r, h_soft_r, J_soft_l, h_soft_l,
-         d_safe_dynamic_r, d_safe_dynamic_l, abs_min_distance) = \
+         d_safe_dynamic_r, d_safe_dynamic_l, abs_min_distance,
+         active_r, active_l) = \
             self.col.compute_softmin_jacobian(
                 self.kin.current_v, self.kin.idx_right, self.kin.idx_left,
                 self.hri.grasp_margin_targets, self.hri.attached_objects,
@@ -642,7 +622,7 @@ class SafetyQPController(Node):
                 attached_object_arm=self.hri.attached_object_arm)
         return CbfResult(
             J_soft_r, h_soft_r, J_soft_l, h_soft_l,
-            d_safe_dynamic_r, d_safe_dynamic_l, abs_min_distance,
+            d_safe_dynamic_r, d_safe_dynamic_l, abs_min_distance, active_r, active_l,
             self.col.witness_min_distance, self.col.witness_min_points,
             getattr(self.col, 'top_active_pairs', []), True)
 
@@ -658,12 +638,11 @@ class SafetyQPController(Node):
         # the real subclass dispatches it to a viz worker thread. Reads the
         # witness/margin from `cbf`, not self.col, so it is thread-snapshot-safe.
         if not cfg.DISABLE_CBF:
-            # Legacy single scalar: the WORSE (smaller) margin of the two arms.
-            # Each arm uses its OWN dynamic margin (see the coupling audit in
-            # collision_manager.compute_softmin_jacobian).
-            margin_r = cbf.h_soft_r - cbf.d_safe_r
-            margin_l = cbf.h_soft_l - cbf.d_safe_l
-            self.pub_debug_h.publish(Float64(data=float(min(margin_r, margin_l))))
+            # Per-arm margin; NaN when that arm has no active pair (not the
+            # h_soft=1.0 QP sentinel, which isn't a real margin).
+            margin_r = (cbf.h_soft_r - cbf.d_safe_r) if cbf.active_r else float('nan')
+            margin_l = (cbf.h_soft_l - cbf.d_safe_l) if cbf.active_l else float('nan')
+            self.pub_debug_h.publish(Float64MultiArray(data=[float(margin_r), float(margin_l)]))
         self.viz.publish_debug(
             self.kin.model, self.kin.data,
             (cbf.witness_distance, cbf.witness_points),
@@ -685,16 +664,18 @@ class SafetyQPController(Node):
         _tick_dt_ms = ((_tick_start - self._last_tick_perf) * 1000.0
                        if self._last_tick_perf is not None else 0.0)
         self._last_tick_perf = _tick_start
+        if self._dbg_ticks:
+            self._dbg_tick_diag(_tick_start, _tick_dt_ms)
 
         # --- Watchdog: a stale-reference arm is FROZEN at its current pose (held
         # by a zero-velocity CLF) rather than going limp. Option B keeps it under
         # QP control so it can still bend to help the active arm avoid collisions.
         if self.right_imposed_motion and not self.right_frozen \
-                and (time.time() - self.last_right_msg_time) > cfg.WATCHDOG_TIMEOUT:
+                and (self._now() - self.last_right_msg_time) > cfg.WATCHDOG_TIMEOUT:
             self._freeze_arm('right')
             print("[Safety] Watchdog: Right reference stale -> frozen at current pose.")
         if self.left_imposed_motion and not self.left_frozen \
-                and (time.time() - self.last_left_msg_time) > cfg.WATCHDOG_TIMEOUT:
+                and (self._now() - self.last_left_msg_time) > cfg.WATCHDOG_TIMEOUT:
             self._freeze_arm('left')
             print("[Safety] Watchdog: Left reference stale -> frozen at current pose.")
 
@@ -734,12 +715,11 @@ class SafetyQPController(Node):
         _cbf_ms = (time.perf_counter() - _cbf_start) * 1000.0
 
         # --- 2. Task errors ---
-        # REFERENCE GOVERNOR (2026-07-01): apply velocity/error/acceleration
-        # bounds BEFORE the CLF sees the reference. The RAW references
-        # (self.x_ref_right, etc.) are PRESERVED for future plotting / consumers;
-        # the governed versions are used ONLY for the CLF task-error computation
-        # below (and passed to build_and_solve as the feedforward velocities).
+        # Governor applies velocity/error/acceleration bounds before the CLF
+        # sees the reference; raw references are preserved for plotting.
         _gov_start = time.perf_counter()
+        # Nominal period, not a measured delta -- the wall-clock timer already
+        # fires at a steady real rate; measuring dt only adds executor jitter.
         dt = 1.0 / self._control_freq
         if cfg.ENABLE_REFERENCE_GOVERNOR:
             # Right arm
@@ -819,16 +799,10 @@ class SafetyQPController(Node):
                 self.pub_qdot_measured.publish(Float64MultiArray(data=meas_v_14.tolist()))
 
         # --- 5. Command publishing ---
-        # Option B: ALWAYS send the QP-computed velocity to TSID for BOTH arms.
-        # The old per-arm zero-overwrite (when an arm had no fresh reference) is
-        # removed: it discarded the QP's collision-avoidance motion for the
-        # inactive arm, which let the two arms silently inter-penetrate. The
-        # inactive arm is instead held by its frozen-pose CLF (pinned MAX slack +
-        # doubled damping), so its commanded motion is meaningful and safe.
-        #
-        # Final safety gate: identity in sim, but on real hardware it returns a
-        # zeroed vector (freeze BOTH arms) while the async CBF result is stale,
-        # so a stale barrier can never drive the arms (staleness watchdog).
+        # Always send the QP-computed velocity for both arms -- the inactive
+        # arm is safely held by its frozen-pose CLF, not zeroed.
+        # _gate_command: identity in sim; on real hardware zeroes both arms
+        # while the async CBF result is stale (staleness watchdog).
         q_dot_cmd = self._gate_command(q_dot_safe)
         cmd_data_r = [0.0] * 7
         cmd_data_l = [0.0] * 7
@@ -845,12 +819,7 @@ class SafetyQPController(Node):
         if self.publish_counter % self.publish_every_n == 0:
             self.pub_qdot_cmd.publish(Float64MultiArray(data=self.last_qdot_cmd_14.tolist()))
 
-            # --- Reference governor telemetry (2026-07-01): publishes the RAW-minus-
-            # GOVERNED difference so the plotter can show when/where the governor
-            # clamps. Layout: [pos_diff_R(3), ori_diff_R(3), vel_diff_R(3),
-            # wvel_diff_R(3), pos_diff_L(3), ori_diff_L(3), vel_diff_L(3),
-            # wvel_diff_L(3)] = 24 floats. All zeros when the governor is off or
-            # the raw reference is already within bounds (passthrough).
+            # Raw-vs-governed diff, 24 floats: [pos/ori/vel/wvel]x[R,L], 3 each.
             if cfg.ENABLE_REFERENCE_GOVERNOR:
                 def _gov_diff(raw, gov):
                     if raw is None or gov is None:
@@ -871,7 +840,7 @@ class SafetyQPController(Node):
 
         # --- 6. Evolve the digital twin (ideal kinematics) ---
         if cfg.SIMULATE_IDEAL_KINEMATICS:
-            current_time = time.perf_counter()
+            current_time = self._now()
             if self.last_sim_time is None:
                 dt_sim = 0.001
             else:
@@ -952,19 +921,16 @@ class SafetyQPController(Node):
 
         # Min distance + dynamic weights
         self.pub_min_dist.publish(Float64(data=abs_min_distance))
-        # Per-arm slack weights (2026-07-01): weight_slack_r weights ONLY delta_r
-        # and weight_slack_l weights ONLY delta_l in the QP Hessian (confirmed --
-        # see qp_formulator.build_and_solve's slack block assembly). Previously
-        # only their AVERAGE was published; now both are sent so the plotter can
-        # show them independently, matching how the QP actually uses them.
-        self.pub_dynamic_weights.publish(Float64MultiArray(
-            data=[float(self.qp.weight_slack_r), float(self.qp.weight_slack_l), float(self.qp.gamma_clf)]))
+        # 5 floats: [weight_slack_r, weight_slack_l, gamma_mean, gamma_r, gamma_l].
+        # gamma_mean kept at index 2 for plotter.py's live dashboard.
+        gamma_mean = 0.5 * (self.qp.gamma_clf_r + self.qp.gamma_clf_l)
+        self.pub_dynamic_weights.publish(Float64MultiArray(data=[
+            float(self.qp.weight_slack_r), float(self.qp.weight_slack_l),
+            float(gamma_mean), float(self.qp.gamma_clf_r), float(self.qp.gamma_clf_l)]))
         # Per-arm frozen/active ground truth for the RViz visualizer.
         self.pub_arm_frozen.publish(Float64MultiArray(
             data=[1.0 if self.right_frozen else 0.0, 1.0 if self.left_frozen else 0.0]))
-        # Per-arm dynamic safety margins (2026-07-01 coupling fix): each arm's
-        # margin now thickens only with ITS OWN speed. Published as a 2-element
-        # array [d_safe_R, d_safe_L] (was a single shared Float64).
+        # [d_safe_R, d_safe_L]; each thickens only with its own arm's speed.
         self.pub_d_safe_dynamic.publish(Float64MultiArray(
             data=[float(d_safe_dynamic_r), float(d_safe_dynamic_l)]))
         # Soft-task cost decomposition [E_damp, E_posture, E_slack] for the
@@ -989,15 +955,8 @@ class SafetyQPController(Node):
         # Virtual wall marker
         self.viz.publish_wall_marker()
 
-        # Cartesian projection of the collision gradient for shared autonomy.
-        # Each arm's OWN cartesian gradient now comes from ITS OWN independent
-        # SoftMin (J_soft_r for the right projection, J_soft_l for the left),
-        # matching the per-arm CBF split -- previously both used the single
-        # combined J_soft/b_col, which leaked the other arm's barrier into
-        # whichever arm main_shared_autonomy currently treats as active.
-        # NEW layout (14 floats): [b_col_r, b_col_l, J_c_cart_R(6), J_c_cart_L(6)]
-        # (old layout was 13 floats: [b_col, J_c_cart_R(6), J_c_cart_L(6)] --
-        # main_shared_autonomy.collision_data_callback is updated to match).
+        # Cartesian collision gradient for shared autonomy, per arm: 14 floats
+        # [b_col_r, b_col_l, J_c_cart_R(6), J_c_cart_L(6)].
         b_col_r, b_col_l = b_col_pair
         if self.kin.ee_id_right is not None and self.kin.ee_id_left is not None:
             J_EE_R_6D = pin.getFrameJacobian(self.kin.model, self.kin.data, self.kin.ee_id_right, pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)
@@ -1011,6 +970,9 @@ class SafetyQPController(Node):
 def main():
     rclpy.init()
     node = SafetyQPController()
+
+    # Do NOT set use_sim_time here -- a sim-time timer can catch up in bursts
+    # under executor load, firing several ticks back-to-back and lurching the arm.
 
     # --- PHASE 1: wait for TF, then verify controller state ---
     node.get_logger().info("[Main] Waiting for TF...")

@@ -54,7 +54,7 @@ class HeadPlotterNode(Node):
 
         # --- Data buffers (thread-safe access via lock) ----------------
         self.lock = threading.Lock()
-        self.WINDOW = 60.0  # seconds of history to display
+        self.WINDOW = 20.0  # seconds of history to display
         self.MAXLEN = int(self.WINDOW * 5)  # 5 Hz perception rate
 
         self.t_data = deque(maxlen=self.MAXLEN)
@@ -79,11 +79,16 @@ class HeadPlotterNode(Node):
         self.conf_red = deque(maxlen=self.MAXLEN)
         self.conf_blue = deque(maxlen=self.MAXLEN)
         self.map_size = deque(maxlen=self.MAXLEN)
-        # Perceived-world CONVERGENCE progress (world_convergence.py) -- distinct
-        # from the raw per-object confidence above: "how close is the fused
-        # estimate to being judged STABLE enough to freeze into the CBF world".
-        self.stable_frames = deque(maxlen=self.MAXLEN)
+        # Perceived-world CONVERGENCE + active-vision telemetry (world_convergence.py
+        # / look_at_controller.py). converge_progress = fraction [0..1] of the
+        # drift-rate window satisfied; drift_rate [mm/s] is the GT-free "still
+        # moving?" signal; phase = 0 SWEEP / 1 REFINE / 2 HOLD; weakest_cov = arc
+        # coverage of the least-observed object (the head steers to raise it).
+        self.converge_progress = deque(maxlen=self.MAXLEN)
+        self.drift_rate = deque(maxlen=self.MAXLEN)
+        self.weakest_cov = deque(maxlen=self.MAXLEN)
         self.converged = deque(maxlen=self.MAXLEN)
+        self._phase = 0
         self._converged_t = None   # plot-time [s] of the first convergence
 
         # --- ROS subscriptions -----------------------------------------
@@ -96,7 +101,8 @@ class HeadPlotterNode(Node):
 
     def _telemetry_cb(self, msg: Float64MultiArray):
         # [n_raw, n_crop, plane_z, look_err_deg, slack, proc_ms,
-        #  red_conf, blue_conf, map_size, stable_frames, converged]
+        #  red_conf, blue_conf, map_size, converge_progress, converged,
+        #  phase, weakest_cov, drift_rate_mps, head_qdot_norm]
         if len(msg.data) < 6:
             return
         t = time.time() - self.start_time
@@ -110,11 +116,17 @@ class HeadPlotterNode(Node):
                 self.conf_blue.append((t, msg.data[7] * 100.0))
                 self.map_size.append((t, msg.data[8]))
             if len(msg.data) >= 11:
-                self.stable_frames.append((t, msg.data[9]))
+                self.converge_progress.append((t, msg.data[9] * 100.0))  # fraction -> %
                 is_converged = msg.data[10] > 0.5
                 self.converged.append((t, msg.data[10]))
                 if is_converged and self._converged_t is None:
                     self._converged_t = t
+            if len(msg.data) >= 15:
+                self._phase = int(msg.data[11])
+                self.weakest_cov.append((t, msg.data[12] * 100.0))       # fraction -> %
+                drift = msg.data[13]
+                # -1 sentinel means "no rate yet" (NaN on the publisher side).
+                self.drift_rate.append((t, drift * 1000.0 if drift >= 0 else np.nan))
 
     def _markers_cb(self, msg: MarkerArray):
         t = time.time() - self.start_time
@@ -248,18 +260,30 @@ def main():
     line_plane, = ax_plane.plot([], [], "g-", linewidth=2, label="Detected")
     ax_plane.legend(loc="upper right", fontsize=8)
 
-    # Confidence over time (estimation quality = arc coverage x fit quality)
-    # + convergence progress (world_convergence.py's "confident enough to freeze"
-    # stability countdown -- the ROBOT'S OWN belief that the world is ready).
-    ax_conf.set_title("Estimation Confidence & Convergence Toward Freeze")
-    ax_conf.set_ylabel("Confidence / Stability [%]")
+    # Confidence + convergence + the GT-FREE drift-rate signal. The left axis holds
+    # per-object confidence, weakest-object coverage, and the convergence-window
+    # progress (converge_progress, world_convergence.py). The right (twin) axis
+    # holds the object-centre drift RATE [mm/s] with a dashed threshold at
+    # WORLD_CONVERGE_POS_RATE -- convergence fires only once drift stays under that
+    # line long enough to fill the window (this is the honest "has it settled?"
+    # indicator, needs no ground truth).
+    ax_conf.set_title("Confidence / Coverage / Convergence + Drift Rate")
+    ax_conf.set_ylabel("Confidence / Coverage / Window [%]")
     ax_conf.set_xlabel("Time [s]")
     ax_conf.grid(True, alpha=0.3)
     ax_conf.set_ylim(0, 105)
     line_conf_r, = ax_conf.plot([], [], "r-", linewidth=1.5, label="Red conf")
     line_conf_b, = ax_conf.plot([], [], "b-", linewidth=1.5, label="Blue conf")
-    line_stability, = ax_conf.plot([], [], "k--", linewidth=1.2, label="Stability→freeze")
-    ax_conf.legend(loc="upper right", fontsize=7)
+    line_weakcov, = ax_conf.plot([], [], "m-", linewidth=1.2, label="Weakest cov")
+    line_stability, = ax_conf.plot([], [], "k--", linewidth=1.2, label="Window→freeze")
+    ax_conf.legend(loc="upper left", fontsize=7)
+    ax_drift = ax_conf.twinx()
+    ax_drift.set_ylabel("Drift rate [mm/s]", color="darkgreen")
+    ax_drift.tick_params(axis="y", labelcolor="darkgreen")
+    ax_drift.set_ylim(0, max(20.0, cfg.WORLD_CONVERGE_POS_RATE * 1000 * 4))
+    line_drift, = ax_drift.plot([], [], color="darkgreen", linewidth=1.3, label="Drift")
+    ax_drift.axhline(cfg.WORLD_CONVERGE_POS_RATE * 1000, color="darkgreen",
+                     linestyle=":", linewidth=1.2)
     status_text = ax_conf.text(
         0.02, 0.95, "", transform=ax_conf.transAxes, fontsize=8, va="top",
         bbox=dict(boxstyle="round", fc="lightyellow", alpha=0.85))
@@ -320,7 +344,10 @@ def main():
                 conf_r_list = list(node.conf_red)
                 conf_b_list = list(node.conf_blue)
                 map_list = list(node.map_size)
-                stable_list = list(node.stable_frames)
+                progress_list = list(node.converge_progress)
+                drift_list = list(node.drift_rate)
+                weakcov_list = list(node.weakest_cov)
+                phase = node._phase
                 converged_t = node._converged_t
 
             # Update line data
@@ -340,19 +367,25 @@ def main():
             if map_list:
                 line_map.set_data([p[0] for p in map_list], [p[1] for p in map_list])
 
-            # Convergence progress + status box (robot's own "is the world ready
-            # to freeze" belief -- see world_convergence.py).
-            if stable_list:
-                st_t = [p[0] for p in stable_list]
-                st_pct = [min(100.0, 100.0 * p[1] / cfg.WORLD_STABLE_FRAMES) for p in stable_list]
-                line_stability.set_data(st_t, st_pct)
-                cur_stable = stable_list[-1][1]
+            # Weakest-object coverage + convergence-window progress + drift rate.
+            if weakcov_list:
+                line_weakcov.set_data([p[0] for p in weakcov_list],
+                                      [p[1] for p in weakcov_list])
+            if drift_list:
+                line_drift.set_data([p[0] for p in drift_list], [p[1] for p in drift_list])
+            phase_txt = {0: "SWEEP", 1: "REFINE", 2: "HOLD"}.get(phase, "?")
+            if progress_list:
+                line_stability.set_data([p[0] for p in progress_list],
+                                        [p[1] for p in progress_list])
+                cur_progress = progress_list[-1][1]
+                cur_weak = weakcov_list[-1][1] if weakcov_list else 0.0
                 if converged_t is not None:
                     status_text.set_text("WORLD CONVERGED\n(snapshot frozen)")
                     status_text.get_bbox_patch().set_facecolor("lightgreen")
                 else:
                     status_text.set_text(
-                        f"Stability: {int(cur_stable)}/{cfg.WORLD_STABLE_FRAMES} frames")
+                        f"phase={phase_txt}  weakest_cov={cur_weak:.0f}%\n"
+                        f"window {cur_progress:.0f}%")
                     status_text.get_bbox_patch().set_facecolor("lightyellow")
             if converged_t is not None and converged_line is None:
                 converged_line = ax_conf.axvline(

@@ -73,18 +73,9 @@ TABLE_TOP_CENTER_BASE = np.array(
     [TABLE_CENTER_BASE[0], TABLE_CENTER_BASE[1], TABLE_TOP_Z_WORLD - BASE_POSE_IN_WORLD[2]]
 )
 
-# WORLD MISMATCH WARNING (found 2026-07-06): the numbers above are from
-# THIS repo's own `movement_tutorial.world` (table centre x=1.00, top
-# z=0.70). The sibling chiarapanagrosso/Triago_Project stack instead
-# defaults to `world_name: handover` (qp_controller_sim.yaml), whose
-# `handover.world` "picking_table" is at a DIFFERENT pose (centre x=0.80,
-# top z=0.50). If you are running that world, TABLE_TOP_CENTER_BASE here is
-# WRONG for it and head_look_at_table.py will aim at empty space while still
-# reporting a low look-at error (it IS pointing exactly at the *wrong* point).
-# head_look_at_table.py exposes table_x / table_y / table_z ROS params so you
-# can override this per-world without editing this file; its own default is
-# z=0.8 (matching a specific request), not TABLE_TOP_Z_WORLD -- verify against
-# whichever world's actual table pose you are running and override if needed.
+# These values match this repo's movement_tutorial.world table pose only.
+# Other worlds need different numbers -- override via head_look_at_table.py's
+# table_x/table_y/table_z ROS params rather than editing this file.
 
 # =============================================================================
 # 3. HEAD KINEMATICS  (identical hardware to the L/R arms — 7-DOF)
@@ -116,18 +107,9 @@ LOOKAT_SLACK_WEIGHT = 500.0  # HIGH penalty: the look-at task dominates over pos
 # good table coverage — NOT the grazing "camera above the base" pose that
 # mid-range produces.
 #
-# UPDATED 2026-07-02 (accuracy pass): moved from ~0.81m to ~0.63m camera-to-
-# table-centre distance (verified via Pinocchio FK against the real URDF —
-# reachable with >0.5 rad margin from every joint limit, similar elevation
-# angle/"character" to the previous target, i.e. not a wild alternate branch).
-# Stereo depth noise scales roughly with distance^2, so this alone is an
-# estimated ~40% reduction in depth-noise VARIANCE (~23% in std) for free.
-# Kept a comfortable margin above the RealSense D455's rated minimum usable
-# depth range (0.4m) — closer than this would trade accuracy for missing/
-# invalid depth returns, which is a worse trade. This is a SECONDARY fix
-# relative to the rim-extraction fit correction in object_detector.py (which
-# addresses a ~5mm systematic bias vs. this ~1-2mm noise-floor improvement),
-# but it is free (no other tradeoff) so we take it.
+# ~0.63m camera-to-table distance, reachable with >0.5 rad joint-limit margin.
+# Stereo depth noise scales with distance^2, so this stays well clear of the
+# RealSense D455's 0.4m minimum usable range while cutting noise variance.
 HEAD_POSTURE_TARGET = np.array([-0.35, -0.25, -0.60, -1.15, -1.00, -1.25, 0.00])
 POSTURE_GAIN = 0.50          # acts in the look-at null space (slack weight is high)
 # Velocity-aware joint-limit CBF.
@@ -140,37 +122,11 @@ LOOKAT_ALIGNED_DEG = 4.0
 # =============================================================================
 # 5. SCAN MOTION  (gentle sweep around the look-at target to improve coverage)
 # =============================================================================
-# RE-EVALUATED 2026-07-02 (accuracy pass): the scan was ORIGINALLY motivated by
-# the belief that more viewpoints would average out the radius/height bias.
-# Verified numerically that this was NOT the mechanism at fault — the bias was
-# the circle fit running on the disk INTERIOR, not insufficient viewpoints
-# (see object_detector.py's module docstring). A single, closer, rim-corrected
-# view now gets within ~1mm of ground truth in simulation, i.e. the scan is no
-# longer required to reach the target accuracy.
-#
-# Kept ENABLED anyway, because it is still legitimately useful for a DIFFERENT
-# reason: angular COVERAGE. The rim extraction can only recover the boundary
-# of what the camera actually saw — a single top-down-ish view still only
-# shows ~150-180 deg of the side wall (the far side is self-occluded). The
-# scan's cumulative arc-coverage tracking (object_tracker.py) still closes
-# that gap over a few seconds, and per-frame estimates are no longer biased,
-# so there's no longer a "more views = re-confirm the same bias" risk (see the
-# updated fusion policy in object_tracker.py, now a per-frame EMA rather than
-# grow-only-max). If startup latency matters more than full coverage in a
-# given scenario, this can safely be set False now — accuracy will not
-# meaningfully suffer, only the (already less important) full-circumference
-# arc-coverage stat will stay lower.
-ENABLE_SCAN = False           # Disabled: the geometric depth pipeline needs a STILL
-                              # head for accurate TF-based cloud transforms. With scan
-                              # enabled, TF lags behind the actual head motion and
-                              # introduces ~5-10 cm oscillations in the detected object
-                              # poses. The camera FOV already covers the full table from
-                              # the HEAD_POSTURE_TARGET viewpoint. head_april_main can
-                              # safely scan (single-point detection, not a full cloud
-                              # transform); re-enable here only if TF latency is solved.
-SCAN_DWELL_S = 8.0           # [s] time parked at each waypoint (settle + fuse);
-                              # increased from 4s so the head fully settles below
-                              # INTEGRATE_VEL_THRESH before the next jump
+# Scanning improves angular coverage (the rim fit only sees ~150-180 deg from
+# one viewpoint), but requires a still head for accurate TF-based cloud
+# transforms -- moving TF lags and causes ~5-10cm pose oscillation.
+ENABLE_SCAN = False           # single viewpoint already covers the table
+SCAN_DWELL_S = 8.0            # [s] parked per waypoint, settle below INTEGRATE_VEL_THRESH
 SCAN_WAYPOINTS = [
     (0.00, 0.00),
     (0.05, 0.08),
@@ -178,6 +134,37 @@ SCAN_WAYPOINTS = [
     (-0.03, 0.08),
     (-0.03, -0.08),
 ]
+
+# =============================================================================
+# 5c. ACTIVE VISION  (perception-driven head motion — supersedes the fixed scan)
+# =============================================================================
+# When ENABLE_ACTIVE_VISION is True, the head is no longer driven by wall-clock
+# time (ENABLE_SCAN / SCAN_DWELL_S). Instead look_at_controller.active_vision_target
+# runs a two-phase policy that is LED BY WHAT THE CAMERA SEES:
+#   Phase 0 SWEEP  : cycle the SCAN_WAYPOINTS offsets to discover the plane + every
+#                    expected object, advancing off a waypoint once its incremental
+#                    per-object arc-coverage gain PLATEAUS (not a fixed dwell).
+#   Phase 1 REFINE : re-aim the fixation point at the WEAKEST object (lowest
+#                    arc_coverage / confidence), nudged toward the azimuth of its
+#                    unseen arc sectors, until its coverage plateaus or clears the
+#                    floor; then re-pick the next weakest.
+#   Phase 2 HOLD   : stop re-aiming; hold still so the rate-based convergence check
+#                    (world_convergence.py) can run on settled frames and freeze.
+# The move->settle->fuse discipline is UNCHANGED: fusion + convergence still only
+# advance on settled frames (INTEGRATE_VEL_THRESH gate), so a moving head never
+# corrupts the estimate — the policy only changes WHERE we look, never bypasses
+# that gate. Bounded by ACTIVE_VISION_TIME_BUDGET_S so hardware can't scan forever.
+ENABLE_ACTIVE_VISION = True   # False -> fall back to the fixed ENABLE_SCAN path
+# "Plateau": a settled-frame arc-coverage gain below this (fraction, 0..1) counts
+# as no-progress; PLATEAU_PATIENCE such consecutive frames ends a waypoint/refine.
+ACTIVE_VISION_PLATEAU_EPS = 0.01
+ACTIVE_VISION_PLATEAU_PATIENCE = 6      # settled frames of no-progress => advance
+# Phase 1 re-aim: how far (base-frame XY, m) to offset the fixation point toward the
+# weakest object's unseen-sector azimuth. Small — a fixed-base neck gives limited
+# parallax; the main gain is centering the weak object in the FOV (see out-of-scope
+# note in the plan re: orbiting the camera POSITION for true arc gain).
+ACTIVE_VISION_REFINE_OFFSET = 0.06
+ACTIVE_VISION_TIME_BUDGET_S = 45.0      # hard cap on total sweep+refine before HOLD
 
 # =============================================================================
 # 5b. MULTI-VIEW ACCUMULATION  (DISABLED — see note)
@@ -204,13 +191,8 @@ INTEGRATE_VEL_THRESH = 0.04  # [rad/s] only fuse when head settled (if enabled)
 # We subsample the depth image on a pixel grid to keep the cloud small enough
 # for pure-numpy/scipy processing on a CPU. Stride 4 over 1280x720 -> ~57k pts.
 PIXEL_STRIDE = 2
-# DEPTH_MIN raised 0.20 -> 0.35 (2026-07-02): the RealSense D455 is only rated
-# accurate from ~0.4m; points closer than that are frequently invalid/noisy
-# stereo-matching artefacts, not genuine near-field returns. 0.35m keeps a
-# small margin below the rated floor (so we don't clip legitimately-valid
-# points right at the boundary) while rejecting the worst near-range noise.
-# With the new, closer HEAD_POSTURE_TARGET (~0.63m to the table centre, see
-# §4), the working range now sits safely above this floor with headroom.
+# 0.35m: just below the D455's ~0.4m rated-accurate range, rejecting the
+# worst near-range stereo noise without clipping valid near-boundary points.
 DEPTH_MIN = 0.35             # [m] ignore points closer than this (noise/self)
 DEPTH_MAX = 2.50             # [m] ignore points beyond this (background/walls)
 
@@ -239,16 +221,8 @@ PLANE_Z_TOLERANCE = 0.15     # [m] around TABLE_TOP_Z_WORLD
 # =============================================================================
 # 9. EUCLIDEAN CLUSTERING  (group above-plane points into candidate objects)
 # =============================================================================
-# VOXEL_SIZE lowered 10mm -> 3mm (2026-07-02 accuracy pass): a 10mm leaf is
-# roughly HALF the cylinder's diameter (r=2cm) -- it was destroying most of
-# the rim-extraction gain in object_detector.py by collapsing near-boundary
-# points together before the rim fit ever sees them (verified numerically:
-# with 10mm voxels the end-to-end radius bias was ~-3.4mm; with 3mm voxels,
-# ~-1.4mm, matching the bias measured on the un-downsampled cluster). 3mm was
-# chosen as the point where further shrinking gives diminishing returns (2mm
-# barely improves on 3mm) while keeping the downsampled cluster small enough
-# for the O(n log n) KD-tree clustering to stay comfortably real-time at
-# PERCEPTION_RATE_HZ.
+# 3mm: coarser leaves collapse near-boundary points before the rim fit sees
+# them, biasing the radius estimate; 3mm balances that against cluster cost.
 VOXEL_SIZE = 0.003           # [m] downsample leaf before clustering
 CLUSTER_TOLERANCE = 0.030    # [m] max gap within one cluster
 CLUSTER_MIN_POINTS = 25      # reject specks / noise
@@ -266,33 +240,18 @@ CYL_MAX_RADIUS = 0.080
 CYL_MIN_HEIGHT = 0.030       # [m]
 CYL_MAX_HEIGHT = 0.400
 
-# --- Rim extraction (2026-07-02 accuracy pass) --------------------------
-# Fitting a circle directly to a cluster that contains the cylinder's solid
-# TOP FACE (a filled disk) is systematically biased toward a SMALLER radius
-# -- interior points outnumber and sit closer to centre than the true
-# boundary. Verified numerically: this alone explained roughly -3 to -5mm of
-# the reported radius error, and was NOT fixed by scanning (more views just
-# re-confirm the same biased fit). `_extract_rim` in object_detector.py bins
-# the cluster by angle and keeps only the points near the LOCAL
-# CYL_RIM_PERCENTILE-th percentile radius per bin, collapsing the disk
-# interior away before the circle fit runs.
+# Fitting a circle to the cylinder's solid top face biases the radius small
+# (interior points outnumber the boundary). `_extract_rim` in object_detector.py
+# bins by angle and keeps only the local CYL_RIM_PERCENTILE-th-percentile
+# points per bin, collapsing the disk interior away before the fit runs.
 CYL_RIM_BINS = 72            # angular sectors (~5 deg each) for rim extraction
 CYL_RIM_PERCENTILE = 93      # per-bin radius percentile defining the rim
-# Percentile (not max) per bin -- verified numerically to be far more robust
-# to RGB-D "flying pixel" outliers (stereo-matching smear at depth
-# discontinuities can scatter a few points beyond the true rim; taking the
-# raw max chases them back outward, taking the local percentile does not).
-# 93/1.5mm was swept numerically as a good balance: ~-1.3mm bias on a clean
-# synthetic cluster, ~+0.3mm with 10% simulated flying-pixel contamination
-# (both comfortably sub-cm; pushing the percentile higher trades one for the
-# other rather than improving both).
+# Percentile (not max) is robust to RGB-D flying-pixel outliers at depth
+# discontinuities, which a raw max would chase outward.
 CYL_RIM_BAND = 0.0015        # [m] band width around the percentile radius
                               # averaged to form each bin's rim point
 
-# Top-slice: used for BOTH the height estimate (median of the top slice,
-# not z_max -- see object_detector.py, z_max is a biased-high max-statistic)
-# and, historically, an alternative XY estimate (now superseded by rim
-# extraction + Hyper fit above; kept only for the height use).
+# Height uses the top slice's median (z_max alone is a biased-high statistic).
 CYL_TOP_SLICE = 0.020        # [m] take points within this of the cluster's z_max
 
 # Conservative radius inflation for collision use (0 = report raw estimate).
@@ -326,9 +285,6 @@ BLUE_HUE_HIGH = 0.75
 # point-cloud fusion. Fuses DERIVED object quantities across viewpoints, so
 # head motion still helps (more arc -> more coverage, noise averages down)
 # without the point-registration smear that broke voxel accumulation.
-# NOTE (2026-07-02): dims (radius/height) switched from grow-only to EMA —
-# see object_tracker.py's module docstring. TRACK_DIM_DECAY (grow-only's
-# shrink-back rate) is removed as dead config along with it.
 TRACK_MATCH_DIST = 0.15      # [m] associate a detection to a track within this
 TRACK_MAX_UNSEEN = 15        # frames an unmatched track survives (~3s @5Hz)
 TRACK_POS_ALPHA = 0.30       # EMA on position AND dimensions (0..1, higher = more responsive)
@@ -394,20 +350,8 @@ TP_MIN_MARKER_SCALE = 0.01        # [m] floor so zero-thickness boxes stay visib
 # match the original node's exact-time-only lookup).
 TP_TF_TIMEOUT_S = 0.05
 
-# --- cloud_relay_node.py (bridges a real camera cloud -> TP_CLOUD_TOPIC) ---
-# ROOT CAUSE (found 2026-07-06): NOTHING in the upstream chiarapanagrosso/
-# Triago_Project stack actually publishes `/filtered_cloud`. Its own
-# perception.launch.py throttles the RealSense cloud to
-# `/throttle_filtering_points/filtered_points` (confirmed against a captured
-# sim log: MoveIt's pointcloud_octomap_updater listens to THAT name, not
-# `/filtered_cloud`) -- a topic-name mismatch/unfinished wiring in the source
-# repo itself, not something introduced by this port. Without a publisher on
-# `/filtered_cloud`, tabletop_perception_node's `_cloud_callback` never runs,
-# so every downstream topic (including the head_plotter bridge) stays empty
-# forever with no other symptom. cloud_relay_node.py exists purely to plug
-# that gap in THIS project: relay this project's own real camera cloud
-# (see Recording_Rviz.rviz, which already points at this exact topic) to
-# TP_CLOUD_TOPIC, throttled, with no PCL/topic_tools dependency required.
+# cloud_relay_node.py: nothing publishes /filtered_cloud upstream, so relay
+# this project's real camera cloud to TP_CLOUD_TOPIC, throttled.
 TP_RELAY_SOURCE_TOPIC = "/gripper_head_camera_rgbd/depth/color/points"
 TP_RELAY_TARGET_TOPIC = TP_CLOUD_TOPIC
 TP_RELAY_RATE_HZ = 10.0
@@ -505,15 +449,8 @@ APRILTAG_OPTICAL_CENTER_FRAME = "gripper_head_camera_rgbd_link"   # SIM default
 # (align_z=false) has Z out of the tag toward the camera, X=image-right,
 # Y=image-up (verified: cMo == Rot_x(180deg) for a fronto-parallel view).
 #
-# MEASURED on the sim (2026-07): the rendered tag's frame in base_footprint is
-# X_tag -> world -Y, Y_tag -> world +X, Z_tag -> world +Z, i.e. a yaw of -90 deg
-# (Gazebo's OGRE box-face UV maps the tag image-right to world -Y, not +X as
-# initially assumed). This is the true fiducial-frame orientation, NOT an
-# error-masking offset. With rpy=[0,0,0] the reconstructed cylinders were
-# rotated 90 deg about the tag centre (the ~40 cm X/Y errors); rpy=[0,0,-pi/2]
-# makes the reconstruction exact. If you re-print / re-orient the physical tag
-# on the real robot, set this to whatever the actual tag-frame yaw in
-# base_footprint then is (read it off the tracker_apriltag TF frame).
+# Measured tag-frame yaw in base_footprint is -90 deg (Gazebo's UV mapping),
+# not the naive rpy=[0,0,0]. Re-measure if the physical tag is re-oriented.
 APRILTAG_CENTER_WORLD = np.array([1.000, 0.0, 0.701])   # tag plate centre (world)
 APRILTAG_RPY_WORLD = np.array([0.0, 0.0, -np.pi / 2])   # ViSP tag frame RPY in world
 
@@ -575,6 +512,19 @@ PERCEIVED_WORLD_RESCAN_TOPIC = "/perceived_world/rescan"  # std_msgs/Empty -> re
 
 WORLD_EXPECTED_CYLINDERS = 2      # red + blue on the table
 WORLD_CONF_MIN = 0.85             # each cylinder's tracker confidence must reach this
+
+# Convergence gate: every object must clear the arc-coverage floor, then hold
+# a tight oscillation-amplitude band (not a per-frame drift count, which can
+# stay "stable" while consistently wrong) for a full window. See world_convergence.py.
+WORLD_CONVERGE_POS_AMP = 0.001    # [m] max object-centre oscillation (peak dev from window mean)
+WORLD_CONVERGE_DIM_AMP = 0.0015   # [m] max radius/height oscillation over the window
+WORLD_CONVERGE_WINDOW_S = 1.0     # [s]   the amplitude band must hold this long
+WORLD_MIN_ARC_COVERAGE = 0.55     # [0..1] every object must reach this before the lock can arm
+WORLD_CONVERGE_POS_RATE = 0.005   # [m/s] drift-rate reference (telemetry/plot only, not the gate)
+WORLD_CONVERGE_DIM_RATE = 0.003   # [m/s] (telemetry only)
+
+# DEPRECATED (kept for the ENABLE_SCAN fallback / reference only — the rate-based
+# criterion above is what WorldConvergenceMonitor now uses):
 WORLD_STABLE_POS_TOL = 0.005      # [m] max per-settled-frame centre drift to count as "stable"
 WORLD_STABLE_DIM_TOL = 0.003      # [m] max per-settled-frame radius/height drift
 WORLD_STABLE_FRAMES = 15          # consecutive stable settled frames required (~3 s @ 5 Hz)

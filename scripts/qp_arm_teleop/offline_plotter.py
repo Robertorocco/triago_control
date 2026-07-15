@@ -70,6 +70,26 @@ and the live joint-position slider GUI):
                                     immediately visible when/how much the
                                     governor reshaped the input trajectory.
                                     (only emitted if cfg.ENABLE_REFERENCE_GOVERNOR)
+    fig7_head_perception            Head camera perception: per-object (red/
+                                    blue) position/radius/height/confidence
+                                    over time, active-vision phase + rate-based
+                                    convergence progress + drift rate, cloud/
+                                    map size. Only emitted if main_head.py was
+                                    running this trial (data on
+                                    /head_perception/telemetry|markers). A
+                                    vertical marker line is drawn at the exact
+                                    instant /perceived_world/snapshot latched,
+                                    if it did during this trial.
+    fig8_head_kinematics            Head joint position / measured velocity /
+                                    QP-commanded velocity, 3x1 (single chain,
+                                    no left/right split). Only emitted if head
+                                    joints appeared on /joint_states this trial.
+    fig9_head_active_tracking       head_active_arm_tracking.py's camera-
+                                    framing performance: pixel centering error,
+                                    angular errors (pointing/roll/approach),
+                                    stand-off distance vs. target. Only emitted
+                                    if that node was running this trial (data
+                                    on /head_active_tracking/telemetry).
 
     summary_metrics.json           Up to 10 headline numbers ("was this trial
                                     smooth / accurate / safe") distilled from
@@ -112,9 +132,10 @@ import numpy as np
 import pinocchio as pin
 import rclpy
 from rclpy.node import Node
-from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy
+from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray, Float64, String, Bool
+from visualization_msgs.msg import MarkerArray
 
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
@@ -169,6 +190,14 @@ _BAG_STOP_GRACE_S = 15.0
 def _draw_trigger_line(ax, t_off):
     if t_off is not None:
         ax.axvline(t_off, **TRIGGER_LINE_KW)
+
+
+def _draw_world_snapshot_line(ax, t_snap):
+    """Vertical marker at the instant /perceived_world/snapshot latched this
+    trial (None if it never fired while recording -- see perceived_world_callback).
+    Green, dotted, distinct from the grey trajectory-finished trigger line."""
+    if t_snap is not None:
+        ax.axvline(t_snap, color='green', linestyle=':', linewidth=1.3, zorder=0)
 
 
 def _moving_average(x, win):
@@ -231,6 +260,11 @@ class OfflinePlotter(Node):
         self.last_real_rpy_r = None
         self.last_real_rpy_l = None
 
+        # Latest perceived-world snapshot text (latched topic -- survives across
+        # trials like last_real_pos_r above; per-trial capture time/text are in
+        # self.world_snapshot_t/_text, reset each trial by _reset_buffers).
+        self._last_world_snapshot_text = None
+
         self._reset_buffers()
 
         qos_profile = QoSProfile(
@@ -274,7 +308,7 @@ class OfflinePlotter(Node):
         self.create_subscription(Float64MultiArray, '/qp_debug/lambda_joints',
                                  self.lambda_joints_callback, qos_profile)
         self.create_subscription(Float64, '/qp_debug/loop_freq', self.freq_callback, qos_profile)
-        self.create_subscription(Float64, '/qp_debug/safety_margin', self.h_callback, qos_profile)
+        self.create_subscription(Float64MultiArray, '/qp_debug/safety_margin', self.h_callback, qos_profile)
         self.create_subscription(Float64, '/qp_debug/min_distance', self.min_dist_callback, qos_profile)
 
         # --- Dynamic weight scheduler sources ---
@@ -290,6 +324,33 @@ class OfflinePlotter(Node):
         # --- Reference governor telemetry (only meaningful if enabled) ---
         self.create_subscription(Float64MultiArray, '/qp_debug/governor',
                                  self.gov_callback, qos_profile)
+
+        # --- Head perception (main_head.py) -- optional; a trial with no head
+        # node running simply never populates these buffers, and the head
+        # figures are skipped at finalize time (see _finalize_and_save). ---
+        self.create_subscription(Float64MultiArray, '/head_perception/telemetry',
+                                 self.head_telemetry_callback, 10)
+        self.create_subscription(MarkerArray, '/head_perception/markers',
+                                 self.head_markers_callback, 10)
+        self.create_subscription(Float64MultiArray, '/head_perception/qdot_cmd',
+                                 self.head_qdot_cmd_callback, 10)
+        self.create_subscription(Float64MultiArray, '/head_perception/qdot_measured',
+                                 self.head_qdot_measured_callback, 10)
+        # Latched (TRANSIENT_LOCAL) -- fires once per convergence; a subscriber
+        # that joins after the fact still gets the last snapshot (see
+        # world_convergence.py). Depth-1 QoS matches the publisher's own.
+        world_qos = QoSProfile(depth=1)
+        world_qos.durability = DurabilityPolicy.TRANSIENT_LOCAL
+        world_qos.reliability = ReliabilityPolicy.RELIABLE
+        self.create_subscription(MarkerArray, '/perceived_world/snapshot',
+                                 self.perceived_world_callback, world_qos)
+
+        # --- Head active-arm tracking (head_active_arm_tracking.py) -- optional,
+        # same "skip if absent" handling as the head-perception topics above. ---
+        self.create_subscription(Float64MultiArray, '/head_active_tracking/telemetry',
+                                 self.head_active_telemetry_callback, qos_profile)
+        self.create_subscription(Float64MultiArray, '/head_active_tracking/qdot',
+                                 self.head_active_qdot_callback, qos_profile)
 
         # Slow watchdog: finalizes a POST_ROLL trial once its grace window
         # elapses. Deliberately NOT tied to any particular data topic's rate.
@@ -361,12 +422,7 @@ class OfflinePlotter(Node):
 
         self.time_gov = []
         self.gov_buffer = []
-        # Governor detailed telemetry (2026-07-04): commanded ("raw") vs.
-        # governed ABSOLUTE magnitudes, reconstructed from the raw reference
-        # (self.ref_right/left, already tracked) and the raw-minus-governed
-        # diff already published on /qp_debug/governor -- no new topic
-        # needed (governed = raw - diff, algebraically exact). See
-        # gov_callback and _build_fig_reference_governor.
+        # Governed = raw - diff (from /qp_debug/governor), algebraically exact.
         self.gov_lin_vel_raw_r, self.gov_lin_vel_gov_r = [], []
         self.gov_lin_vel_raw_l, self.gov_lin_vel_gov_l = [], []
         self.gov_ang_vel_raw_r, self.gov_ang_vel_gov_r = [], []
@@ -375,6 +431,47 @@ class OfflinePlotter(Node):
         self.gov_pos_err_raw_l, self.gov_pos_err_gov_l = [], []
         self.gov_ori_err_raw_r, self.gov_ori_err_gov_r = [], []
         self.gov_ori_err_raw_l, self.gov_ori_err_gov_l = [], []
+
+        # --- Head perception (main_head.py) -- all optional; a trial with no
+        # head node running simply leaves these empty (see head_* callbacks). ---
+        self.time_head_js = []
+        self.q_head_buffers = {j: [] for j in cfg.HEAD_JOINTS}
+
+        self.time_head_qdot_measured = []
+        self.head_qdot_measured = []
+        self.time_head_qdot_cmd = []
+        self.head_qdot_cmd = []
+
+        # Raw 15-float telemetry rows (see main_head.py's pub_telemetry layout
+        # comment): [n_raw, n_crop, plane_z, look_err_deg, slack, proc_ms,
+        # red_conf, blue_conf, map_size, converge_progress, converged, phase,
+        # weakest_cov, drift_rate_mps, head_qdot_norm].
+        self.time_head_tel = []
+        self.head_tel_buffer = []
+
+        # Per-object (red/blue) position + dimensions, parsed from
+        # /head_perception/markers -- same fields/classification as
+        # head_plotter.py's _markers_cb (ns="objects", CYLINDER, R/B channel).
+        self.head_obj = {
+            "red": {"t": [], "x": [], "y": [], "z": [], "r": [], "h": []},
+            "blue": {"t": [], "x": [], "y": [], "z": [], "r": [], "h": []},
+        }
+        self.time_head_plane = []
+        self.head_plane_z = []
+
+        # Perceived-world snapshot (latched, one-shot): trial-relative time it
+        # latched THIS trial (None if it never fired while recording) + a
+        # short text summary for fig7's caption. self._last_world_snapshot_text
+        # (set outside this reset -- see __init__) is the always-latest text
+        # regardless of trial boundaries, mirroring last_real_pos_r's pattern.
+        self.world_snapshot_t = None
+        self.world_snapshot_text = None
+
+        # --- Head active-arm tracking (head_active_arm_tracking.py) --------
+        self.time_head_active_tel = []
+        self.head_active_tel_buffer = []
+        self.time_head_active_qdot = []
+        self.head_active_qdot_buffer = []
 
     def _now(self):
         return self.get_clock().now().nanoseconds / 1e9
@@ -482,11 +579,16 @@ class OfflinePlotter(Node):
         if len(msg.name) != len(msg.position):
             return
         name_to_idx = {name: i for i, name in enumerate(msg.name)}
-        if not all(j in name_to_idx for j in self.all_joints):
-            return
-        self.time_js.append(self._t())
-        for j in self.all_joints:
-            self.q_buffers[j].append(msg.position[name_to_idx[j]])
+        if all(j in name_to_idx for j in self.all_joints):
+            self.time_js.append(self._t())
+            for j in self.all_joints:
+                self.q_buffers[j].append(msg.position[name_to_idx[j]])
+        # Head joints (independent gate -- main_head.py may not be running this
+        # trial, which must not block the arm position buffers above).
+        if all(j in name_to_idx for j in cfg.HEAD_JOINTS):
+            self.time_head_js.append(self._t())
+            for j in cfg.HEAD_JOINTS:
+                self.q_head_buffers[j].append(msg.position[name_to_idx[j]])
 
     def qdot_measured_callback(self, msg):
         if not self._recording_active() or len(msg.data) < 14:
@@ -501,6 +603,96 @@ class OfflinePlotter(Node):
         self.time_qdot_cmd.append(self._t())
         self.qdot_cmd_r.append(list(msg.data[:7]))
         self.qdot_cmd_l.append(list(msg.data[7:14]))
+
+    def head_qdot_measured_callback(self, msg):
+        if not self._recording_active() or len(msg.data) < 7:
+            return
+        self.time_head_qdot_measured.append(self._t())
+        self.head_qdot_measured.append(list(msg.data[:7]))
+
+    def head_qdot_cmd_callback(self, msg):
+        if not self._recording_active() or len(msg.data) < 7:
+            return
+        self.time_head_qdot_cmd.append(self._t())
+        self.head_qdot_cmd.append(list(msg.data[:7]))
+
+    def head_telemetry_callback(self, msg):
+        # See main_head.py's pub_telemetry layout comment (up to 15 floats).
+        if not self._recording_active() or len(msg.data) < 6:
+            return
+        data = list(msg.data)
+        if len(data) < 15:
+            data = data + [0.0] * (15 - len(data))
+        self.time_head_tel.append(self._t())
+        self.head_tel_buffer.append(data[:15])
+
+    def head_markers_callback(self, msg):
+        """Per-object (red/blue) position + dimensions, parsed the same way as
+        head_plotter.py's _markers_cb (ns='objects' CYLINDER, classified by
+        R/B color channel; ns='table_top' CUBE for the detected plane height)."""
+        if not self._recording_active():
+            return
+        t = self._t()
+        got_plane = False
+        for m in msg.markers:
+            if m.ns == "objects" and m.type == 3:  # CYLINDER=3
+                if m.color.r > 0.5:
+                    key = "red"
+                elif m.color.b > 0.5:
+                    key = "blue"
+                else:
+                    continue
+                d = self.head_obj[key]
+                d["t"].append(t)
+                d["x"].append(m.pose.position.x)
+                d["y"].append(m.pose.position.y)
+                d["z"].append(m.pose.position.z)
+                d["r"].append(m.scale.x / 2.0)
+                d["h"].append(m.scale.z)
+            if m.ns == "table_top" and m.type == 1:  # CUBE=1
+                self.time_head_plane.append(t)
+                self.head_plane_z.append(m.pose.position.z)
+                got_plane = True
+
+    def perceived_world_callback(self, msg):
+        """Latched, one-shot: the converged perceived-world snapshot handed to
+        the CBF stack (see world_convergence.py / main_head.py's
+        _publish_world_snapshot). Parses build_world_snapshot_markers' fixed
+        layout (ns='table' CUBE, ns='objects' CYLINDER) into a short text
+        summary. Text is cached unconditionally (a late-subscribing offline_plotter
+        still gets the last snapshot via TRANSIENT_LOCAL, same as any other
+        subscriber -- see the topic's QoS in __init__); the trial-relative
+        CAPTURE time/text are only recorded while a trial is actually running,
+        so fig7 can draw a marker line at the instant it happened THIS trial."""
+        lines = []
+        for m in msg.markers:
+            if m.ns == "table" and m.type == 1:  # CUBE=1
+                lines.append(
+                    f"table: centre=({m.pose.position.x:.3f},{m.pose.position.y:.3f},"
+                    f"{m.pose.position.z:.3f}) size=({m.scale.x:.3f},{m.scale.y:.3f},{m.scale.z:.3f})")
+            if m.ns == "objects" and m.type == 3:  # CYLINDER=3
+                color = "red" if m.color.r > 0.5 else ("blue" if m.color.b > 0.5 else "obj")
+                lines.append(
+                    f"{color}: centre=({m.pose.position.x:.3f},{m.pose.position.y:.3f},"
+                    f"{m.pose.position.z:.3f}) r={m.scale.x/2.0*100:.1f}cm h={m.scale.z*100:.1f}cm")
+        text = "\n".join(lines) if lines else None
+        self._last_world_snapshot_text = text
+        if self._recording_active() and self.world_snapshot_t is None:
+            self.world_snapshot_t = self._t()
+            self.world_snapshot_text = text
+
+    def head_active_telemetry_callback(self, msg):
+        # See head_active_arm_tracking.py's pub_telemetry layout comment (9 floats).
+        if not self._recording_active() or len(msg.data) < 9:
+            return
+        self.time_head_active_tel.append(self._t())
+        self.head_active_tel_buffer.append(list(msg.data[:9]))
+
+    def head_active_qdot_callback(self, msg):
+        if not self._recording_active() or len(msg.data) < 7:
+            return
+        self.time_head_active_qdot.append(self._t())
+        self.head_active_qdot_buffer.append(list(msg.data[:7]))
 
     def cb_ref_right(self, msg):
         if len(msg.data) >= 12:
@@ -593,8 +785,11 @@ class OfflinePlotter(Node):
     def h_callback(self, msg):
         if not self._recording_active():
             return
+        data = list(msg.data)
+        if len(data) < 2:
+            data = (data + [float('nan'), float('nan')])[:2]
         self.time_h.append(self._t())
-        self.h_buffer.append(msg.data)
+        self.h_buffer.append(data)
 
     def min_dist_callback(self, msg):
         if not self._recording_active():
@@ -603,11 +798,12 @@ class OfflinePlotter(Node):
         self.min_dist_buffer.append(msg.data)
 
     def dyn_weights_callback(self, msg):
+        # 5 floats: [weight_slack_r, weight_slack_l, gamma_mean, gamma_r, gamma_l].
         if not self._recording_active():
             return
         data = list(msg.data)
-        if len(data) < 3:
-            data = (data + [0.0, 0.0, 0.0])[:3]
+        if len(data) < 5:
+            data = (data + [0.0] * 5)[:5]
         self.time_dyn_weights.append(self._t())
         self.dyn_weights_buffer.append(data)
 
@@ -621,14 +817,13 @@ class OfflinePlotter(Node):
         self.d_safe_buffer.append(data)
 
     def task_authority_callback(self, msg):
-        # 3 floats = [damp, posture, slack] (cfg.ENABLE_RATE_DAMPING was False
-        # when this trial was recorded); 4 floats also carries [..., rate].
-        # Padded to 4 either way so _build_fig_task_authority can index freely.
+        # 12 floats: [0:4] combined [damp, posture, slack, rate] totals,
+        # [4:8] right-arm-only, [8:12] left-arm-only.
         if not self._recording_active() or len(msg.data) < 3:
             return
-        data = list(msg.data[:4])
-        if len(data) < 4:
-            data.append(0.0)
+        data = list(msg.data[:12])
+        if len(data) < 12:
+            data = data + [0.0] * (12 - len(data))
         self.time_task_auth.append(self._t())
         self.task_auth_buffer.append(data)
 
@@ -652,13 +847,7 @@ class OfflinePlotter(Node):
         self.time_gov.append(self._t())
         self.gov_buffer.append(list(msg.data[:24]))
 
-        # --- Reconstruct RAW vs. GOVERNED absolute signals (2026-07-04) ---
-        # /qp_debug/governor already carries (raw - governed) per DOF; the raw
-        # side is exactly self.ref_right/left (already tracked from
-        # /arm_*/cartesian_reference), so governed = raw - diff -- no new
-        # topic/publisher was needed. Reconstructed HERE (not in
-        # main_qp_controller.py) to keep that node's telemetry contract
-        # unchanged; this is purely a plotting-side convenience.
+        # governed = raw - diff; raw is self.ref_right/left, already tracked.
         diff = np.array(msg.data[:24], dtype=float)
         pos_diff_r, ori_diff_r, vel_diff_r, wvel_diff_r = diff[0:3], diff[3:6], diff[6:9], diff[9:12]
         pos_diff_l, ori_diff_l, vel_diff_l, wvel_diff_l = diff[12:15], diff[15:18], diff[18:21], diff[21:24]
@@ -745,6 +934,17 @@ class OfflinePlotter(Node):
             fig_gov = self._build_fig_reference_governor()
             if fig_gov is not None:
                 figs.append(('fig6_reference_governor', fig_gov))
+
+        # --- Head figures (main_head.py / head_active_arm_tracking.py) --
+        # only emitted if the corresponding node was actually running this
+        # trial (checked via whether its buffers ever received data), so a
+        # trial with no head node produces no empty/blank head figures.
+        if self.time_head_tel or self.head_obj["red"]["t"] or self.head_obj["blue"]["t"]:
+            figs.append(('fig7_head_perception', self._build_fig_head_perception()))
+        if self.time_head_js or self.time_head_qdot_measured or self.time_head_qdot_cmd:
+            figs.append(('fig8_head_kinematics', self._build_fig_head_kinematics()))
+        if self.time_head_active_tel:
+            figs.append(('fig9_head_active_tracking', self._build_fig_head_active_tracking()))
 
         for name, fig in figs:
             if fig is None:
@@ -994,67 +1194,80 @@ class OfflinePlotter(Node):
         return fig
 
     def _build_fig_qp_data(self):
-        fig, axs = plt.subplots(7, 1, sharex=True, figsize=(8, 12))
+        fig, axs = plt.subplots(6, 1, sharex=True, figsize=(8, 11))
         fig.suptitle('QP Data -- Slacks, Shadow Prices, Loop Health')
 
-        # Row 0/1: Slack (right/left)
+        # Row 0: CLF Slack -- both arms on the SAME axis (red=Right, blue=Left),
+        # matching the shadow-price rows below instead of two separate axes.
         if self.slack_mode == 'scalar' and self.time_slack:
             data = np.array(self.slack_buffer)
             axs[0].plot(self.time_slack, data[:, 0], 'r-', label=r'$\delta_{R}$')
-            axs[1].plot(self.time_slack, data[:, 1], 'b-', label=r'$\delta_{L}$')
+            axs[0].plot(self.time_slack, data[:, 1], 'b-', label=r'$\delta_{L}$')
         elif self.slack_mode == 'vector' and self.time_slack:
             data = np.array(self.slack_buffer)
+            comp_style = ['-', '--', ':']
             for i, comp in enumerate(['x', 'y', 'z']):
-                axs[0].plot(self.time_slack, data[:, i], label=fr'$\delta_{{R,{comp}}}$')
-                axs[1].plot(self.time_slack, data[:, 3 + i], label=fr'$\delta_{{L,{comp}}}$')
-        axs[0].set_title('Right-Arm CLF Slack')
-        axs[1].set_title('Left-Arm CLF Slack')
-        axs[0].set_ylabel(r'$\delta_R$')
-        axs[1].set_ylabel(r'$\delta_L$')
-        axs[0].legend(loc='upper right')
-        axs[1].legend(loc='upper right')
+                axs[0].plot(self.time_slack, data[:, i], color='r', linestyle=comp_style[i],
+                           label=fr'$\delta_{{R,{comp}}}$')
+                axs[0].plot(self.time_slack, data[:, 3 + i], color='b', linestyle=comp_style[i],
+                           label=fr'$\delta_{{L,{comp}}}$')
+        axs[0].set_title('CLF Slack (per arm)')
+        axs[0].set_ylabel(r'$\delta$')
+        axs[0].legend(loc='upper right', fontsize=8,
+                      ncol=2 if self.slack_mode == 'vector' else 1)
 
-        # Row 2: CBF shadow prices
+        # Row 1: CBF shadow prices
         if self.time_lambda_cbf:
             data = np.array(self.lambda_cbf_buffer)
-            axs[2].plot(self.time_lambda_cbf, data[:, 0], 'r-', label=r'$\lambda_{CBF,R}$')
-            axs[2].plot(self.time_lambda_cbf, data[:, 1], 'b-', label=r'$\lambda_{CBF,L}$')
-        axs[2].set_title('CBF Shadow Price (per arm)')
-        axs[2].set_ylabel(r'$\lambda_{CBF}$')
-        axs[2].legend(loc='upper right')
+            axs[1].plot(self.time_lambda_cbf, data[:, 0], 'r-', label=r'$\lambda_{CBF,R}$')
+            axs[1].plot(self.time_lambda_cbf, data[:, 1], 'b-', label=r'$\lambda_{CBF,L}$')
+        axs[1].set_title('CBF Shadow Price (per arm)')
+        axs[1].set_ylabel(r'$\lambda_{CBF}$')
+        axs[1].legend(loc='upper right')
 
-        # Row 3: Joint-limit shadow prices
+        # Row 2: Joint-limit shadow prices
         if self.time_lambda_joints:
             data = np.array(self.lambda_joints_buffer)
-            axs[3].plot(self.time_lambda_joints, data[:, 0], 'r-', label=r'$\lambda_{Joints,R}$')
-            axs[3].plot(self.time_lambda_joints, data[:, 1], 'b-', label=r'$\lambda_{Joints,L}$')
-        axs[3].set_title('Joint-Limit Shadow Price (per arm)')
-        axs[3].set_ylabel(r'$\lambda_{Joints}$')
-        axs[3].legend(loc='upper right')
+            axs[2].plot(self.time_lambda_joints, data[:, 0], 'r-', label=r'$\lambda_{Joints,R}$')
+            axs[2].plot(self.time_lambda_joints, data[:, 1], 'b-', label=r'$\lambda_{Joints,L}$')
+        axs[2].set_title('Joint-Limit Shadow Price (per arm)')
+        axs[2].set_ylabel(r'$\lambda_{Joints}$')
+        axs[2].legend(loc='upper right')
 
-        # Row 4: Loop frequency
-        if self.time_freq:
-            axs[4].plot(self.time_freq, self.freq_buffer, 'g-', label='Loop frequency')
-        axs[4].set_title('Control Loop Frequency')
-        axs[4].set_ylabel('Freq [Hz]')
-        axs[4].legend(loc='upper right')
-
-        # Row 5: Safety margin
+        # Safety margin, per arm; NaN when that arm has no active pair
+        # (not the h_soft=1.0 QP sentinel, which isn't a real margin).
         if self.time_h:
-            axs[5].plot(self.time_h, self.h_buffer, 'm-', label='SoftMin margin $h$')
-        axs[5].axhline(0, color='r', linestyle='--', linewidth=1)
-        axs[5].set_title('CBF Safety Margin')
-        axs[5].set_ylabel('Margin [m]')
-        axs[5].legend(loc='upper right')
+            data = np.array(self.h_buffer)
+            axs[3].plot(self.time_h, data[:, 0], 'r-', marker='.', markersize=3,
+                       label=r'$h_R - d_{safe,R}$ (NaN = no active pair)')
+            axs[3].plot(self.time_h, data[:, 1], 'b-', marker='.', markersize=3,
+                       label=r'$h_L - d_{safe,L}$ (NaN = no active pair)')
+        axs[3].axhline(0, color='r', linestyle='--', linewidth=1)
+        axs[3].set_title('CBF Safety Margin (per arm)')
+        axs[3].set_ylabel('Margin [m]')
+        axs[3].legend(loc='upper right', fontsize=8)
 
-        # Row 6: Minimum distance
+        # Row 4: Minimum distance. NaN whenever nothing is within
+        # cfg.DISTANCE_FILTER_THRESHOLD -- an honest "nothing nearby", not
+        # missing data (collision_manager.compute_softmin_jacobian). The
+        # resulting gaps are correct, not a bug; the marker below is the same
+        # short-segment-visibility touch as the margin row above.
         if self.time_min_dist:
-            axs[6].plot(self.time_min_dist, self.min_dist_buffer, 'c-', label='Abs. min. distance')
-        axs[6].axhline(0, color='r', linestyle='--', linewidth=1)
-        axs[6].set_title('Absolute Minimum Collision Distance')
-        axs[6].set_ylabel('Dist [m]')
-        axs[6].legend(loc='upper right')
-        axs[6].set_xlabel('Time [s]')
+            axs[4].plot(self.time_min_dist, self.min_dist_buffer, 'c-', marker='.', markersize=3,
+                       label='Abs. min. distance (NaN = nothing in range)')
+        axs[4].axhline(0, color='r', linestyle='--', linewidth=1)
+        axs[4].set_title('Absolute Minimum Collision Distance')
+        axs[4].set_ylabel('Dist [m]')
+        axs[4].legend(loc='upper right', fontsize=8)
+
+        # Row 5 (bottom): Loop frequency -- a loop-health diagnostic, moved
+        # below the safety-relevant rows above rather than sitting in the middle.
+        if self.time_freq:
+            axs[5].plot(self.time_freq, self.freq_buffer, 'g-', label='Loop frequency')
+        axs[5].set_title('Control Loop Frequency')
+        axs[5].set_ylabel('Freq [Hz]')
+        axs[5].legend(loc='upper right')
+        axs[5].set_xlabel('Time [s]')
 
         max_t = self._max_time(self.time_slack, self.time_lambda_cbf, self.time_lambda_joints,
                                self.time_freq, self.time_h, self.time_min_dist)
@@ -1065,13 +1278,21 @@ class OfflinePlotter(Node):
         return fig
 
     def _build_fig_task_error_adaptation(self):
-        dyn_plots = []
-        if cfg.DYNAMIC_CBF:
-            dyn_plots.append(('d_safe_dynamic', r'$d_{safe}^{dyn}$ [m]', 'Dynamic Safety Margin'))
-        if cfg.DYNAMIC_GAMMA_CLF:
-            dyn_plots.append(('gamma_clf', r'$\gamma_{CLF}$', 'CLF Convergence Rate'))
-        if cfg.DYNAMIC_SLACK_WEIGHT:
-            dyn_plots.append(('weight_slack', r'$w_{\delta}$', 'Slack Weight'))
+        # Always plot all three adaptive quantities, regardless of their
+        # cfg.DYNAMIC_* flags -- same philosophy as fig4's E_rate share: a
+        # flat line at the default when a flag is off is itself useful
+        # information (confirms nothing is silently adapting), and it makes
+        # a flag-on/off A/B a straight before/after comparison of the same
+        # figure. Previously d_safe_dynamic was gated on cfg.DYNAMIC_CBF --
+        # the WRONG flag (that one controls pair removal, not the margin
+        # formula) -- so this panel had never actually appeared in any trial
+        # this project has run; d_safe_dynamic = D_SAFE_BASE + K_V_SAFE*|v| is
+        # computed unconditionally every tick (collision_manager.py).
+        dyn_plots = [
+            ('weight_slack', r'$w_{\delta}$', 'Slack Weight'),
+            ('gamma_clf', r'$\gamma_{CLF}$', 'CLF Convergence Rate'),
+            ('d_safe_dynamic', r'$d_{safe}$ [m]', 'Dynamic Safety Margin (base + velocity term)'),
+        ]
 
         n_rows = 2 + len(dyn_plots)
         fig, axs = plt.subplots(n_rows, 1, sharex=True, squeeze=False, figsize=(8, 3 * n_rows))
@@ -1079,15 +1300,15 @@ class OfflinePlotter(Node):
         fig.suptitle('Task Tracking Error and Adaptive Weighting')
 
         if self.time_err:
-            axs[0].plot(self.time_err, self.err_pos_r, 'r-', label='Position error -- Right')
-            axs[0].plot(self.time_err, self.err_pos_l, 'b-', label='Position error -- Left')
+            axs[0].plot(self.time_err, self.err_pos_r, 'r-', label=r'$\|e_{p,R}\|$')
+            axs[0].plot(self.time_err, self.err_pos_l, 'b-', label=r'$\|e_{p,L}\|$')
         axs[0].set_title('Cartesian Position Tracking Error')
         axs[0].set_ylabel('Error [m]')
         axs[0].legend(loc='upper right')
 
         if self.time_err:
-            axs[1].plot(self.time_err, self.err_vel_r, 'r-', label='Velocity error -- Right')
-            axs[1].plot(self.time_err, self.err_vel_l, 'b-', label='Velocity error -- Left')
+            axs[1].plot(self.time_err, self.err_vel_r, 'r-', label=r'$\|e_{v,R}\|$')
+            axs[1].plot(self.time_err, self.err_vel_l, 'b-', label=r'$\|e_{v,L}\|$')
         axs[1].set_title('Cartesian Velocity Tracking Error')
         axs[1].set_ylabel('Error [m/s]')
         axs[1].legend(loc='upper right')
@@ -1098,17 +1319,46 @@ class OfflinePlotter(Node):
             ax.set_ylabel(ylabel)
             if key == 'weight_slack' and self.time_dyn_weights:
                 data = np.array(self.dyn_weights_buffer)
-                ax.plot(self.time_dyn_weights, data[:, 0], 'r-', label=r'$w_{\delta,R}$')
-                ax.plot(self.time_dyn_weights, data[:, 1], 'b-', label=r'$w_{\delta,L}$')
+                # Both solid; differentiated by linewidth + zorder so a
+                # coincident overlap still shows a visible rim, not one hidden line.
+                ax.plot(self.time_dyn_weights, data[:, 0], color='r', linestyle='-',
+                        linewidth=2.6, zorder=2, label=r'$w_{\delta,R}$')
+                ax.plot(self.time_dyn_weights, data[:, 1], color='b', linestyle='-',
+                        linewidth=1.3, zorder=3, label=r'$w_{\delta,L}$')
                 ax.legend(loc='upper right')
             elif key == 'gamma_clf' and self.time_dyn_weights:
                 data = np.array(self.dyn_weights_buffer)
-                ax.plot(self.time_dyn_weights, data[:, 2], 'm-')
+                # gamma_clf_r/l: per-arm, same overlap-safety convention as above.
+                ax.plot(self.time_dyn_weights, data[:, 3], color='r', linestyle='-',
+                        linewidth=2.6, zorder=2, label=r'$\gamma_{CLF,R}$')
+                ax.plot(self.time_dyn_weights, data[:, 4], color='b', linestyle='-',
+                        linewidth=1.3, zorder=3, label=r'$\gamma_{CLF,L}$')
+                # cfg.GAMMA_CLF_DEFAULT is what BOTH pin to whenever
+                # cfg.DYNAMIC_GAMMA_CLF is False -- flat lines exactly on this
+                # reference confirm the scheduler is off, not silently broken.
+                ax.axhline(cfg.GAMMA_CLF_DEFAULT, color='0.5', linestyle=':',
+                          linewidth=1, zorder=1, label=r'$\gamma_{CLF}^{default}$')
+                ax.legend(loc='upper right')
             elif key == 'd_safe_dynamic' and self.time_d_safe:
                 data = np.array(self.d_safe_buffer)
-                ax.plot(self.time_d_safe, data[:, 0], 'r-', label=r'$d_{safe,R}^{dyn}$')
-                ax.plot(self.time_d_safe, data[:, 1], 'b-', label=r'$d_{safe,L}^{dyn}$')
-                ax.legend(loc='upper right')
+                # Only the TOTAL effective margin per arm + the static floor --
+                # the gap between a total curve and the floor line already IS
+                # the velocity term (d_safe_dynamic = D_SAFE_BASE + K_V_SAFE*|v|,
+                # collision_manager.py), so a separate dotted remainder line
+                # was redundant. Names chosen to read standalone in the legend.
+                ax.plot(self.time_d_safe, data[:, 0], 'r-', zorder=2,
+                       label=r'Effective Margin -- Right ($d_{safe,R}$)')
+                ax.plot(self.time_d_safe, data[:, 1], 'b-', zorder=2,
+                       label=r'Effective Margin -- Left ($d_{safe,L}$)')
+                # Drawn thicker, pure black, and at a high zorder so it is
+                # never buried under a curve that sits close to it (e.g. an
+                # idle/frozen arm's margin, which stays near d0 the whole
+                # trial) -- an explicit y-floor at 0 also keeps it clear of
+                # the bottom axis spine instead of hugging it.
+                ax.axhline(cfg.D_SAFE_BASE, color='k', linestyle='--',
+                          linewidth=1.6, zorder=5, label=r'Static Floor ($d_0$)')
+                ax.set_ylim(bottom=0)
+                ax.legend(loc='upper right', fontsize=8)
 
         axs[-1].set_xlabel('Time [s]')
         max_t = self._max_time(self.time_err, self.time_dyn_weights, self.time_d_safe)
@@ -1119,32 +1369,46 @@ class OfflinePlotter(Node):
         return fig
 
     def _build_fig_task_authority(self):
-        fig, ax = plt.subplots(1, 1, figsize=(8, 4.5))
-        fig.suptitle('Soft-Task QP Cost Decomposition')
-        ax.set_title('Normalized Objective Share at the QP Solution')
+        # task_energies: [0:4] combined, [4:8] right only, [8:12] left only.
+        # Each panel normalizes against only that arm's own total; stacked
+        # vertically to match every other per-arm figure in this dashboard.
+        fig, axs = plt.subplots(2, 1, figsize=(8, 8), sharex=True, sharey=True)
+        fig.suptitle('Soft-Task QP Cost Decomposition (per arm)')
 
-        if self.time_task_auth:
-            arr = np.array(self.task_auth_buffer, dtype=float)
-            total = arr.sum(axis=1, keepdims=True)
-            total[total < 1e-12] = 1.0
-            shares = arr / total
-            ax.plot(self.time_task_auth, shares[:, 0], color='#888888', label='Damping')
-            ax.plot(self.time_task_auth, shares[:, 1], color='#2a9d8f', label='Posture / limit')
-            ax.plot(self.time_task_auth, shares[:, 2], color='#e63946', label='Slack (CLF give)')
+        cost_terms = [
+            ('Damping', '#888888'),
+            ('Posture / limit', '#2a9d8f'),
+            ('Slack (CLF give)', '#eda100'),
             # Rate-damping (cfg.ENABLE_RATE_DAMPING, ||dq-dq_prev||^2 -- see
             # qp_formulator.py's build_and_solve §A) -- 0 share whenever it was
             # disabled for this trial, plotted anyway so an A/B is a straight
             # before/after comparison of the same figure.
-            ax.plot(self.time_task_auth, shares[:, 3], color='#457b9d', label='Rate damping (smoothness)')
+            ('Rate damping (smoothness)', '#4a3aa7'),
+        ]
 
-        ax.set_ylim(-0.02, 1.02)
-        ax.set_ylabel('Authority share [-]')
-        ax.set_xlabel('Time [s]')
-        ax.legend(loc='upper left', ncol=4, fontsize=8)
+        if self.time_task_auth:
+            arr = np.array(self.task_auth_buffer, dtype=float)
+            for ax, title, col_offset in ((axs[0], 'Right Arm', 4), (axs[1], 'Left Arm', 8)):
+                sub = arr[:, col_offset:col_offset + 4]
+                total = sub.sum(axis=1, keepdims=True)
+                total[total < 1e-12] = 1.0
+                shares = sub / total
+                for i, (label, color) in enumerate(cost_terms):
+                    ax.plot(self.time_task_auth, shares[:, i], color=color, label=label)
+                ax.set_title(title)
+        else:
+            axs[0].set_title('Right Arm')
+            axs[1].set_title('Left Arm')
+
         max_t = self._max_time(self.time_task_auth)
-        ax.set_xlim(0, max_t)
-        _draw_trigger_line(ax, self.t_off)
-        fig.tight_layout(rect=(0, 0, 1, 0.93))
+        for ax in axs:
+            ax.set_ylim(-0.02, 1.02)
+            ax.set_ylabel('Authority share [-]')
+            ax.set_xlim(0, max_t)
+            _draw_trigger_line(ax, self.t_off)
+        axs[-1].set_xlabel('Time [s]')
+        axs[0].legend(loc='upper left', ncol=2, fontsize=7.5)
+        fig.tight_layout(rect=(0, 0, 1, 0.94))
         return fig
 
     def _build_fig_3d_trajectory(self):
@@ -1288,6 +1552,249 @@ class OfflinePlotter(Node):
 
         axs[-1].set_xlabel('Time [s]')
         fig.tight_layout(rect=(0, 0, 1, 0.96))
+        return fig
+
+    # =====================================================================
+    # HEAD FIGURES (main_head.py + head_active_arm_tracking.py -- optional,
+    # only emitted when the corresponding node was running this trial)
+    # =====================================================================
+    def _build_fig_head_perception(self):
+        """Head camera perception: per-object (red/blue) pose/radius/height/
+        confidence, active-vision phase, rate-based convergence progress +
+        drift rate (world_convergence.py), cloud/map size. No ground-truth
+        overlay -- unlike head_plotter.py's live dashboard, this must also be
+        meaningful on real hardware, where no GT exists."""
+        fig, axs = plt.subplots(4, 2, figsize=(11, 13))
+        fig.suptitle('Head Perception -- Active Vision + Convergence')
+
+        red, blue = self.head_obj["red"], self.head_obj["blue"]
+
+        # [0,0] XY top-down estimate trajectory (the spiral-then-settle pattern).
+        ax = axs[0, 0]
+        ax.set_title('Top-Down Position Estimate (XY)')
+        ax.set_xlabel('X [m]'); ax.set_ylabel('Y [m]'); ax.set_aspect('equal')
+        if red["x"]:
+            ax.plot(red["x"], red["y"], 'r-', alpha=0.5, linewidth=1)
+            ax.plot(red["x"][0], red["y"][0], 'ro', markersize=6)
+            ax.plot(red["x"][-1], red["y"][-1], 'rX', markersize=9)
+        if blue["x"]:
+            ax.plot(blue["x"], blue["y"], 'b-', alpha=0.5, linewidth=1)
+            ax.plot(blue["x"][0], blue["y"][0], 'bo', markersize=6)
+            ax.plot(blue["x"][-1], blue["y"][-1], 'bX', markersize=9)
+        ax.legend(handles=[
+            Line2D([0], [0], color='r', label='Red ($\\circ$=start, $\\times$=end)'),
+            Line2D([0], [0], color='b', label='Blue ($\\circ$=start, $\\times$=end)'),
+        ], loc='best', fontsize=8)
+
+        # [0,1] Height (Z) of the object centre over time.
+        ax = axs[0, 1]
+        ax.set_title('Object Centre Height (Z)')
+        ax.set_ylabel('Z [m]')
+        if red["t"]:
+            ax.plot(red["t"], red["z"], 'r-', label='Red')
+        if blue["t"]:
+            ax.plot(blue["t"], blue["z"], 'b-', label='Blue')
+        ax.legend(loc='upper right', fontsize=8)
+
+        # [1,0] Radius estimate over time.
+        ax = axs[1, 0]
+        ax.set_title('Radius Estimate')
+        ax.set_ylabel('Radius [cm]')
+        if red["t"]:
+            ax.plot(red["t"], np.asarray(red["r"]) * 100.0, 'r-', label='Red')
+        if blue["t"]:
+            ax.plot(blue["t"], np.asarray(blue["r"]) * 100.0, 'b-', label='Blue')
+        ax.legend(loc='upper right', fontsize=8)
+
+        # [1,1] Cylinder height (the object's own height, not centre Z).
+        ax = axs[1, 1]
+        ax.set_title('Cylinder Height Estimate')
+        ax.set_ylabel('Height [cm]')
+        if red["t"]:
+            ax.plot(red["t"], np.asarray(red["h"]) * 100.0, 'r-', label='Red')
+        if blue["t"]:
+            ax.plot(blue["t"], np.asarray(blue["h"]) * 100.0, 'b-', label='Blue')
+        ax.legend(loc='upper right', fontsize=8)
+
+        # Unpack the 15-float telemetry buffer once for the remaining panels.
+        tel = np.array(self.head_tel_buffer) if self.head_tel_buffer else None
+        t_tel = self.time_head_tel
+
+        # [2,0] Confidence + weakest-object coverage.
+        ax = axs[2, 0]
+        ax.set_title('Estimation Confidence / Weakest Coverage')
+        ax.set_ylabel('[%]'); ax.set_ylim(0, 105)
+        if tel is not None:
+            ax.plot(t_tel, tel[:, 6] * 100.0, 'r-', label='Red conf')
+            ax.plot(t_tel, tel[:, 7] * 100.0, 'b-', label='Blue conf')
+            ax.plot(t_tel, tel[:, 12] * 100.0, 'm-', label='Weakest coverage')
+        ax.legend(loc='lower right', fontsize=7)
+
+        # [2,1] Convergence-window progress (left axis) + drift rate (right,
+        # GT-free "has it settled?" signal -- see world_convergence.py).
+        ax = axs[2, 1]
+        ax.set_title('Convergence Progress + Drift Rate')
+        ax.set_ylabel('Window progress [%]'); ax.set_ylim(0, 105)
+        ax_drift = ax.twinx()
+        ax_drift.set_ylabel('Drift rate [mm/s]', color='darkgreen')
+        ax_drift.tick_params(axis='y', labelcolor='darkgreen')
+        if tel is not None:
+            ax.plot(t_tel, tel[:, 9] * 100.0, 'k--', linewidth=1.2, label='Window progress')
+            drift = tel[:, 13]
+            drift_mm = np.where(drift >= 0, drift * 1000.0, np.nan)
+            ax_drift.plot(t_tel, drift_mm, color='darkgreen', linewidth=1.3, label='Drift rate')
+        ax.legend(loc='upper left', fontsize=7)
+
+        # [3,0] Processing time per perception tick.
+        ax = axs[3, 0]
+        ax.set_title('Perception Processing Time')
+        ax.set_ylabel('proc [ms]'); ax.set_xlabel('Time [s]')
+        if tel is not None:
+            ax.plot(t_tel, tel[:, 5], color='purple', linewidth=1.2)
+
+        # [3,1] Raw cloud size + fused map size.
+        ax = axs[3, 1]
+        ax.set_title('Cloud / Map Size')
+        ax.set_ylabel('Points / voxels'); ax.set_xlabel('Time [s]')
+        if tel is not None:
+            ax.plot(t_tel, tel[:, 0], color='darkorange', linewidth=1.2, label='Raw cloud (n)')
+            ax.plot(t_tel, tel[:, 8], color='teal', linewidth=1.2, label='Fused map (n)')
+            ax.legend(loc='upper right', fontsize=7)
+
+        max_t = self._max_time(t_tel, red["t"], blue["t"])
+        for ax in (axs[0, 1], axs[1, 0], axs[1, 1], axs[2, 0], axs[2, 1], axs[3, 0], axs[3, 1]):
+            ax.set_xlim(0, max_t)
+            _draw_trigger_line(ax, self.t_off)
+            _draw_world_snapshot_line(ax, self.world_snapshot_t)
+
+        if self.world_snapshot_text:
+            fig.text(0.01, 0.005,
+                    f"Perceived-world snapshot @ t={self.world_snapshot_t:.2f}s:\n"
+                    f"{self.world_snapshot_text}",
+                    fontsize=6.5, family='monospace', va='bottom')
+
+        fig.tight_layout(rect=(0, 0.05, 1, 0.96))
+        return fig
+
+    def _build_fig_head_kinematics(self):
+        """Head joint position / measured velocity / QP-commanded velocity,
+        3x1 -- same structure as _build_fig_joint_kinematics but a single
+        chain (no left/right split)."""
+        fig, axs = plt.subplots(3, 1, sharex=True, figsize=(8, 9))
+        fig.suptitle('Head Joint Kinematics')
+
+        axs[0].set_title('Joint Position')
+        axs[2].set_title('QP-Commanded Velocity')
+
+        if self.time_head_js:
+            t = self.time_head_js
+            for i, j in enumerate(cfg.HEAD_JOINTS):
+                axs[0].plot(t, self.q_head_buffers[j], color=JOINT_COLORS[i])
+        if self.time_head_qdot_measured:
+            # Live signal (main_head.py's own EMA-filtered reconstruction).
+            t = self.time_head_qdot_measured
+            arr = np.array(self.head_qdot_measured)
+            for i in range(7):
+                axs[1].plot(t, arr[:, i], color=JOINT_COLORS[i])
+            axs[1].set_title('Measured Velocity (reconstructed)')
+        elif self.time_head_js:
+            # No live qdot: derive it offline. dt is floored at a fraction of
+            # the median sample period (clustered timestamps would otherwise
+            # divide position noise by ~0, spiking); lightly smoothed after.
+            t = self.time_head_js
+            t_arr = np.asarray(t, dtype=float)
+            dt = np.diff(t_arr)
+            pos_dt = dt[dt > 0]
+            dt_floor = 0.3 * float(np.median(pos_dt)) if pos_dt.size else 1e-3
+            dt_guarded = np.maximum(dt, dt_floor)
+            for i, j in enumerate(cfg.HEAD_JOINTS):
+                pos = np.asarray(self.q_head_buffers[j], dtype=float)
+                if len(pos) > 2:
+                    raw = np.empty_like(pos)
+                    raw[1:] = np.diff(pos) / dt_guarded
+                    raw[0] = raw[1]
+                    vel = _moving_average(raw, 5)
+                else:
+                    vel = np.zeros_like(pos)
+                axs[1].plot(t, vel, color=JOINT_COLORS[i], linestyle='--', linewidth=1.0)
+            axs[1].set_title('Measured Velocity (derived offline, finite diff., dt-guarded)')
+        else:
+            axs[1].set_title('Measured Velocity (reconstructed)')
+        if self.time_head_qdot_cmd:
+            t = self.time_head_qdot_cmd
+            arr = np.array(self.head_qdot_cmd)
+            for i in range(7):
+                axs[2].plot(t, arr[:, i], color=JOINT_COLORS[i])
+
+        axs[0].set_ylabel('Position [rad]')
+        axs[1].set_ylabel('Velocity [rad/s]')
+        axs[2].set_ylabel('Velocity [rad/s]')
+        axs[2].set_xlabel('Time [s]')
+
+        max_t = self._max_time(self.time_head_js, self.time_head_qdot_measured,
+                               self.time_head_qdot_cmd)
+        for ax in axs:
+            ax.set_xlim(0, max_t)
+            _draw_trigger_line(ax, self.t_off)
+            _draw_world_snapshot_line(ax, self.world_snapshot_t)
+
+        legend_handles = [Line2D([0], [0], color=JOINT_COLORS[i], label=f'H{i+1}') for i in range(7)]
+        fig.legend(handles=legend_handles, loc='upper center', ncol=7,
+                  bbox_to_anchor=(0.5, 0.965))
+        fig.tight_layout(rect=(0, 0, 1, 0.93))
+        return fig
+
+    def _build_fig_head_active_tracking(self):
+        """head_active_arm_tracking.py's camera-framing performance during
+        teleoperation: pixel centering error, angular errors (pointing/roll/
+        approach), stand-off distance, and FOV/active-arm state -- reproduces
+        that node's own live dashboard as a static figure."""
+        fig, axs = plt.subplots(2, 2, figsize=(11, 7))
+        fig.suptitle('Head Active-Arm Tracking -- Camera Framing Performance')
+
+        tel = np.array(self.head_active_tel_buffer) if self.head_active_tel_buffer else None
+        t = self.time_head_active_tel
+
+        ax = axs[0, 0]
+        ax.set_title('Centering -- Pixel Error (target = 0)')
+        ax.set_ylabel('Error [px]')
+        ax.axhline(0.0, color='gray', linestyle='--', linewidth=1)
+        if tel is not None:
+            ax.plot(t, tel[:, 0], 'b-', linewidth=1.3, label='u error')
+            ax.plot(t, tel[:, 1], 'r-', linewidth=1.3, label='v error')
+        ax.legend(loc='upper right', fontsize=8)
+
+        ax = axs[0, 1]
+        ax.set_title('Angular Errors')
+        ax.set_ylabel('Error [deg]')
+        ax.axhline(0.0, color='gray', linestyle='--', linewidth=1)
+        if tel is not None:
+            ax.plot(t, tel[:, 3], 'm-', linewidth=1.3, label='pointing')
+            ax.plot(t, tel[:, 4], 'orange', linewidth=1.3, label='roll align')
+            ax.plot(t, tel[:, 5], 'g-', linewidth=1.3, label='approach align')
+        ax.legend(loc='upper right', fontsize=8)
+
+        ax = axs[1, 0]
+        ax.set_title('Stand-off Distance')
+        ax.set_ylabel('Distance [m]'); ax.set_xlabel('Time [s]')
+        if tel is not None:
+            ax.plot(t, tel[:, 6], 'g-', linewidth=1.3)
+
+        ax = axs[1, 1]
+        ax.set_title('FOV Mode / Active Arm (step)')
+        ax.set_ylabel('State'); ax.set_xlabel('Time [s]')
+        ax.set_ylim(-0.1, 1.1)
+        if tel is not None:
+            ax.step(t, tel[:, 7], where='post', color='teal', linewidth=1.3, label='in FOV (IBVS)')
+            ax.step(t, tel[:, 8], where='post', color='purple', linewidth=1.3,
+                   linestyle='--', label='active arm (1=R, 0=L)')
+        ax.legend(loc='upper right', fontsize=7)
+
+        max_t = self._max_time(t)
+        for ax in axs.flatten():
+            ax.set_xlim(0, max_t)
+            _draw_trigger_line(ax, self.t_off)
+        fig.tight_layout(rect=(0, 0, 1, 0.94))
         return fig
 
 

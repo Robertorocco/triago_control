@@ -55,6 +55,8 @@ def main():
     rclpy.init()
     node = PerceivedQPController()
 
+    # Wall-clock control loop by design -- do not set use_sim_time here.
+
     # --- PHASE 1: wait for TF, then verify controller state ---
     node.get_logger().info("[Main] Waiting for TF...")
     node.wait_for_tf()

@@ -240,6 +240,10 @@ class HeadActiveArmTracker(Node):
             Float64MultiArray, '/head_active_tracking/qdot', 10)
         self.pub_cartesian_cmd = self.create_publisher(
             TwistStamped, '/head_active_tracking/cartesian_cmd', 10)
+        # Telemetry for offline_plotter.py (9 floats): u_err_px, v_err_px,
+        # depth_err_m, ang/roll/approach_err_deg, dist_m, in_fov, active_arm.
+        self.pub_telemetry = self.create_publisher(
+            Float64MultiArray, '/head_active_tracking/telemetry', 10)
 
         # RViz debug
         self.pub_ray = self.create_publisher(Marker, '/head_active_tracking/camera_ray', 10)
@@ -620,7 +624,18 @@ class HeadActiveArmTracker(Node):
         # 9. RViz debug markers
         self._publish_markers(P_cam)
 
-        # 10. Push telemetry to the plotting buffers
+        # 10. Telemetry publish (see pub_telemetry's layout comment)
+        u_err = (u_h - TARGET_U) if u_h is not None else float('nan')
+        v_err = (v_h - TARGET_V) if v_h is not None else float('nan')
+        depth_err = (P_cam[2] - self.target_distance) if in_fov else float('nan')
+        self.pub_telemetry.publish(Float64MultiArray(data=[
+            float(u_err), float(v_err), float(depth_err),
+            float(ang_err_deg), float(roll_align_err_deg), float(approach_err_deg),
+            float(dist), 1.0 if in_fov else 0.0,
+            1.0 if self.active_arm == 'right' else 0.0,
+        ]))
+
+        # 11. Push telemetry to the plotting buffers
         with self.plot_lock:
             self.buf_t.append(time.time() - self.t0)
             self.buf_u_err.append((u_h - TARGET_U) if u_h is not None else np.nan)

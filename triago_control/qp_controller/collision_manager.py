@@ -11,35 +11,22 @@ Owns the `hppfcl` geometry model and every proximity query the controller needs:
       INDEPENDENT per-arm SoftMin Control Barrier Function gradients.
 
 ----------------------------------------------------------------------------
-SoftMin CBF math (per arm X in {R, L}; PRESERVED per-pair math, now evaluated
-over a PER-ARM subset of pairs -- see compute_softmin_jacobian / _arm_membership
-for the coupling-fix rationale):
+SoftMin CBF math, per arm X in {R, L}, each over its OWN subset of pairs:
 
     h_soft_X(q) = -(1/alpha) * log( sum_{k in Pairs(X)} exp(-alpha * d_k(q)) )
 
     J_soft_X(q) = sum_{k in Pairs(X)} ( exp(-alpha*d_k(q)) / sum_{j in Pairs(X)} exp(-alpha*d_j(q)) ) * J_k(q)
 
-  Pairs(X) = every active pair touching at least one geometry belonging to arm
-  X (its own links/gripper, or a cylinder it currently holds). A genuine
-  inter-arm pair belongs to BOTH Pairs(R) and Pairs(L). Each h_soft_X/J_soft_X
-  is a differentiable approximation of the closest distance RESTRICTED to arm
-  X's own pairs, whose gradient is the convex (softmax) blend of just those
-  pairs' Jacobians -- so it has zero columns in the OTHER arm's joints unless a
-  pair genuinely touches both.
+  Pairs(X) = every active pair touching arm X's own geometry (links, gripper,
+  or a held cylinder). A genuine inter-arm pair belongs to both Pairs(R) and
+  Pairs(L); otherwise J_soft_X has zero columns in the other arm's joints.
 
-Dynamic safety margin (PER-ARM, 2026-07-01 -- see the coupling-audit note in
-compute_softmin_jacobian):
+Dynamic safety margin, per arm:
 
     d_safe_dynamic_X = d_safe_base + k_v_safe * ||v_X||      for X in {R, L}
 
-  The barrier thickens with THAT ARM's OWN speed, so it brakes earlier when
-  fast. Previously this was a SINGLE scalar computed from the COMBINED
-  (both-arm) velocity norm and shared by both CBF rows -- a residual coupling
-  channel that survived the per-arm Jacobian split: a fast active arm inflated
-  the idle arm's margin too, tightening its (otherwise legitimately slack)
-  barrier and forcing visible idle-arm motion even when nothing new approached
-  it. Splitting this term removes that channel; see module-level notes below
-  compute_softmin_jacobian for the full analysis.
+  Thickens with that arm's own speed only, so a fast arm never tightens the
+  other (idle) arm's margin.
 ----------------------------------------------------------------------------
 """
 
@@ -192,23 +179,10 @@ class CollisionManager:
         new_length = length + prox_ext + dist_ext
         axial_recenter = (dist_ext - prox_ext) / 2.0
 
-        # BUGFIX (2026-07-04): `lateral_offset` is NOT in the capsule's own
-        # pre-rotation frame (where the axis is the literal [0,0,1]) -- it
-        # was computed by capsule_alignment_audit.py's _compute_capsule_fix
-        # from vertices/axis ALREADY expressed in the PARENT-JOINT-LOCAL
-        # frame (z_axis there = placement.rotation @ [0,0,1], and
-        # rel = verts - a used that same joint-local z_axis to split into
-        # axial/perpendicular parts) -- i.e. lateral_offset is ALREADY in
-        # this function's `placement_wrt_joint`-relative frame. Rotating it
-        # AGAIN by placement_wrt_joint.rotation double-rotated it, which is a
-        # no-op only when the offset happens to lie along a rotation-
-        # invariant axis of that particular link's dominant-axis snap
-        # (explaining why links 1/3/5 came out correct by coincidence while
-        # 2/4/6 did not -- confirmed by re-running the audit after the
-        # original, buggy version of this fix). Added DIRECTLY, no rotation.
-        # The axial term is different: `z_axis_local = [0,0,1]` IS in the
-        # capsule's own pre-rotation frame (hppfcl.Capsule's axis convention),
-        # so it correctly still needs rotating into the joint frame.
+        # lateral_offset is already in placement_wrt_joint's frame (see
+        # capsule_alignment_audit.py's _compute_capsule_fix), so it's added
+        # directly, not rotated again. The axial term uses the capsule's own
+        # pre-rotation [0,0,1] axis, so it does need rotating into the joint frame.
         new_translation = (placement_wrt_joint.translation
                           + lateral_local
                           + placement_wrt_joint.rotation @ (axial_recenter * z_axis_local))
@@ -239,13 +213,7 @@ class CollisionManager:
                 parent_joint_id = self.model.frames[frame_id].parentJoint
                 # placement_wrt_joint is already relative to the joint origin (no extra multiply)
                 #
-                # PER-LINK ALIGNMENT OVERRIDE (2026-07-04, see config.py section
-                # 6b for the full derivation/rationale): calculate_offsets' pure
-                # joint-to-joint straight segment can leave the real visual mesh
-                # poking outside the capsule (measured via
-                # capsule_alignment_audit.py). A link WITHOUT an override entry
-                # is completely unaffected -- byte-identical placement/length/
-                # radius to before this feature existed.
+                # Per-link mesh-alignment correction, see config.py §6b.
                 placement_fixed, length_fixed, radius = self._apply_capsule_override(
                     link_name, placement_wrt_joint, length)
                 shape = hppfcl.Capsule(radius, length_fixed)
@@ -255,22 +223,9 @@ class CollisionManager:
         add_arm_geoms(right_offsets, "shadow_right", self.right_geom_ids)
         add_arm_geoms(left_offsets, "shadow_left", self.left_geom_ids)
 
-        # 1b. HEAD CAPSULES (2026-07-01) -- same dominant-axis capsule geometry
-        # as the arms (the head is the SAME hardware, hence calculate_offsets
-        # is reused verbatim), but NEVER added to right_geom_ids/left_geom_ids:
-        # this keeps the head OUT of _arm_membership (it belongs to neither
-        # arm) and therefore OUT of idx_right/idx_left -- the arms' CBFs will
-        # see it purely as geometry, with NO head joint columns ever appearing
-        # in J_soft_r/J_soft_l (see compute_softmin_jacobian: a pair's
-        # Jacobian is built from get_point_jacobian on the PARENT JOINT of
-        # each geometry -- for a head capsule that is a head joint, but the
-        # pair only "counts" toward an arm's SoftMin aggregate/gradient
-        # column-wise through the OTHER geometry's (the arm's) parent joint
-        # Jacobian branch of that same distance-rate row; the head-side
-        # Jacobian columns are computed but never touch idx_right/idx_left,
-        # so build_and_solve's dq_max_safe/dq_min_safe and the QP's actual
-        # decision vector (n_joints = model.nv over idx_right+idx_left only,
-        # sliced out downstream) never move the head).
+        # Head capsules: same geometry recipe as the arms, but never added to
+        # right_geom_ids/left_geom_ids, so they stay pure geometry to the CBF
+        # and never enter idx_right/idx_left or the QP decision vector.
         if head_offsets:
             add_arm_geoms(head_offsets, "shadow_head", self.head_geom_ids)
 
@@ -312,32 +267,16 @@ class CollisionManager:
         self.ground_id = self.cmodel.addGeometryObject(
             pin.GeometryObject("ground_plane", 0, ground_pose, hppfcl.Box(20.0, 20.0, 1.0)))
 
-        # 5+6. WORLD SCENE (virtual wall + bimanual workspace: table + graspable
-        # cylinders + any future extra obstacles) -- built GENERICALLY from a
-        # `world_scene.WorldScene` (see world_loader.py). Every obstacle in
-        # `world_scene.static_obstacles` becomes exactly one hppfcl geometry, at
-        # the SAME shape/pose/size the old hard-coded constants used to encode --
-        # only the SOURCE of those numbers changed (YAML instead of config.py).
-        #
-        # Legacy fallback: if no world_scene is passed (e.g. an older caller),
-        # rebuild the exact same objects from the deprecated cfg constants so
-        # behavior is byte-for-byte unchanged for anyone not yet passing a scene.
+        # World scene (wall + table + cylinders + extras), built generically
+        # from world_scene.WorldScene (see world_loader.py); falls back to the
+        # deprecated cfg constants if no scene is passed.
         self._geom_id_by_obstacle_name = {}   # {obstacle name -> hppfcl geometry id}
         if world_scene is not None:
             for obs in world_scene.static_obstacles:
-                # BUGFIX (2026-07-04): `collision: false` must mean "this
-                # geometry does not exist in cmodel at all" -- exactly mirroring
-                # the OLD `if cfg.WALL_COLLIDER:` gate, which only ever created
-                # the wall's hppfcl geometry when enabled. The first version of
-                # this loop created the geometry UNCONDITIONALLY and only used
-                # `collision` to skip the pair/id bookkeeping below -- which left
-                # a real (but un-colored, since color_collision_model only paints
-                # workspace_obstacle_ids/wall_id) geometry sitting in cmodel, and
-                # since cmodel IS what Meshcat renders (displayCollisions(True)),
-                # a disabled wall still showed up there -- as a solid BLACK slab
-                # (an hppfcl GeometryObject's default meshColor when nothing ever
-                # sets one). Skipping geometry creation entirely for a disabled
-                # obstacle restores the original "doesn't exist" semantics.
+                # collision:false means the geometry must not exist in cmodel
+                # at all -- Meshcat renders cmodel directly, so a geometry that
+                # merely skips pair bookkeeping would still show up as a solid
+                # black slab (no meshColor ever set).
                 if not obs.collision:
                     continue
 
@@ -360,11 +299,7 @@ class CollisionManager:
                 else:
                     self.workspace_obstacle_ids.append(geom_id)
                     if obs.role == 'table':
-                        # Explicit, name-based reference (NOT positional --
-                        # see detach_object, which used to assume the table
-                        # was always workspace_obstacle_ids[0]; a future world
-                        # with obstacles listed in a different order would have
-                        # silently broken that assumption).
+                        # Name-based, not positional -- obstacle order isn't guaranteed.
                         self.table_id = geom_id
 
             # Resolve the grasp-role indirection (today's grasp state machine,
@@ -433,18 +368,8 @@ class CollisionManager:
             for obs_id in self.workspace_obstacle_ids:
                 self.cmodel.addCollisionPair(pin.CollisionPair(obs_id, arm_id))
 
-        # 2d. Arms vs Head (2026-07-01): the head is a quasi-static CBF
-        # obstacle for the arms only -- see config.py's HEAD_CHAIN docstring
-        # and compute_softmin_jacobian's _arm_membership routing (a head
-        # capsule belongs to NEITHER arm's own geometry set, so an
-        # arm-vs-head pair contributes to exactly ONE arm's SoftMin
-        # aggregate -- whichever arm's geometry is the OTHER side of the
-        # pair -- never both, and never leaks a head joint-velocity "credit"
-        # into the QP since the head's columns of the decision vector are
-        # separately hard-locked to zero by the joint-limit rows in
-        # qp_formulator, exactly like every other non-arm joint (torso,
-        # base, gripper fingers) -- see the coupling note in
-        # compute_softmin_jacobian's module docstring for the full math).
+        # Arms vs head: the head is a quasi-static CBF obstacle only, never
+        # part of either arm's own geometry set (config.py's HEAD_CHAIN).
         # Per instruction: SKIP any pair touching arm_right_1 or arm_left_1
         # (that link cannot collide with the head chain).
         for arm_id in all_arm_ids:
@@ -670,65 +595,22 @@ class CollisionManager:
                                  attach_ramp_shifts=None, attached_object_arm=None,
                                  data=None, cdata=None):
         """
-        Aggregate active collision pairs into TWO INDEPENDENT per-arm SoftMin CBFs
-        (plus the legacy combined pair for backward-compatible telemetry).
+        Two independent per-arm SoftMin CBFs. A pair contributes to arm A's
+        aggregate iff one of its geometries belongs to arm A (_arm_membership,
+        including a held cylinder); a genuine inter-arm pair contributes to
+        both, everything else has an exactly-zero gradient in the other arm's
+        row. d_safe_dynamic is likewise computed per arm from only that arm's
+        own joint velocities, so a fast arm never tightens the other's margin.
 
-        RATIONALE (per-arm coupling fix): a single SoftMin row mixes ALL active
-        pairs' Jacobians via one softmax weighting, so its gradient can have
-        nonzero columns in an arm's joints even when NONE of that arm's own pairs
-        are actually close to binding -- merely because some OTHER pair (possibly
-        involving only the other arm) was among the K closest. The QP then
-        legitimately (but uselessly) recruits the "innocent" arm's joints to
-        satisfy a barrier that has nothing to do with it, causing the inactive
-        arm to twitch/oscillate whenever the active arm nears ANY obstacle.
-
-        FIX: build one SoftMin aggregate per arm, where a pair contributes to
-        arm A's aggregate iff at least one of its two geometries belongs to arm A
-        (via _arm_membership -- includes a cylinder A is currently holding). A
-        genuine inter-arm pair (or two held cylinders getting close) touches BOTH
-        arms and correctly contributes to BOTH aggregates -- preserving the
-        desired "arm A may yield to let arm B reduce its tracking error" behavior.
-        A pair that touches only arm A's geometry (vs. a static obstacle, e.g.
-        the table) NEVER appears in arm B's aggregate, so arm B's barrier row has
-        an EXACTLY ZERO gradient there -- eliminating the spurious coupling.
-
-        Returns: (J_soft_R, h_soft_R, J_soft_L, h_soft_L, d_safe_dynamic_r, d_safe_dynamic_l, abs_min_distance)
-            J_soft_X : (nv,) gradient of arm X's SoftMin barrier (0 when no interaction)
-            h_soft_X : scalar SoftMin distance value for arm X (1.0 when no interaction)
-            d_safe_dynamic_X : velocity-inflated safety margin for arm X's OWN barrier row
-                (PER-ARM, 2026-07-01 -- see the coupling audit below)
-            abs_min_distance : true closest distance over ALL pairs (for telemetry)
-
-        ---------------------------------------------------------------------
-        COUPLING AUDIT (2026-07-01): why d_safe_dynamic had to be split too.
-
-        The per-arm Jacobian split (previous fix) makes J_soft_R/J_soft_L's
-        NONZERO COLUMNS correctly disjoint (modulo genuine inter-arm pairs).
-        But d_safe_dynamic was still ONE SHARED SCALAR, computed from the
-        COMBINED (both-arm) velocity norm, and used identically in BOTH rows:
-
-            b_col_X = -GAMMA_CBF * (h_soft_X - d_safe_dynamic)
-
-        If the ACTIVE arm moves fast, the combined v_norm grows, inflating
-        d_safe_dynamic for BOTH rows -- including the IDLE arm's row, even
-        though nothing changed about the idle arm's own geometry or motion.
-        h_soft_L is essentially never exactly 1.0 in a cluttered scene (the
-        idle arm always has SOME finite closest distance to the table/body/
-        other arm, just usually a large, harmless one) -- shrinking its
-        margin against that fixed h_soft_L tightens b_col_L and can flip an
-        otherwise-slack barrier active, forcing the idle arm's (few, but
-        nonzero -- e.g. via genuinely shared inter-arm pairs, or simply to
-        satisfy a now-infeasible-if-ignored row) joints to move. This was a
-        coupling channel that survived the Jacobian split entirely, and it
-        tracks exactly the reported symptom: idle-arm oscillation correlated
-        with FAST ACTIVE-ARM MOTION near ANY obstacle (its own speed, not the
-        idle arm's, is what was inflating the idle arm's threshold).
-
-        FIX: compute d_safe_dynamic per arm, from ONLY that arm's own joint
-        velocities. An idle arm (near-zero q_dot) now keeps a near-BASE
-        (tight) margin regardless of how fast the other arm is moving; only
-        an arm that is ITSELF moving fast gets an inflated margin.
-        ---------------------------------------------------------------------
+        Returns: (J_soft_R, h_soft_R, J_soft_L, h_soft_L, d_safe_dynamic_r,
+                  d_safe_dynamic_l, abs_min_distance, active_interaction_r,
+                  active_interaction_l)
+            J_soft_X / h_soft_X : SoftMin gradient/value for arm X (h_soft_X=1.0
+                is a safe QP sentinel when idle, not a real margin).
+            d_safe_dynamic_X : velocity-inflated margin for arm X's own row.
+            abs_min_distance : true closest distance over all pairs.
+            active_interaction_X : True iff arm X has an active pair this tick;
+                telemetry-only, use to publish NaN instead of the sentinel margin.
         """
         # data/cdata default to self.* (shared main-thread pair). The real-
         # hardware CBF worker passes its OWN private pin.Data / GeometryData
@@ -752,14 +634,8 @@ class CollisionManager:
         # per pair (a gripper<->cylinder pair belongs to exactly one arm in
         # practice, resolved via _arm_membership) -- see the shift computation.
 
-        # STEP 1: Collect candidate pairs within range, then keep the K closest.
-        # Also track the TRUE (unfiltered) global-closest pair in this SAME pass
-        # -- used only for the RViz collision witness line (qp_visualizer_
-        # tutorial.py's publish_debug), which used to re-scan cdata.distanceResults
-        # from scratch on every telemetry tick: a second full pass over the exact
-        # same data this loop already visits. Folding it in here makes it ONE scan
-        # instead of two; the visualizer's own draw threshold (0.20m) is unchanged,
-        # it just reads self.witness_min_distance/points instead of recomputing them.
+        # Collect candidate pairs within range, keep the K closest, and track
+        # the true global-closest pair in the same pass (for the RViz witness line).
         pair_distances = []
         witness_dist = float('inf')
         witness_res = None
@@ -994,4 +870,5 @@ class CollisionManager:
             J_soft_l = J_soft_sum_l / sum_exp_l
             h_soft_l = -(1.0 / cfg.ALPHA_SOFTMIN) * np.log(sum_exp_l)
 
-        return J_soft_r, h_soft_r, J_soft_l, h_soft_l, d_safe_dynamic_r, d_safe_dynamic_l, abs_min_distance
+        return (J_soft_r, h_soft_r, J_soft_l, h_soft_l, d_safe_dynamic_r, d_safe_dynamic_l,
+               abs_min_distance, active_interaction_r, active_interaction_l)

@@ -12,6 +12,12 @@ It is Claude's responsibility to keep `.kiro/context.md` accurate and up to date
 - Stage only the files actually changed for the task at hand — never `git add -A`/`git add .`.
 - After push, give the sync command block (§14 of context.md) and stop — no summary of the diff unless asked.
 
+## Code Comment Style
+
+- Max **2 lines per comment**. State the constraint or the why, not the history.
+- No story: no dates, no "previously X now Y", no reference to past bugs, commits, or sessions. That belongs in the commit message, not the file.
+- Comment only the non-obvious (a hidden invariant, a subtle workaround, a surprising constraint) — well-named code doesn't need a comment restating what it does.
+
 ## Sibling repo: haption_teleoperation
 
 `~/exchange/ros2-ws/src/haption_teleoperation` drives the Haption haptic device and is the teleoperation half of the same pipeline this repo's QP controller/shared-autonomy stack serves. They run together at runtime and share a live ROS2 topic interface — a change on one side routinely requires a matching change on the other.

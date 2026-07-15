@@ -55,7 +55,7 @@ import threading
 import numpy as np
 import pinocchio as pin
 import rclpy
-from std_msgs.msg import Float64
+from std_msgs.msg import Float64, Float64MultiArray
 
 # The QP entrypoints install flat into lib/triago_control/ alongside each other;
 # add this file's dir so the sibling `main_qp_controller` module imports cleanly
@@ -193,7 +193,11 @@ class RealQPController(SafetyQPController):
             return super()._publish_visual_overlays(cbf, q_dot_safe)
         margin = None
         if not cfg.DISABLE_CBF:
-            margin = float(min(cbf.h_soft_r - cbf.d_safe_r, cbf.h_soft_l - cbf.d_safe_l))
+            # Per-arm margin; NaN when that arm has no active pair (not the
+            # h_soft=1.0 QP sentinel, which isn't a real margin).
+            margin_r = (cbf.h_soft_r - cbf.d_safe_r) if cbf.active_r else float('nan')
+            margin_l = (cbf.h_soft_l - cbf.d_safe_l) if cbf.active_l else float('nan')
+            margin = (float(margin_r), float(margin_l))
         snap = {'witness_distance': cbf.witness_distance,
                 'witness_points': cbf.witness_points,
                 'margin': margin}
@@ -212,7 +216,7 @@ class RealQPController(SafetyQPController):
         nv = self.kin.model.nv
         return CbfResult(
             np.zeros(nv), 1.0, np.zeros(nv), 1.0,
-            cfg.D_SAFE_BASE, cfg.D_SAFE_BASE, float('nan'),
+            cfg.D_SAFE_BASE, cfg.D_SAFE_BASE, float('nan'), False, False,
             float('nan'), None, [], False)
 
     def _set_fresh(self, fresh):
@@ -258,7 +262,8 @@ class RealQPController(SafetyQPController):
                     pin.computeJointJacobians(model, self._data_cbf, q)
                     self.col.update_geometry(q, data=self._data_cbf, cdata=self._cdata_cbf)
                     (J_soft_r, h_soft_r, J_soft_l, h_soft_l,
-                     d_safe_r, d_safe_l, abs_min) = self.col.compute_softmin_jacobian(
+                     d_safe_r, d_safe_l, abs_min,
+                     active_r, active_l) = self.col.compute_softmin_jacobian(
                         v, snap['idx_r'], snap['idx_l'],
                         snap['margin_targets'], snap['attached_objs'],
                         snap['attached_adjacency'], snap['ignored_targets'],
@@ -273,7 +278,7 @@ class RealQPController(SafetyQPController):
                     witness_p = self.col.witness_min_points
                     top = list(self.col.top_active_pairs)
                 result = CbfResult(J_soft_r, h_soft_r, J_soft_l, h_soft_l,
-                                   d_safe_r, d_safe_l, abs_min,
+                                   d_safe_r, d_safe_l, abs_min, active_r, active_l,
                                    witness_d, witness_p, top, True)
                 with self._cbf_cond:
                     self._cbf_result = result
@@ -296,7 +301,7 @@ class RealQPController(SafetyQPController):
                 continue
             try:
                 if snap['margin'] is not None:
-                    self.pub_debug_h.publish(Float64(data=snap['margin']))
+                    self.pub_debug_h.publish(Float64MultiArray(data=list(snap['margin'])))
                 # publish_debug ignores model/data/q/q_dot/ids/limit today (it uses
                 # only witness_info + its own ROS-subscription state), so we pass
                 # None for the mutable ones -> zero cross-thread pinocchio reads.
@@ -327,6 +332,8 @@ class RealQPController(SafetyQPController):
 def main():
     rclpy.init()
     node = RealQPController()
+
+    # Wall-clock control loop by design -- do not set use_sim_time here.
 
     # --- PHASE 1: wait for TF, then verify controller state ---
     node.get_logger().info("[Main] Waiting for TF...")

@@ -79,6 +79,14 @@ class HeadPerceptionNode(Node):
         self.pub_head_cmd = self.create_publisher(
             Float64MultiArray, f"/{cfg.HEAD_CONTROLLER}/joint_velocity_cmd", 10
         )
+        # Debug-namespaced qdot cmd/measured for offline_plotter.py (7 floats,
+        # HEAD_JOINTS order), independent of the real hardware topic name.
+        self.pub_qdot_cmd = self.create_publisher(
+            Float64MultiArray, "/head_perception/qdot_cmd", 10
+        )
+        self.pub_qdot_measured = self.create_publisher(
+            Float64MultiArray, "/head_perception/qdot_measured", 10
+        )
         self.pub_cloud = self.create_publisher(PointCloud2, "/head_perception/cloud", 1)
         self.pub_raw_cloud = self.create_publisher(PointCloud2, "/head_perception/raw_cloud", 1)
         self.pub_markers = self.create_publisher(MarkerArray, "/head_perception/markers", 1)
@@ -133,6 +141,9 @@ class HeadPerceptionNode(Node):
         self._last_depth_frame = None
         self._last_vel_norm = 0.0
         self._last_integrated = False
+        # Post-convergence: print the final QP payload once, then go quiet.
+        self._converged_snapshot = None
+        self._final_summary_printed = False
 
         # --- Timers ----------------------------------------------------
         self.create_timer(1.0 / cfg.CONTROL_RATE_HZ, self._control_tick)
@@ -150,7 +161,7 @@ class HeadPerceptionNode(Node):
             f"  Table top   : z={cfg.TABLE_TOP_Z_WORLD:.2f} m  "
             f"centre={cfg.TABLE_CENTER_BASE[:2]} (base frame)\n"
             f"  Centre frm  : {self._depth_center_frame} (depth optical-centre position)\n"
-            f"  Scan        : {'ON' if cfg.ENABLE_SCAN else 'OFF'}\n"
+            f"  Head motion : {'ACTIVE VISION (perception-led)' if cfg.ENABLE_ACTIVE_VISION else ('fixed scan' if cfg.ENABLE_SCAN else 'fixed look-at')}\n"
             "==================================================================")
 
     # ================================================================== #
@@ -171,14 +182,20 @@ class HeadPerceptionNode(Node):
         # FK once per tick; share with perception.
         self.T_cam_base, self.J_cam = self.kin.forward()
 
-        # Look-at target (with optional scan), then solve the QP.
+        # Perception-driven look-at target; falls back to fixed scan if disabled.
         t = time.time() - self.start_time
-        self.current_target = self.controller.scan_target(t)
+        self.current_target = self.controller.active_vision_target(t, self.latest_result)
         dq = self.controller.compute(self.T_cam_base, self.J_cam, self.current_target)
 
         msg = Float64MultiArray()
         msg.data = [float(x) for x in dq]
         self.pub_head_cmd.publish(msg)
+
+        # Debug duplicates for offline_plotter.py (see the publisher comment above).
+        self.pub_qdot_cmd.publish(Float64MultiArray(data=[float(x) for x in dq]))
+        v_measured = self.kin.get_head_joint_velocities()
+        self.pub_qdot_measured.publish(
+            Float64MultiArray(data=[float(x) for x in v_measured]))
 
     # ================================================================== #
     # Perception loop                                                     #
@@ -258,11 +275,11 @@ class HeadPerceptionNode(Node):
         )
         self.latest_result = result
 
-        # --- Perceived-world convergence: once the fused estimate is confident
-        # AND stable over several settled frames, freeze it and publish the
-        # latched snapshot the QP-CLF-CBF stack builds its collision world from.
-        # Only settled frames advance the stability check (allow_integrate gate).
-        snapshot = self.world_monitor.update(result, allow_update=allow_integrate)
+        # Freeze + publish the snapshot once confidence, coverage, and drift
+        # rate all clear threshold over a settled window (world_convergence.py).
+        stamp_sec = stamp.sec + stamp.nanosec * 1e-9
+        snapshot = self.world_monitor.update(
+            result, allow_update=allow_integrate, stamp_sec=stamp_sec)
         if snapshot is not None:
             self._publish_world_snapshot(snapshot, stamp)
 
@@ -284,18 +301,20 @@ class HeadPerceptionNode(Node):
         # Per-colour confidence (so the plotter can show estimation quality).
         red_conf = next((o.confidence for o in result.objects if o.color_name == "red"), 0.0)
         blue_conf = next((o.confidence for o in result.objects if o.color_name == "blue"), 0.0)
-        # [9]/[10]: perceived-world CONVERGENCE progress (world_convergence.py) --
-        # distinct from the raw per-object confidence above: this is "how close is
-        # the fused estimate to being judged stable enough to freeze into the CBF
-        # world", not just the soft arc-coverage x fit-quality score. Lets
-        # head_plotter show the countdown toward /perceived_world/snapshot firing.
+        # [9]=converge_progress [10]=converged [11]=phase (0 SWEEP/1 REFINE/2 HOLD)
+        # [12]=weakest arc coverage [13]=drift rate m/s (-1=NaN) [14]=head qdot norm
+        drift_rate = self.world_monitor.max_drift_rate
         tel.data = [
             float(result.n_raw), float(n_crop), float(plane_z),
             float(self.controller.last_angle_deg), float(self.controller.last_slack_norm),
             float(result.proc_ms), float(red_conf), float(blue_conf),
             float(result.map_size),
-            float(self.world_monitor.stable_frames),
+            float(self.world_monitor.converge_progress(stamp_sec)),
             1.0 if self.world_monitor.converged else 0.0,
+            float(self.controller.phase),
+            float(self.controller.weakest_coverage),
+            float(drift_rate) if np.isfinite(drift_rate) else -1.0,
+            float(self._last_vel_norm),
         ]
         self.pub_telemetry.publish(tel)
 
@@ -329,12 +348,15 @@ class HeadPerceptionNode(Node):
     def _rescan_cb(self, _msg):
         """Re-arm the convergence monitor so it re-observes and re-publishes."""
         self.world_monitor.reset()
+        self._final_summary_printed = False   # resume console until it re-converges
+        self._converged_snapshot = None
         self.get_logger().info(
             "[PerceivedWorld] Re-arm requested — re-observing; will re-publish "
             "the snapshot once the estimate re-converges.")
 
     def _publish_world_snapshot(self, snapshot, stamp):
         """Build + latch-publish the converged perceived world for the QP stack."""
+        self._converged_snapshot = snapshot   # kept for the final console summary
         markers = build_world_snapshot_markers(
             snapshot, cfg.BASE_FRAME, stamp,
             radius_inflation=cfg.CYL_RADIUS_INFLATION,
@@ -391,12 +413,49 @@ class HeadPerceptionNode(Node):
             f"z{tsize_err_cm[2]:+.2f}] cm")
         return "\n".join(lines)
 
+    def _print_final_summary(self):
+        """Print the EXACT data handed to the QP-CLF-CBF stack (the frozen snapshot),
+        once, in a compact shareable block. Console goes quiet after this."""
+        snap = self._converged_snapshot
+        if snap is None:
+            return
+        lines = [
+            "\n========================================================================",
+            " FINAL PERCEIVED WORLD  (frozen snapshot sent to the QP-CLF-CBF stack)",
+            "------------------------------------------------------------------------",
+            f"   table   : center=[{snap.table_center[0]:.4f}, {snap.table_center[1]:.4f}, "
+            f"{snap.table_center[2]:.4f}] m   size=[{snap.table_size[0]:.4f}, "
+            f"{snap.table_size[1]:.4f}, {snap.table_size[2]:.4f}] m",
+        ]
+        for c in snap.cylinders:
+            lines.append(
+                f"   {c.color_name:5s} : center=[{c.center[0]:.4f}, {c.center[1]:.4f}, "
+                f"{c.center[2]:.4f}] m   radius={c.radius*100:.2f} cm   "
+                f"height={c.height*100:.2f} cm   conf={c.confidence*100:.0f}%")
+        lines.append(
+            "------------------------------------------------------------------------")
+        lines.append(" [sim-only accuracy vs Gazebo GT — estimator never reads GT]:")
+        lines.append(self._gt_diagnostic_summary(snap))
+        lines.append(
+            " Console now quiet. Re-arm with:  ros2 topic pub --once "
+            f"{cfg.PERCEIVED_WORLD_RESCAN_TOPIC} std_msgs/Empty '{{}}'")
+        lines.append(
+            "========================================================================")
+        self.get_logger().info("\n".join(lines))
+
     # ================================================================== #
     # Console report (low frequency — no per-tick spam)                   #
     # ================================================================== #
     def _console_tick(self):
         if not self.kin.is_ready():
             self.get_logger().info("Waiting for /joint_states (head joints)...")
+            return
+
+        # Frozen: print the QP payload once, then stop the periodic status log.
+        if self.world_monitor.converged:
+            if not self._final_summary_printed:
+                self._print_final_summary()
+                self._final_summary_printed = True
             return
 
         r = self.latest_result
@@ -450,13 +509,23 @@ class HeadPerceptionNode(Node):
             diag += (f"\n       [PLANE-CENTROID] {np.round(r.plane_centroid,3)} "
                      f"(expect ~[1.0, 0.0, 0.70])")
 
+        # Active-vision + convergence status (perception-driven head motion).
+        phase_txt = {0: "SWEEP", 1: "REFINE", 2: "HOLD"}.get(self.controller.phase, "?")
+        drift = self.world_monitor.max_drift_rate
+        drift_txt = f"{drift*1000:.1f}mm/s" if np.isfinite(drift) else "n/a"
+        conv_txt = ("CONVERGED" if self.world_monitor.converged
+                    else f"{self.world_monitor.converge_progress():.0%} window")
+        avision = (f"\n       [AVISION] phase={phase_txt} "
+                   f"weakest_cov={self.controller.weakest_coverage*100:.0f}% "
+                   f"drift={drift_txt} conv={conv_txt}")
+
         self.get_logger().info(
             head_line + "\n"
             f"       [PERCEPTION] raw={r.n_raw} crop={len(r.cropped_points) if r.cropped_points is not None else 0} "
             f"map={r.map_size} | {plane_txt} | proc={r.proc_ms:.1f} ms | "
             f"head_vel={self._last_vel_norm:.3f} {'FUSING' if self._last_integrated else 'moving'}\n"
             f"       [OBJECTS] {obj_txt}\n"
-            f"       [JOINTS] {joint_info}" + diag)
+            f"       [JOINTS] {joint_info}" + avision + diag)
 
 
 def main():

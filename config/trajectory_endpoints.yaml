@@ -42,13 +42,13 @@
 # =============================================================================
 
 # --- WHICH TEST TO RUN -------------------------------------------------------
-active_preset: "s_curve_right_infeasible_regression"
+active_preset: "s_curve_right"
 #crossing_swap
 # --- GLOBAL BEHAVIOUR FLAGS --------------------------------------------------
 # Lambda-driven time scaling (dynamic_trajectory / DYNAMIC_TRAJECTORY flag).
 # When true: the trajectory virtual clock slows as the CBF shadow price grows.
 # When false: the clock is rigid (constant speed).
-dynamic_trajectory: true
+dynamic_trajectory: false
 
 # Publish 6-DOF references (position + orientation).
 #   true  -> 12/13-float msgs; orientation is interpolated from start to target.
@@ -66,7 +66,7 @@ task_dimension: 6.0
 ref_frame: "base_footprint"
 
 # --- TRAJECTORY SHAPE / TIMING ----------------------------------------------
-duration: 15.0        # [s] virtual time to complete the quintic motion (fast → instantaneous feel)
+duration: 20.0        # [s] virtual time to complete the quintic motion (fast → instantaneous feel)
 delay_start: 1.0     # [s] settle window used to sample the real start pose
 cube_size: 0.1       # [m] edge of the random perturbation cube (swap_perturbed)
 

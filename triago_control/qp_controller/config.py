@@ -66,7 +66,7 @@ ORIENTATION_CTRL = True         # True = control Pos+Ori (6DOF), False = Pos onl
 #   CLUTCH        False            True              Guided blending        haptic_force_manager_CB
 #   CLUTCH        True             True              Full guidance          haptic_force_manager_CFB
 #   JOYSTICK      False            False             Sync only              haptic_force_manager_J
-#   JOYSTICK      True             False             Guided feedback        haptic_force_manager_JF   (to implement)
+#   JOYSTICK      True             False             Guided feedback        haptic_force_manager_JF   
 #   JOYSTICK      False            True              Guided blending        haptic_force_manager_JB
 #   JOYSTICK      True             True              Full guidance          haptic_force_manager_JFB
 #
@@ -246,10 +246,8 @@ DAMP = 12.0                    # Joint velocity regularization (Lambda) in the Q
 P_GAIN_LIMITS = 2.5            # Joint-limit CBF gamma (braking aggressiveness)
 JOINT_LIMIT_BUFFER_BASE = 0.15  # Base joint-limit braking buffer
 JOINT_LIMIT_K_V = 0.1          # Joint-limit velocity horizon (seconds to look ahead)
-# NOTE: do NOT add a hard slew-rate box on q_dot here -- tried and removed
-# (2026-07-12): it cannot relieve the CBF row and it genuinely breaks QP
-# feasibility when the CBF row's required direction changes faster than the
-# box allows. Details in .kiro/context.md §2 (oscillation digest).
+# Do not add a hard slew-rate box on q_dot: it can't relieve the CBF row and
+# breaks QP feasibility when the CBF's required direction changes quickly.
 
 # Posture / joint-limit avoidance: repulsive potential field, negative gradient of a
 # barrier that diverges at each joint's limits, evaluated on the normalized joint
@@ -262,17 +260,10 @@ POSTURE_GRASP_SCALE = 0.05     # posture weight scaled to this (x W_CENTER) duri
                                #   precision phases (grasp/align/approach/close/lift)
 POSTURE_SCALE_TAU = 0.2        # s -- first-order ramp time-constant for the posture-scale switch
 
-# Rate damping: + RATE_WEIGHT * ||dq - dq_measured||^2 on the ARM joints' QP
-# cost. Gives the task-null wrist DOFs (weakly pinned by the 25:1 pos:ori task
-# weights, previously resolved by a memoryless cost) tick-to-tick memory
-# anchored to the arm's REAL state -- this is what eliminated the qdot
-# oscillation (validated across free space / safe S-curve / infeasible-
-# regression, 2026-07-12; digest in .kiro/context.md §2). Known trade-off at
-# weight 50: extra caution near obstacles (higher lambda peaks, more governor
-# clamping, slower traversal) -- 25 is the snappier compromise (14% worst-case
-# cmd ripple vs 8.3%). RATE_DAMPING_VS_MEASURED=False anchors on last_dq_safe
-# (the QP's own previous output) instead: REJECTED -- a self-referential
-# low-pass in the loop's forward path; smoother command, ~2x worse real motion.
+# Rate damping: + RATE_WEIGHT * ||dq - dq_measured||^2 on the arm joints, anchoring
+# the weakly-pinned wrist DOFs to the arm's real state each tick (kills qdot
+# oscillation). RATE_DAMPING_VS_MEASURED=False anchors on the QP's own last
+# output instead -- rejected: a self-referential low-pass, worse real motion.
 ENABLE_RATE_DAMPING = True
 RATE_DAMPING_VS_MEASURED = True
 RATE_WEIGHT = 50.0             # 10 -> 26.6% / 25 -> 14.0% / 50 -> 8.3% worst-case cmd ripple
@@ -309,8 +300,8 @@ GOV_V_MAX_ANG = 1.2                   # [rad/s] max angular reference velocity p
 GOV_E_MAX_POS = 0.30                  # [m] max allowed position error norm (30 cm)
 GOV_E_MAX_ORI = 0.524                 # [rad] max allowed orientation error norm (~30 deg)
 
-GOV_A_MAX_LIN = 1.0                   # [m/s^2] max linear acceleration of the governed reference (was 2.0 -- A/B testing a slower start-of-motion ramp against QP startup oscillation)
-GOV_A_MAX_ANG = 4.0                   # [rad/s^2] max angular acceleration of the governed reference (was 8.0 -- same test)
+GOV_A_MAX_LIN = 1.0                   # [m/s^2] max linear acceleration of the governed reference
+GOV_A_MAX_ANG = 4.0                   # [rad/s^2] max angular acceleration of the governed reference
 
 # =============================================================================
 # 4. LOOP / TELEMETRY SETTINGS
@@ -357,7 +348,6 @@ TASK_WEIGHTS_6D = np.array([1.0, 1.0, 1.0, 0.04, 0.04, 0.04]) * 10.0
 # shadow-price-driven weight update.
 TASK_WEIGHTS_6D_GRASP = np.array([1.0, 1.0, 1.0, 0.2, 0.2, 0.2]) * 10.0
 
-# Mesh package search paths used to build the Meshcat visual model from the URDF.
 MESH_PATHS = ["/opt/pal/alum/share", "/opt/ros/humble/share", "/opt/pal/ferrum/share", "."]
 
 # =============================================================================
@@ -424,29 +414,11 @@ CAPSULE_RADIUS = 0.06                 # Default radius of the arm collision caps
 # =============================================================================
 # 6b. PER-LINK CAPSULE ALIGNMENT OVERRIDES
 # =============================================================================
-# calculate_offsets builds each link's capsule as a straight joint-to-joint segment
-# with the single global CAPSULE_RADIUS above, but the real CAD mesh isn't always
-# collinear with that line and several links are physically thicker than the default
-# radius -- so the raw capsule can let the visual mesh poke outside it. Rather than
-# growing CAPSULE_RADIUS globally (which fattens every link, loosening CBF margins
-# everywhere), each entry here corrects ONE named link from its real mesh vertex data
-# (see scripts/qp_arm_teleop/capsule_alignment_audit.py --suggest-fix). A link absent
-# from this dict is completely unaffected -- byte-identical to before this feature.
-#
-# Fields (mm, joint-local frame -- same frame calculate_offsets' placement/length
-# live in): lateral_offset [x,y,z] re-centers the capsule's core line perpendicular
-# to its axis; radius replaces CAPSULE_RADIUS for this link only; proximal_extension/
-# distal_extension extend the segment's ends along its axis to cover mesh that
-# reaches past the raw joint-to-joint segment.
-#
-# Radii below are reduced ~5mm from their tight (audit-computed) fit as an
-# exploratory step to loosen the CBF's felt conservatism -- this deliberately
-# reintroduces a small (~4mm) accepted mesh protrusion on links 1-5, expected when
-# re-running the audit. Link 6 is intentionally ABSENT (grasp tuning depends on its
-# original, un-overridden geometry). Applied by
-# CollisionManager._apply_capsule_override as a pure additive correction after the
-# dominant-axis snap. The same fix applies across arm_right/arm_left/arm_head for a
-# given link number (measurements came out identical across all three chains).
+# Per-link correction where the real CAD mesh isn't collinear with the
+# straight joint-to-joint capsule (see capsule_alignment_audit.py --suggest-fix).
+# mm, joint-local frame: lateral_offset re-centers the core line; radius
+# overrides CAPSULE_RADIUS; proximal/distal_extension extend the segment ends.
+# Link 6 intentionally absent (grasp tuning depends on its un-overridden geometry).
 _CAPSULE_FIX = {
     1: {'lateral_offset': [-22.46, 9.11, 0.00], 'radius': 70.42, 'proximal_extension': 0.00, 'distal_extension': 0.20},
     2: {'lateral_offset': [8.82, -0.00, -8.67], 'radius': 70.07, 'proximal_extension': 0.00, 'distal_extension': 0.00},
@@ -492,22 +464,13 @@ OFFLINE_PLOT_ROOT_DIR = "~/exchange/ros2-ws/triago_offline_plots"
 # same time axis as the tracking motion).
 OFFLINE_PLOT_POST_TRIGGER_S = 10.0
 
-# When trajectory_generator.py is the recording source, the record-start signal
-# (the WAITING->TRACKING rising edge, t=0 of the trial) is a single VOLATILE
-# std_msgs/Bool: a subscriber that joins after it is published never receives it.
-# Same-host (sim) DDS discovery is instantaneous so the plotter always caught it;
-# across a network (real robot <-> a docker offline_plotter over Cyclone)
-# discovery takes seconds -- longer than delay_start -- so the edge fired into the
-# void and no trial was recorded. To prevent that, the generator holds in its
-# WAITING phase after the settle window until the recorder has subscribed
-# (pub.get_subscription_count() > 0), but no longer than this many seconds.
-# 0.0 disables the wait entirely (fire immediately -- the legacy behaviour).
+# The WAITING->TRACKING trigger is a single VOLATILE Bool; a late-joining
+# subscriber (e.g. cross-network) can miss it. The generator holds in WAITING
+# until the recorder subscribes, up to this many seconds (0.0 = no wait).
 OFFLINE_RECORD_WAIT_TIMEOUT_S = 10.0
 
-# --- Rosbag capture alongside the figures/metrics above (2026-07-11) ---
-# offline_plotter.py spawns `ros2 bag record` for the trial's exact t=0..end
-# window and writes it into <trial_dir>/bag, so any trial can be replayed
-# offline later (e.g. real-robot vs. sim comparison at CONTROL_FREQ_DEFAULT).
+# offline_plotter.py spawns `ros2 bag record` for the trial window into
+# <trial_dir>/bag, so any trial can be replayed offline later.
 OFFLINE_BAG_ENABLE = True
 OFFLINE_BAG_STORAGE_ID = "sqlite3"
 
@@ -541,4 +504,13 @@ OFFLINE_BAG_TOPICS = [
     "/arm_left/cartesian_reference",
     "/qp_debug/reference_effective",
     OFFLINE_RECORD_TRIGGER_TOPIC,
+    # Head perception + active-vision (main_head.py) -- optional per trial,
+    # harmless to always list; ros2 bag record only captures what's publishing.
+    "/head_perception/telemetry",
+    "/head_perception/markers",
+    "/head_perception/qdot_cmd",
+    "/head_perception/qdot_measured",
+    "/perceived_world/snapshot",
+    "/head_active_tracking/telemetry",
+    "/head_active_tracking/qdot",
 ]
