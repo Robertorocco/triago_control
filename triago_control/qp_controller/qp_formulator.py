@@ -175,16 +175,26 @@ class QPFormulator:
         max_shadow_r = max(self._lam_col_r_f, self._lam_jr_f)
         max_shadow_l = max(self._lam_col_l_f, self._lam_jl_f)
 
-        # Decoupled dynamic slack weighting (per arm), driven by the SMOOTHED prices
+        # Decoupled dynamic slack weighting (per arm), driven by the SMOOTHED prices.
+        # BETA's squared-exponential is steep enough that even a filtered lambda
+        # still swings the weight sharply near its knee (lambda can spike to
+        # ~400 collision / ~40 joint-limit in one tick) -- so add a second LPF
+        # stage on the weight itself, exactly like gamma's own filter below,
+        # using self.weight_slack_r/l as the persistent filter state.
         if cfg.DYNAMIC_SLACK_WEIGHT:
             alpha_r = np.exp(-cfg.BETA * (max_shadow_r ** 2))
-            weight_slack_r = cfg.BASE_WEIGHT_SLACK + alpha_r * (cfg.MAX_WEIGHT_SLACK - cfg.BASE_WEIGHT_SLACK)
+            target_slack_r = cfg.BASE_WEIGHT_SLACK + alpha_r * (cfg.MAX_WEIGHT_SLACK - cfg.BASE_WEIGHT_SLACK)
 
             alpha_l = np.exp(-cfg.BETA * (max_shadow_l ** 2))
-            weight_slack_l = cfg.BASE_WEIGHT_SLACK + alpha_l * (cfg.MAX_WEIGHT_SLACK - cfg.BASE_WEIGHT_SLACK)
+            target_slack_l = cfg.BASE_WEIGHT_SLACK + alpha_l * (cfg.MAX_WEIGHT_SLACK - cfg.BASE_WEIGHT_SLACK)
+
+            filter_alpha_w = np.exp(-dt / cfg.WEIGHT_SLACK_FILTER_TAU)
+            self.weight_slack_r = filter_alpha_w * self.weight_slack_r + (1.0 - filter_alpha_w) * target_slack_r
+            self.weight_slack_l = filter_alpha_w * self.weight_slack_l + (1.0 - filter_alpha_w) * target_slack_l
         else:
-            weight_slack_r = cfg.BASE_WEIGHT_SLACK
-            weight_slack_l = cfg.BASE_WEIGHT_SLACK
+            self.weight_slack_r = cfg.BASE_WEIGHT_SLACK
+            self.weight_slack_l = cfg.BASE_WEIGHT_SLACK
+        weight_slack_r, weight_slack_l = self.weight_slack_r, self.weight_slack_l
 
         # Same quadratic-tolerance law as the slack weight above, per arm,
         # reusing the existing GAMMA_MIN/GAMMA_MAX bounds.
@@ -204,13 +214,31 @@ class QPFormulator:
         return weight_slack_r, weight_slack_l
 
     def _joint_name_by_idx_v(self, idx_v):
-        """Human-readable joint name for a velocity index (lazily cached)."""
+        """Human-readable joint name for a velocity index (lazily cached).
+
+        Goes name -> model.getJointId(name) -> joint, the SAME trusted
+        direction robot_kinematics.py already uses, rather than iterating
+        model.joints and reading .id back off the joint object -- that
+        reverse direction has been observed to hand pinocchio's C++ binding
+        an unusable id (OverflowError: Python int too large to convert to
+        C long), which crashed this diagnostic before it printed anything
+        useful. Any single bad entry is skipped (logged once), not fatal --
+        this is a best-effort label for a print statement, never allowed to
+        hide the actual infeasibility diagnosis below it.
+        """
         if not hasattr(self, '_idx_v_name_map'):
             self._idx_v_name_map = {}
-            for joint in self.model.joints:
-                if joint.id == 0 or joint.nv != 1:
+            for name in self.model.names:
+                if name == 'universe':
                     continue
-                self._idx_v_name_map[joint.idx_v] = self.model.names[joint.id]
+                try:
+                    jid = self.model.getJointId(name)
+                    joint = self.model.joints[jid]
+                    if joint.nv != 1:
+                        continue
+                    self._idx_v_name_map[joint.idx_v] = name
+                except Exception as e:  # noqa: BLE001 -- best-effort label, never fatal
+                    print(f"  (skipping joint '{name}' in idx_v name cache: {e})")
         return self._idx_v_name_map.get(idx_v, f"idx_v={idx_v}")
 
     def _diagnose_infeasibility(self, kin, C_final, b_final,
@@ -281,6 +309,25 @@ class QPFormulator:
                   "the shared velocity box (inter-arm geometry), or a numerical "
                   "degeneracy in quadprog's active-set path. Log the current "
                   "q/h values and inspect fig2/fig4 for this instant.")
+
+    def _safe_zero_solution(self, b_col_r=0.0, b_col_l=0.0):
+        # Shared fallback for every solve failure mode (infeasible, non-finite
+        # inputs, non-finite output): halt motion, reset shadow-price memory.
+        # last_dq_safe is deliberately NOT touched -- anchoring the rate-damping
+        # term on a zeroed value turned single bad ticks into self-sustaining
+        # failure (see the comment where last_dq_safe is actually updated).
+        # b_col_r/l are still published on /collision_constraints for
+        # haption_teleoperation's force feedback even on a failed solve (matches
+        # the original infeasible-path behavior) -- sanitized here so a NaN CBF
+        # value never reaches that consumer either.
+        b_col_r = float(b_col_r) if np.isfinite(b_col_r) else 0.0
+        b_col_l = float(b_col_l) if np.isfinite(b_col_l) else 0.0
+        self.last_lambda_col = 0.0
+        self.last_lambda_cbf_right = 0.0
+        self.last_lambda_cbf_left = 0.0
+        self.task_energies = np.zeros(4)
+        return (np.zeros(self.n_joints), 0.0, 0.0,
+               (b_col_r, b_col_l), np.zeros(self.n_joints))
 
     def build_and_solve(self, kin, J_soft_r, h_soft_r, J_soft_l, h_soft_l,
                         d_safe_dynamic_r, d_safe_dynamic_l,
@@ -401,7 +448,21 @@ class QPFormulator:
             else:
                 dq_prev_rate = self.last_dq_safe
             H_rate = np.diag(self._rate_mask * cfg.RATE_WEIGHT)
-            g_rate = -(self._rate_mask * cfg.RATE_WEIGHT) * dq_prev_rate
+            # Built by SELECTING at the arm indices, NOT by multiplying the
+            # (0/1) mask against the full dq_prev_rate: 0 * nan == nan, not 0,
+            # so masking-via-multiplication does NOT neutralize a non-finite
+            # entry elsewhere in dq_prev_rate (e.g. an unsensed mobile-base
+            # wheel joint) -- it silently plants a NaN into g at that index,
+            # which poisons quadprog's ENTIRE solution vector, including the
+            # arm DOFs, even though the wheels are otherwise fully locked by
+            # the box constraints (real-hardware incident, 2026-07-15). Direct
+            # index assignment never reads dq_prev_rate anywhere but the arm
+            # joints, so garbage at any other index literally cannot be seen.
+            g_rate = np.zeros(self.n_joints)
+            if kin.idx_right:
+                g_rate[kin.idx_right] = -cfg.RATE_WEIGHT * dq_prev_rate[kin.idx_right]
+            if kin.idx_left:
+                g_rate[kin.idx_left] = -cfg.RATE_WEIGHT * dq_prev_rate[kin.idx_left]
         else:
             dq_prev_rate = self.last_dq_safe
             H_rate = 0.0
@@ -552,6 +613,22 @@ class QPFormulator:
         # =========================================================
         # F. SOLVE + SHADOW-PRICE EXTRACTION
         # =========================================================
+        # NaN/Inf guard BEFORE handing anything to quadprog: a single non-finite
+        # entry in H/g/C/b (a corrupted upstream sensor reading, a NaN CBF pair
+        # that slipped past collision_manager's own guard, etc.) does NOT reliably
+        # make quadprog raise -- it can silently return a NaN-filled "solution"
+        # instead, which then sails straight to the real hardware command with
+        # zero indication anything went wrong. Catch it HERE, before the solve,
+        # every tick (this check is cheap relative to the solve itself).
+        if not (np.isfinite(self.H).all() and np.isfinite(self.g).all()
+                and np.isfinite(C_final).all() and np.isfinite(b_final).all()):
+            print("\033[91m[QP Error] NON-FINITE H/g/C/b -- refusing to call quadprog "
+                  "(would silently return garbage, not raise).\033[0m")
+            self._diagnose_infeasibility(kin, C_final, b_final,
+                                         J_soft_r, b_col_r, h_soft_r, d_safe_dynamic_r,
+                                         J_soft_l, b_col_l, h_soft_l, d_safe_dynamic_l)
+            return self._safe_zero_solution(b_col_r, b_col_l)
+
         sol, lagrangians = self._solve_qp(self.H, self.g, C_final, b_final)
         if sol is None:
             # Infeasible: halt motion, reset shadow-price memory. last_dq_safe
@@ -560,11 +637,15 @@ class QPFormulator:
             self._diagnose_infeasibility(kin, C_final, b_final,
                                          J_soft_r, b_col_r, h_soft_r, d_safe_dynamic_r,
                                          J_soft_l, b_col_l, h_soft_l, d_safe_dynamic_l)
-            self.last_lambda_col = 0.0
-            self.last_lambda_cbf_right = 0.0
-            self.last_lambda_cbf_left = 0.0
-            self.task_energies = np.zeros(4)
-            return np.zeros(self.n_joints), 0.0, 0.0, (b_col_r, b_col_l), np.zeros(self.n_joints)
+            return self._safe_zero_solution(b_col_r, b_col_l)
+
+        if not np.isfinite(sol).all():
+            # Belt-and-suspenders: H/g/C/b were finite (checked above) yet
+            # quadprog itself returned a non-finite solution -- an ill-conditioned
+            # active set rather than a bad input. Same safe fallback either way.
+            print("\033[91m[QP Error] quadprog returned a NON-FINITE solution from "
+                  "finite inputs (numerical ill-conditioning) -- discarding it.\033[0m")
+            return self._safe_zero_solution(b_col_r, b_col_l)
 
         q_dot_safe = sol[:self.n_joints]
         slack_r = sol[-2]
@@ -606,12 +687,19 @@ class QPFormulator:
         e_posture_l = w_center * _sum_sq(dq_post, idx_l)
         e_slack_r = float(weight_slack_r * slack_r ** 2)
         e_slack_l = float(weight_slack_l * slack_l ** 2)
-        # Mask to the arm joints -- unmasked, the head chain's locked q_dot=0
-        # would spuriously count into the residual.
+        # Computed by SELECTING at the arm indices (same reasoning as g_rate
+        # above): a mask-multiply here would equally silently NaN-poison this
+        # telemetry from a non-finite dq_prev_rate entry elsewhere (e.g. a
+        # wheel joint), even though _sum_sq's own idx slicing happens to make
+        # it harmless today -- fixed at the source so that stays true.
         if cfg.ENABLE_RATE_DAMPING:
-            rate_resid = (q_dot_safe - dq_prev_rate) * self._rate_mask
-            e_rate_r = cfg.RATE_WEIGHT * _sum_sq(rate_resid, idx_r)
-            e_rate_l = cfg.RATE_WEIGHT * _sum_sq(rate_resid, idx_l)
+            def _rate_energy(idx):
+                if not idx:
+                    return 0.0
+                resid = q_dot_safe[idx] - dq_prev_rate[idx]
+                return float(cfg.RATE_WEIGHT * np.sum(resid ** 2))
+            e_rate_r = _rate_energy(idx_r)
+            e_rate_l = _rate_energy(idx_l)
         else:
             e_rate_r = 0.0
             e_rate_l = 0.0

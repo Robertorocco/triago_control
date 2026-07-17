@@ -4,13 +4,24 @@
 Camera-driven QP-CLF-CBF controller — builds the collision world from the HEAD
 CAMERA instead of a static YAML.
 
-This is a THIN SUBCLASS of SafetyQPController (main_qp_controller.py). It is
-IDENTICAL in every respect — same CBF/CLF math, same real-time control loop, same
-Meshcat/RViz visualization — EXCEPT for one thing: where the obstacle world comes
+This is a THIN SUBCLASS of RealQPController (main_qp_controller_real.py), which is
+itself a thin subclass of SafetyQPController. It is IDENTICAL in every respect —
+same CBF/CLF math, same real-time control loop, same async-CBF/RViz-overlay worker
+threads on real hardware — EXCEPT for one thing: where the obstacle world comes
 from. Instead of load_world(<yaml>), it blocks at startup until the head perception
 node publishes a confident, latched /perceived_world/snapshot, and builds the
 WorldScene from that (see qp_controller/perceived_world_builder.py). Everything
 downstream is inherited verbatim, so this file stays ~1 method + a main().
+
+Subclassing RealQPController (not SafetyQPController directly) matters on real
+hardware: without it, the SoftMin CBF ran synchronously in-line every tick --
+previously measured to exceed the ENTIRE control-loop budget on its own on this
+robot -- collapsing the actual publish rate for everything downstream (qp_debug/*
+topics, /collision_constraints) far below what plotter.py and
+main_shared_autonomy.py's collision-data-staleness watchdog expect. RealQPController
+moves that cost to a worker thread exactly as main_qp_controller_real.py does; this
+subclass is unaffected in sim (REAL_HARDWARE=False there, so RealQPController itself
+falls back to fully synchronous behavior).
 
 The world is built ONCE, statically, from the confident snapshot — no dynamic
 per-tick CBF updates (a moving obstacle set would make the barrier non-stationary,
@@ -27,17 +38,18 @@ import os
 import sys
 
 import rclpy
+from rclpy.signals import SignalHandlerOptions
 
 # The QP entrypoints install flat into lib/triago_control/ alongside each other;
 # add this file's dir so the sibling `main_qp_controller` module imports cleanly
 # whether run from the install tree or source (mirrors the analysis scripts).
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from main_qp_controller import SafetyQPController                       # noqa: E402
+from main_qp_controller_real import RealQPController                    # noqa: E402
 from triago_control.qp_controller.perceived_world_builder import wait_for_scene  # noqa: E402
 
 
-class PerceivedQPController(SafetyQPController):
-    """SafetyQPController whose collision world is BUILT FROM THE HEAD CAMERA."""
+class PerceivedQPController(RealQPController):
+    """RealQPController whose collision world is BUILT FROM THE HEAD CAMERA."""
 
     def _build_world_scene(self):
         # Overrides the base YAML seam: block until the head publishes a
@@ -52,7 +64,11 @@ class PerceivedQPController(SafetyQPController):
 
 
 def main():
-    rclpy.init()
+    # NO signal handlers: rclpy's default SIGINT handler shuts down the whole
+    # context BEFORE our except/finally below runs, so restore_controllers()
+    # would find an already-dead context on Ctrl-C. Disabling it means Ctrl-C
+    # just raises a plain KeyboardInterrupt and WE control shutdown ordering.
+    rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
     node = PerceivedQPController()
 
     # Wall-clock control loop by design -- do not set use_sim_time here.
@@ -68,21 +84,34 @@ def main():
         print("------------------------------------------------")
     else:
         print("[Error] Could not switch controllers. Exiting.")
+        node.shutdown_workers()
         node.destroy_node()
         rclpy.shutdown()
         return
 
-    # --- PHASE 2: visualization + diagnostics ---
-    node.viz.init_meshcat(lambda: node.kin.current_q, node.col)
+    # --- PHASE 2: visualization + diagnostics (Meshcat suspended on real HW) ---
+    if node.REAL_HARDWARE:
+        node.get_logger().info(
+            "\033[93m[Viz] REAL HARDWARE: Meshcat suspended (RViz/plotters unaffected).\033[0m")
+    else:
+        node.viz.init_meshcat(lambda: node.kin.current_q, node.col)
     node.kin.print_joint_limits_table(node.get_logger())
 
     # --- PHASE 3: engage the real-time loop ---
+    # spin_once(timeout_sec=0.1) in a loop, NOT rclpy.spin(node): with the
+    # signal handler disabled above, an indefinitely-blocking spin() has
+    # nothing to wake it on Ctrl-C -- this returns to Python every 0.1s so
+    # KeyboardInterrupt actually gets raised promptly (same pattern already
+    # used by trajectory_generator.py's main()).
     node.start_control_loop()
     try:
-        rclpy.spin(node)
+        while rclpy.ok():
+            rclpy.spin_once(node, timeout_sec=0.1)
     except KeyboardInterrupt:
         pass
     finally:
+        node.shutdown_workers()
+        node.restore_controllers()
         if os.path.exists(node.urdf_path):
             os.remove(node.urdf_path)
         node.destroy_node()

@@ -27,6 +27,11 @@ import numpy as np
 # 1. CAMERA TOPICS  (override at runtime with ROS params of the same lowercase
 #    name, e.g.  --ros-args -p color_topic:=/my/color)
 # =============================================================================
+# These are the SIM (Gazebo) defaults. Real hardware: launch `launch/
+# head_real.launch.py` instead of running main_head.py directly -- it starts
+# the RealSense driver, the head_arm_rgbd mount static transform, and overrides
+# these three params + depth_center_frame for the real camera in one go.
+#
 # Real TRIAGo head camera topics (RealSense D455, PAL-configured).
 # NOTE: depth is NOT aligned to color — it uses its own intrinsics/resolution.
 # We subscribe to the DEPTH camera_info for deprojection (not color).
@@ -278,6 +283,135 @@ RED_HUE_HIGH = 0.05          # ... OR hue <= this (near 0.0)  -> RED
 BLUE_HUE_LOW = 0.55          # hue in [0.55, 0.75] -> BLUE
 BLUE_HUE_HIGH = 0.75
 
+# Real hardware only (set True by launch/head_real.launch.py; sim keeps the
+# False default). Slot labels stay "red"/"blue" so downstream never changes.
+REAL_HARDWARE_HEAD = False
+
+# Colour is unusable on the real scene (white table vs white paper cylinder,
+# lighting-dependent) -> classify by HEIGHT. Placeholder bands until measured.
+GEOM_SHORT_HEIGHT_MAX = 0.15  # [m] height <= this -> "red" slot (short black cyl)
+GEOM_TALL_HEIGHT_MIN = 0.20   # [m] height >= this -> "blue" slot (tall paper cyl)
+
+# Ground rejection: the real table is taller than 0.5m, so its top plane is
+# well above the floor -- cut low points before RANSAC and require the fitted
+# plane to sit above REAL_PLANE_Z_MIN (stops locking onto the ground, which the
+# tight ±tolerance window around the SIM 0.70m prior sometimes let slip).
+REAL_CROP_Z_MIN = 0.45        # [m] floor cutoff before RANSAC (sim uses CROP_Z_MIN)
+REAL_PLANE_Z_MIN = 0.50       # [m] table top must be at least this high
+REAL_PLANE_Z_MAX = 1.20       # [m] and no higher than this
+
+# Full-height enforcement: only accept a cylinder whose SIDE is observed over
+# its whole height (fraction of height slices containing points), not one whose
+# height was inferred from a top disc alone -- see object_detector _fit_cylinder.
+REAL_VERT_COVERAGE_MIN = 0.40  # [0..1] min fraction of height slices with points
+                               # (relaxed: a steep view sees less of the side wall)
+REAL_VERT_COVERAGE_BINS = 10
+
+# Top-face height reference: use a high percentile (not the raw z-max, which
+# chases flying-pixel depth spikes above the true top -- the noise seen on the
+# real cloud) as the top-slice anchor. Real hardware only; sim keeps z-max.
+CYL_TOP_PERCENTILE_REAL = 98
+
+# Force exactly the expected object count (WORLD_EXPECTED_CYLINDERS): keep only
+# the N highest-confidence tracks, drop the rest as spurious. See
+# perception_pipeline.py (real-hardware post-filter).
+
+# Hand/arm rejection: while exploring (SWEEP/REFINE), grow the accepted table
+# XY footprint from the RANSAC plane inliers (grow-only -> a partial early
+# view can't shrink it); frozen once HOLD is reached (env understood, world
+# model about to be built -- exploration is over and hands may return).
+# Relies on the hypothesis that hands are still/absent during exploration.
+REAL_TABLE_XY_GATE_MARGIN = 0.03   # [m] safety pad so a legit edge point isn't clipped
+# Per-frame footprints are noisy (viewpoint-dependent calibration wobble --
+# same root cause as the plane-HEIGHT swing seen on real hardware); a raw
+# grow-only min/max lets a single wide frame inflate the gate forever. Median
+# over a rolling window rejects that outlier instead of remembering it.
+REAL_TABLE_FOOTPRINT_HISTORY = 60   # samples kept (~12s @ 5Hz)
+
+# 1-shot EE-position scene cut (config §11, real hardware only): the table is
+# assumed further forward than either arm's current reach, so anything nearer
+# than max(EE_right.x, EE_left.x) is the robot's own arm/hand, not the table.
+# main_qp_controller.py's pub_ee_state, 18 floats: p_r(3) v_r(3) p_l(3) v_l(3)
+# rpy_r(3) rpy_l(3), already in base_footprint (same frame as the cloud).
+EE_STATE_TOPIC = "/qp_debug/ee_real"
+EE_X_CUTOFF_MARGIN = 0.05     # [m] past max(EE_right.x, EE_left.x) -- gripper margin
+EE_STATE_WAIT_TIMEOUT_S = 5.0  # give up and disable the cut if nothing arrives
+
+# Real-motion overrides (applied by main_head.py at startup): halve speed/gain,
+# double dwell -- real actuators oscillate at sim gains, depth needs stillness.
+MAX_HEAD_VELOCITY_REAL = 0.05              # rad/s (sim: 0.10)
+LOOKAT_LAMBDA_REAL = 0.5                   # (sim: 1.0)
+ACTIVE_VISION_PLATEAU_PATIENCE_REAL = 12   # settled frames (sim: 6)
+ACTIVE_VISION_TIME_BUDGET_S_REAL = 90.0    # slower scan needs a bigger budget
+
+# IK-solved (numpy FK on triago_extracted.urdf, validated vs robot TF): camera
+# at [0.65, 0, 1.40], 0.78m standoff, pre-aimed at the table. STEEPEST view
+# (63deg from horizontal vs ~50) that still frames the whole table within the
+# D455 FOV -> more face-on top disc (cleaner radius + height). A true top-down
+# (nadir) is NOT reachable: the head arm can't extend over a table 1m forward
+# of the torso (verified) -- that would need the robot base moved ~0.3m closer.
+HEAD_POSTURE_TARGET_REAL = np.array([-0.2925, -0.3324, -0.4587, -0.7678, -0.8386, -1.5055, 0.1549])
+
+# =============================================================================
+# REAL HARDWARE HEAD MOTION (2026-07-16 simplification): EXACTLY two fixed
+# dwell postures. No scanning, no per-object SWEEP/REFINE/HOLD state machine --
+# main_head.py bypasses LookAtController.active_vision_target()/scan_target()
+# entirely on real hardware (sim is completely untouched, still uses the full
+# active-vision system). See main_head.py::_real_hardware_target.
+#
+#   Phase 1 (t < REAL_PHASE1_DURATION_S): standard framing (HEAD_POSTURE_TARGET
+#     _REAL), aimed at the live table centroid -- roughly localizes the table
+#     + both cylinders.
+#   Phase 2 (t >= REAL_PHASE1_DURATION_S): ONE permanent switch to a closer
+#     view fixated on the MIDPOINT between the two detected cylinders. Never
+#     reverts -- letting continued fusion from a farther/steeper view re-
+#     converge the refined estimate back toward its old, less accurate values
+#     was the whole bug in the previous (dwell-then-revert) design.
+#
+# The user compares Phase 1 vs Phase 2 estimates directly in
+# head_debug_plotter.py -- no auto-selection here.
+# =============================================================================
+ENABLE_CLOSE_INSPECT = True          # master enable for the Phase 2 switch
+REAL_PHASE1_DURATION_S = 30.0        # [s] Phase 1 duration before switching
+REAL_PHASE2_RETRY_COOLDOWN_S = 5.0   # [s] retry interval if not enough cylinders / unreachable yet
+# Elevation angle (from horizontal, at the fixation point) of the Phase 2
+# view. The standard framing posture is a steep ~63deg near-top-down view
+# (good for the table's XY footprint, poor for cylinder radius/height --
+# barely any side wall visible). A shallower elevation shows more of the
+# cylinder's curved SIDE surface -- better arc/height fit. Range tried:
+# 30-60deg; 45 is the default middle choice, easy to retune.
+CLOSE_INSPECT_ELEVATION_DEG = 45.0
+# Fraction of the frame's half-width/half-height the cylinder pair is allowed
+# to fill (< 1.0 leaves a border margin so nothing clips at frame edge from
+# estimate noise/motion).
+CLOSE_INSPECT_FOV_MARGIN_FRAC = 0.85
+# Extra radius beyond half the cylinder-to-cylinder separation, budgeting for
+# each cylinder's own radius so neither is clipped at the frame edge.
+CLOSE_INSPECT_OVERHANG_MARGIN_M = 0.05
+# Standoff bounds: never closer than this (sanity floor against a degenerate
+# estimate) and never farther than the standard framing's own distance
+# (already known-good -- Phase 2 only ever moves CLOSER than Phase 1).
+CLOSE_INSPECT_MIN_STANDOFF_M = 0.35
+CLOSE_INSPECT_MAX_STANDOFF_M = 0.78
+
+# Wider fixation-point offsets than the sim sweep -> the closer camera inspects
+# the table from noticeably different angulations (better rim/side coverage for
+# the cylinder fit), instead of the near-static sim scan.
+SCAN_WAYPOINTS_REAL = [
+    (0.00, 0.00),
+    (0.12, 0.15), (0.12, -0.15),
+    (-0.12, 0.15), (-0.12, -0.15),
+    (0.15, 0.00), (-0.15, 0.00),
+]
+
+# main_head.py computes control/perception only and stays plot-free; all rich
+# debugging (point cloud, world belief, confidence, convergence-over-time)
+# lives in the separate scripts/head_controller/head_debug_plotter.py, which
+# subscribes to this JSON telemetry channel (real hardware only) + the
+# existing /head_perception/cloud PointCloud2. Run the plotter on a machine
+# with a display (e.g. your dev PC) rather than the robot's own console.
+DEBUG_JSON_TOPIC = "/head_perception/debug_json"
+
 # =============================================================================
 # 12. TEMPORAL SMOOTHING + LOOP RATES
 # =============================================================================
@@ -509,6 +643,16 @@ APRILTAG_DETECTION_TIMEOUT_S = 1.0
 # still drifting in early frames.
 PERCEIVED_WORLD_TOPIC = "/perceived_world/snapshot"   # latched MarkerArray, TRANSIENT_LOCAL
 PERCEIVED_WORLD_RESCAN_TOPIC = "/perceived_world/rescan"  # std_msgs/Empty -> re-arm + re-publish
+# Real hardware: RViz-facing latched MarkerArray of the loaded world, published
+# on the SAME manual ENTER trigger that hands the snapshot to the CBF -- lets
+# you SEE exactly what got loaded into the safety controller. Same markers as
+# PERCEIVED_WORLD_TOPIC, separate name for a clean RViz display.
+REAL_PERCEPTION_TOPIC = "real_perception"
+# Manual world-load trigger. Two ways to fire it: press ENTER in main_head's
+# console (only reaches the node when run via `ros2 run`, NOT `ros2 launch` --
+# launched nodes get no stdin), or publish an Empty here (works under launch):
+#   ros2 topic pub --once /perceived_world/load std_msgs/msg/Empty "{}"
+PERCEIVED_WORLD_LOAD_TOPIC = "/perceived_world/load"
 
 WORLD_EXPECTED_CYLINDERS = 2      # red + blue on the table
 WORLD_CONF_MIN = 0.85             # each cylinder's tracker confidence must reach this

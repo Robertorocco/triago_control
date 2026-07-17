@@ -37,7 +37,7 @@ The architecture is factored into four decoupled real-time loops (Fig.~\ref{fig:
 \item a \textbf{haptic force-feedback layer} rendering the inferred intent as guidance forces on the operator's device;
 \item a \textbf{head perception layer} that both (a)~servoes the camera to keep the operator's active hand framed during teleoperation, and (b)~autonomously builds a camera-derived model of the tabletop scene that can replace the static world model as the source of the safety controller's collision barriers.
 \end{enumerate}
-No loop shares a decision variable with another: coupling is exclusively through published references, telemetry, and world models, so each loop's guarantees are self-contained.
+No loop shares a decision variable with another: coupling is exclusively through published references, telemetry, and world models, so each loop's guarantees are self-contained. The operator-side half --- the device interface, the two teleoperation control modes, and the per-mode assistance strategies --- is specified in \S\ref{sec:teleop}--\S\ref{sec:rendering}; together they form the $2\times2\times2$ condition matrix of a planned user study, whose fairness properties are treated as a design feature in their own right (\S\ref{sec:study}).
 
 \begin{figure}[htb]
 \centering
@@ -73,7 +73,7 @@ No loop shares a decision variable with another: coupling is exclusively through
 % Edges
 \draw[<->] (op) -- (dev);
 \draw[->] (dev) -- node[right]{pose, buttons} (teleop);
-\draw[->] (fm.west) to[bend left=25] node[left, align=center]{$F_{\text{guide}}$\\$F_{\text{fixture}}$} (dev.west);
+\draw[->] (fm.west) to[bend left=25] node[left, align=center]{$F_{\text{sync}}$/$F_{\text{home}}$\\$F_{\text{guide}}$} (dev.west);
 \draw[->] (teleop) -- node[above, sloped]{user twist} (sa);
 \draw[->] (sa) -- node[above]{ref.} (gov);
 \draw[->] (gov) -- (qp);
@@ -353,17 +353,196 @@ where $\pi^{\star}$ is the active goal's policy and the autonomy authority $\alp
 \end{equation}
 continuous at $s{=}0$ where $\alpha = \alpha_{\min}$. A user driving directly against the policy ($s \to -1$) meets \emph{zero} resistance --- the autonomy fully yields --- rather than a permanent minimum counter-pull. When the user is still (handle inside the deadband, $v_{\text{user}} = 0$), a reduced idle authority $\alpha_{\text{idle}}$ produces a gentle autonomous crawl toward the inferred goal instead of a full-speed approach. $\alpha$ is low-pass filtered for $C^0$ continuity of the reference.
 
-\subsection{Haptic Guidance}
+\subsection{Interface to the Haptic Layer}
 \label{sec:haptic}
 
-On the device side, the inferred intent is rendered as a velocity-field guidance force:
+The inference layer exports everything the device side needs to render assistance, and nothing more: the belief vector $b_k$ over $\mathcal{G}_{\text{act}}$, the user-frame policies $\pi_k^{\text{user}}$, the active goal pose, and the active-goal confidence $b_{\max} = \max_k b_k$ (forced to zero during autonomous grasp execution, so guidance releases cleanly while the state machine drives the arm). The rendering itself --- the guidance force law, its gating, and its per-control-mode calibration --- lives entirely in the teleoperation layer and is specified in \S\ref{sec:guidance}. This split keeps the intent estimator control-mode-agnostic: the same belief and the same policies serve both teleoperation methods and all eight study conditions (\S\ref{sec:study}).
+
+%───────────────────────────────────────────────────────────────────────────────
+\section{Teleoperation Layer: Device Interface and Control Modes}
+\label{sec:teleop}
+
+The operator side is a self-contained companion package built around a Haption Virtuose 6-DOF haptic interface. It contributes three elements: a real-time device server, one teleoperation node per control mode (clutch and joystick), and one haptic force manager per study condition (\S\ref{sec:rendering}). It consumes only published state and telemetry from the robot side --- no decision variable is shared with the safety controller or the shared-autonomy layer, so its own real-time behaviour is self-contained in the same sense as the loops of \S\ref{sec:overview}.
+
+\subsection{Device Interface and Frame Convention}
+\label{sec:device}
+
+The device server runs at the device rate $f_{\text{dev}} = 150$\,Hz in \emph{impedance} mode: each tick it reads the handle pose, its 6D spatial velocity, both buttons, and the six device joint encoders, and applies the most recent commanded 6D wrench to the handle. Indexing is disabled at the driver level --- all indexing semantics are implemented explicitly by the clutch logic below, so the mapping between hand motion and robot motion is fully owned by the teleoperation layer.
+
+The device base frame and the robot base frame differ by a pure $180^{\circ}$ rotation about the vertical axis. Writing $\Phi = R_z(\pi) = \operatorname{diag}(-1,-1,1)$, every 3-vector (linear or axial) maps as
 \begin{equation}
-F_{\text{guide}} \;=\; D\,\bigl(v_{\text{field}} - v_{\text{handle}}\bigr)\cdot \alpha_{\text{conf}} \cdot \alpha_{\text{prox}},
+v^{\text{robot}} = \Phi\, v^{\text{dev}},
 \qquad
-v_{\text{field}} = \sum_{k \in \mathcal{G}_{\text{act}}} b_k\, \pi_k^{\text{user}},
+F^{\text{dev}} = \Phi\, F^{\text{robot}},
+\label{eq:flip}
+\end{equation}
+and because $R_z(\pi)$ is its own inverse and transpose, the \emph{same} map carries motion commands (device $\to$ robot) and rendered wrenches (robot $\to$ device). Every quantity crossing the boundary is flipped explicitly --- implicit frame assumptions are banned by convention.
+
+The two buttons carry all discrete operator commands. The \emph{right} button is the clutch (\S\ref{sec:clutchmode}); in blended clutch conditions it additionally suspends reference blending while held ($\alpha$ forced to $0$, reference latched), since hand repositioning must neither move the robot nor be read as intent (\S\ref{sec:blend}). The \emph{left} button is a discrete event channel interpreted by edge detection over a double-press window $T_{\text{dp}}$: a single press (no second press within $T_{\text{dp}}$) triggers the grasp state machine; a double press switches the active arm. This detection lives in the shared-autonomy layer, which is the \emph{sole authority} on the active arm: it publishes the switch and every other node --- teleoperation, force manager, safety controller, head tracking --- follows. No second decision point exists, so the system can never disagree with itself about which arm is being driven.
+
+\subsection{Clutch Mode --- Position Control}
+\label{sec:clutchmode}
+
+Clutch mode is classical position-control teleoperation with indexing. The teleoperation node integrates the handle twist into a pose reference at $f_{\text{dev}}$:
+\begin{equation}
+p_{\text{ref}} \leftarrow p_{\text{ref}} + \Phi\, v_h\,\Delta t,
+\qquad
+R_{\text{ref}} \leftarrow \exp_3\!\bigl(\Phi\,\omega_h\,\Delta t\bigr)\, R_{\text{ref}},
+\label{eq:clutchint}
+\end{equation}
+publishing the integrated pose together with the feed-forward twist consumed by the CLF row~\eqref{eq:clf} and a task-dimension flag selecting full 6D tracking or the reduced 5D mode (free rotation about the approach axis). While the clutch is held the reference is frozen and a zero twist is published: the operator repositions the hand freely (mouse-lifting), giving an unbounded workspace from a bounded device.
+
+The integration anchor is the \emph{measured} end-effector pose, captured at startup, on every arm switch, and on the falling edge of the autonomous-grasp handover flag; during autonomous grasp phases the node publishes nothing at all (authority is yielded, \S\ref{sec:grasp}), and the re-anchor on resumption guarantees teleoperation continues from where the robot physically is --- no jump, regardless of what the autonomous phase did. When blending is enabled the integrated pose is routed as the pure-user channel and the shared-autonomy layer becomes the only writer of the arm reference (\S\ref{sec:blend}); otherwise the node drives the reference directly.
+
+\subsection{Joystick Mode --- Velocity Control}
+\label{sec:joystick}
+
+Joystick mode exists because of a structural instability in the naive alternative. An earlier blended design integrated the handle twist into a pose \emph{and} rendered a tracking tether back onto the same handle: the rendered force displaced the handle, the displacement was re-read as user intent, and the loop oscillated. Joystick mode removes the coupling by construction: the only persistent force on the handle is a centering spring toward a home pose (\S\ref{sec:columnbase}), and intent is read purely as \emph{displacement from home} --- a spring-centred 6D joystick. Releasing the handle recenters it, which is exactly a zero command.
+
+\textbf{Deadband and twist map.} With a radial deadband operator, continuous at its boundary,
+\begin{equation}
+\operatorname{db}_{\varepsilon}(d) \;=\;
+\begin{cases}
+0, & \|d\| \le \varepsilon,\\[2pt]
+\dfrac{\|d\|-\varepsilon}{\|d\|}\, d, & \|d\| > \varepsilon,
+\end{cases}
+\label{eq:db}
+\end{equation}
+the commanded twist is proportional to the displacement past the deadband, lightly damped by the handle velocity, magnitude-clamped, and frame-flipped:
+\begin{equation}
+\begin{aligned}
+v_{\text{user}} &= \Phi\,\operatorname{clamp}_{V_{\max}}\!\Bigl(K_t\,\operatorname{db}_{\varepsilon_{\text{lin}}}\!\bigl(p_h - p_{\text{home}}\bigr) \;-\; c_v\, v_h\Bigr),\\
+\omega_{\text{user}} &= \Phi\,\operatorname{clamp}_{\Omega_{\max}}\!\Bigl(K_r\,\operatorname{db}_{\varepsilon_{\text{ang}}}\!\bigl(\log_3(R_h R_{\text{home}}^{\top})\bigr) \;-\; c_\omega\, \omega_h\Bigr),
+\end{aligned}
+\label{eq:jtwist}
+\end{equation}
+with the damping terms active \emph{only} outside the deadband, so a handle resting or oscillating near home commands exactly zero. The deadband is deliberately large ($\varepsilon_{\text{lin}} \approx 6.9$\,cm, $\varepsilon_{\text{ang}} \approx 13.4^{\circ}$): the centering spring cannot settle the handle to millimetric precision, and a tighter band would read the residual settling oscillation as spurious input.
+
+\textbf{Dynamic home orientation.} The gripper may be posed very differently from the handle (e.g.\ a top-down grasp), and the device's rotational workspace is narrower than the arm's. The home \emph{position} is fixed at a comfortable neutral; the home \emph{orientation} tracks the gripper so that ``handle at rest'' always means ``hold the current gripper orientation'':
+\begin{equation}
+R_{\text{home}} \;=\; \exp_3\!\Bigl(\tfrac{1}{s_r}\,\Phi \log_3\!\bigl(R_{\text{EE}}\,\bar{R}_{\text{arm}}^{\top}\bigr)\Bigr)\, R_0,
+\label{eq:homerot}
+\end{equation}
+where $R_0$ is the measured neutral orientation, $\bar{R}_{\text{arm}}$ is a per-arm gripper reference captured \emph{once} at that arm's first activation (saved and restored across arm switches, never re-anchored mid-session), and $s_r > 1$ compresses the gripper's excursion into the device's workspace (gripper $90^{\circ} \to$ handle ${\sim}69^{\circ}$). The compression applies only to the home pose, never to the commanded twist. Because~\eqref{eq:homerot} is recomputed every tick --- including while teleoperation is suspended during an autonomous grasp --- the home stays continuously synchronised with the gripper and there is no jump at any state transition. The teleoperation node is the single source of truth for the live home pose and publishes it, so the force manager's spring and the twist map's zero point are always the identical pose.
+
+\textbf{Reference routing.} With blending enabled, the node publishes the pure user twist for the arbitration law~\eqref{eq:blend}; the pose slots of the message carry the \emph{live} end-effector pose, so the belief estimator's user anchor coincides with the arm ($T_{\text{user}} \equiv T_{\text{EE}}$). Without blending, the node itself integrates a persistent latched reference: the latch advances by the commanded twist, a still handle holds it fixed (an \emph{absolute} hold target that opposes low-level sag, rather than a follower reference that would creep with a drifting end-effector), and its lead over the real end-effector is bounded,
+\begin{equation}
+\|p_{\text{ref}} - p_{\text{EE}}\| \le L_{\text{lin}},
+\qquad
+\bigl\|\log_3\!\bigl(R_{\text{ref}} R_{\text{EE}}^{\top}\bigr)\bigr\| \le L_{\text{ang}},
+\label{eq:latchlead}
+\end{equation}
+by projection, so the reference can never run away when the arm saturates against a constraint --- on release the arm catches up by at most the cap.
+
+%───────────────────────────────────────────────────────────────────────────────
+\section{Haptic Force Rendering}
+\label{sec:rendering}
+
+Each study condition (\S\ref{sec:study}) pairs one teleoperation node with one force manager. All force managers share the same skeleton --- a $f_{\text{dev}}$ loop that superposes force layers, applies a proportional authority cap, and clips to the device envelope --- and differ only in which layers are active. Two invariants hold in \emph{every} condition: the total assistive wrench is proportionally rescaled whenever its magnitude exceeds the authority cap $(F_{\text{cap}}, \tau_{\text{cap}})$ --- preserving direction and layer proportions, so the autonomy can never overpower the operator --- and the published wrench is hard-clipped to the same envelope.
+
+\subsection{Column-Base Feedback}
+\label{sec:columnbase}
+
+\textbf{Clutch column (all four clutch conditions).} The base layer is a synchronisation tether pulling the handle along the robot's tracking error --- the operator physically feels how far the arm lags its reference:
+\begin{equation}
+F_{\text{sync}}^{\text{lin}} = K_p^{s}\,\Phi\bigl(p_{\text{EE}} - p_{\text{ref}}\bigr),
+\qquad
+\tau_{\text{sync}} = K_R^{s}\,\Phi \log_3\!\bigl(R_{\text{EE}}\,R_{\text{ref}}^{\top}\bigr),
+\label{eq:fsync}
+\end{equation}
+with zero spring damping by design: viscosity is supplied exactly once, by a constant global damper $(-K_d^{\text{lin}} v_h,\, -K_d^{\text{ang}} \omega_h)$ identical in all clutch conditions (an earlier barrier-aware damping scale was removed for cross-condition fairness). The tether target is the \emph{published} arm reference --- in blended conditions this is automatically the blended reference, i.e.\ the gripper the operator is actually watching. On clutch press the current wrench is frozen at $50\%$ amplitude for the duration of the press (cognitive grounding: the operator keeps feeling \emph{that} they were being pulled, at reduced strength, without the frozen wrench fighting the repositioning). A rotational clutch-alignment torque toward the target orientation exists in the design but is currently disabled: its error term mixes the robot base frame with the device frame, making the torque non-restorative --- it drove a limit cycle into the torque clip on clutch press and is kept off until a frame-correct derivation is validated.
+
+Two discrete cues complete the clutch column. A \emph{joint-limit advice} burst --- a one-shot square-wave torque buzz of fixed amplitude and duration fired the moment any \emph{device} joint enters a margin of its limit --- is disarmed after firing and re-armed only by a complete clutch cycle (press $\to$ release), so the burst reads unambiguously as ``clutch now to re-centre.'' During autonomous grasp execution no force is impressed at all; instead a constant zero-mean torque buzz plays for the whole phase, so the operator knows the arm is acting autonomously without the handle being dragged (an earlier design pulled the handle to follow the end-effector during grasps; the cue replaced it, unified across all eight conditions).
+
+\textbf{Joystick column (all four joystick conditions).} The base layer is the centering spring--damper toward the live home pose~\eqref{eq:homerot}:
+\begin{equation}
+F_{\text{home}} = K_P\bigl(p_{\text{home}} - p_h\bigr) - K_D\, v_h,
+\qquad
+\tau_{\text{home}} = K_R \log_3\!\bigl(R_{\text{home}}\,R_h^{\top}\bigr) - K_D^{\text{ang}}\,\omega_h.
+\label{eq:fhome}
+\end{equation}
+This is the velocity column's synchronisation analogue: through the gripper-tracking home orientation it \emph{is} orientation sync, while deliberately rendering no end-effector position tether --- coupling a robot-state-derived force onto the handle whose displacement is then re-read as intent is precisely the loop joystick mode exists to break (\S\ref{sec:joystick}). Its magnitude is therefore intentionally different from the clutch tether: the two frameworks define their base feedback differently (homing versus error-tracking), and this difference is part of the manipulated factor, not a confound (\S\ref{sec:study}). Two cues are added: a constant zero-mean torque buzz whenever the handle is outside either deadband --- the operator always feels \emph{when} a command is being impressed, whether by their own push or by guidance biasing the handle out --- and the same autonomous-grasp buzz as the clutch column.
+
+\subsection{Guidance Force}
+\label{sec:guidance}
+
+In the assistive-feedback conditions the inferred intent is rendered as a \emph{feed-forward velocity-field} force. The belief-weighted policy blend is mapped into the device frame,
+\begin{equation}
+v_{\text{field}} \;=\; \Phi\!\sum_{k \in \mathcal{G}_{\text{act}}} b_k\, \pi_k^{\text{user}},
+\qquad
+F_{\text{guide}} \;=\; g \cdot
+\begin{bmatrix}
+M_F \tanh\!\bigl(D_F\, v_{\text{field}}^{\text{lin}} / M_F\bigr)\\[2pt]
+M_\tau \tanh\!\bigl(D_\tau\, v_{\text{field}}^{\text{ang}} / M_\tau\bigr)
+\end{bmatrix},
 \label{eq:fguide}
 \end{equation}
-where $D$ is a damping-type gain, $v_{\text{handle}}$ the measured handle velocity, $v_{\text{field}}$ the belief-weighted blend of the user-frame policies (mapped into the device frame), $\alpha_{\text{conf}}$ an entropy-gated confidence smoothstep (guidance fades when the belief is undecided), and $\alpha_{\text{prox}}$ a proximity gate that silences guidance far from every goal (avoiding commitment to an ill-determined manifold point). The formulation is intrinsically damped --- it vanishes as the handle reaches the field velocity --- so it cannot run away. A position-spring fixture $F_{\text{fixture}}$ additionally pulls the handle toward the active goal pose once belief confidence exceeds a threshold, providing precise settling assistance at the pre-grasp standoff; global force/torque clipping acts as a hard envelope regardless of layer superposition.
+followed by a first-order low-pass for $C^0$ continuity across belief transitions. The gain $g \in [0,1]$ is the product of two smoothstep gates, \emph{identical in every guidance condition of both control modes}:
+\begin{equation}
+g \;=\; \sigma\!\bigl(b_{\max};\, c_{\text{lo}}, c_{\text{hi}}\bigr)\,\cdot\,
+\sigma\!\Bigl(\tfrac{d_{\text{far}} - \|p_{\text{ref}} - p_{g^{\star}}\|}{d_{\text{far}} - d_{\text{near}}};\, 0, 1\Bigr),
+\qquad
+\sigma(x; a, b) = 3u^2 - 2u^3,\;\; u = \operatorname{clip}\!\bigl(\tfrac{x-a}{b-a}, 0, 1\bigr).
+\label{eq:guidegate}
+\end{equation}
+The \emph{confidence gate} acts on the active-goal posterior $b_{\max}$: an earlier clutch-side implementation gated on one minus the normalised belief entropy --- a distribution-peakedness measure that is goal-count dependent and numerically different for the same belief --- and was unified onto $b_{\max}$ so that all conditions share one belief function and one set of margins. The \emph{proximity gate} measures the distance from the operator's reference to the active goal: far away, the tanh-saturated policy field is large while the goal manifold is still swinging (side-grasp azimuth flips, orientation candidates change), so guidance is silenced entirely until the operator has committed the reference close enough for the goal to be stable.
+
+Three design decisions are load-bearing:
+\begin{enumerate}[nosep]
+\item \textbf{Feed-forward, not velocity-feedback.} The natural form $D\,(v_{\text{field}} - v_{\text{handle}})$ is a virtual damper of coefficient $D$; at the $D$ required to reach useful force levels it exceeds, by roughly two orders of magnitude, what a $150$\,Hz impedance loop can render passively, and it excited a hard high-frequency limit cycle. Dropping the $-v_{\text{handle}}$ term makes the guidance a smooth bias that shifts the equilibrium of the column's base spring; stability is recovered from the device's own dissipation, $D$ becomes a magnitude-shaping gain (policy speed $\to$ force) rather than a damper, and the force still vanishes at the goal since $\pi_k \to 0$ there.
+\item \textbf{Per-column calibration, identical within a column.} In the clutch column, $(M_F, M_\tau, D_F, D_\tau)$ are absolute saturations tuned against the sync-tether force landscape, byte-identical between the feedback-only and full-guidance conditions. In the joystick column the saturations are tied to the \emph{deadzone-exit force} --- the force needed to push the resting handle exactly to the deadband boundary:
+\begin{equation}
+M_F = \kappa\, K_P\, \varepsilon_{\text{lin}},
+\qquad
+M_\tau = \kappa\, K_R\, \varepsilon_{\text{ang}},
+\qquad
+\kappa < 1,
+\label{eq:kappacal}
+\end{equation}
+so even at full gate the guidance is a strict \emph{bias}: it can never push the handle out of the deadband on its own --- the operator remains the sole initiator of motion. Moving \emph{with} the guidance exits the deadband easily; opposing it means beating spring plus guidance. ($\kappa \ge 1$ was tested and rejected: full-authority guidance felt like fighting forces rather than being gently steered.)
+\item \textbf{Gain applied after the saturation.} $g$ scales the tanh-shaped force linearly, so it reads directly as ``fraction of the guidance authority'' --- a half-confident belief yields half the bias, not a differently-shaped force profile.
+\end{enumerate}
+
+%───────────────────────────────────────────────────────────────────────────────
+\section{Experimental Design: Fairness Across the $2\times2\times2$ Factorial}
+\label{sec:study}
+
+The system doubles as the apparatus of a planned user study. Its conditions are the full factorial of one two-level control-mode factor and two binary, \emph{orthogonal} assistance channels:
+\begin{itemize}[nosep]
+\item \textbf{Control mode} $\in \{$\textsc{clutch}, \textsc{joystick}$\}$ --- position control (\S\ref{sec:clutchmode}) versus velocity control (\S\ref{sec:joystick});
+\item \textbf{Channel F (assistive feedback)} --- the guidance force~\eqref{eq:fguide} rendered on the handle;
+\item \textbf{Channel B (assistive blending)} --- reference-level arbitration~\eqref{eq:blend} of the user twist with the belief-weighted policy.
+\end{itemize}
+This yields eight conditions --- per control mode, the four assistance strategies \emph{none / feedback-only / blending-only / both} (Table~\ref{tab:cells}). The channels are orthogonal by construction: F acts only on the handle and never modifies the reference; B acts only on the reference and is never rendered on the handle. Consequently the combined condition is the exact superposition of its two single-channel neighbours --- the guidance wrench in a full-guidance condition is identical to its feedback-only neighbour, and enabling B changes only \emph{which} reference the base tether tracks, not the rendered assistance law. The two off-diagonal conditions (clutch$+$blending-only, joystick$+$feedback-only) each pair a control mode with its non-native channel --- the clutch framework was conceived around haptic feedback, the velocity joystick around automatic blending --- and are included to complete the factorial rather than as recommended operating points.
+
+\begin{table}[htb]
+\centering\footnotesize
+\begin{tabular}{@{}lccp{4.6cm}p{4.2cm}@{}}
+\toprule
+Condition & F & B & Operator feels & Arm reference written by \\
+\midrule
+\textsc{clutch} sync-only        & --     & --     & EE tether $+$ cues & teleop (integrated pose) \\
+\textsc{clutch} guided feedback  & \checkmark & --     & tether $+$ guidance bias & teleop (integrated pose) \\
+\textsc{clutch} guided blending  & --     & \checkmark & tether (to the blended reference) & blending layer \\
+\textsc{clutch} full guidance    & \checkmark & \checkmark & tether $+$ guidance bias & blending layer \\
+\addlinespace[2pt]
+\textsc{joystick} sync-only       & --     & --     & homing spring $+$ cues & teleop (latched twist integr.) \\
+\textsc{joystick} guided feedback & \checkmark & --     & spring $+$ guidance bias & teleop (latched twist integr.) \\
+\textsc{joystick} guided blending & --     & \checkmark & homing spring $+$ cues & blending layer \\
+\textsc{joystick} full guidance   & \checkmark & \checkmark & spring $+$ guidance bias & blending layer \\
+\bottomrule
+\end{tabular}
+\caption{The eight study conditions ($2$ control modes $\times$ $4$ assistance strategies). ``Cues'' are the vibrotactile signals of \S\ref{sec:columnbase}; the guidance bias is~\eqref{eq:fguide}; the blending layer is the arbitration of \S\ref{sec:blend}.}
+\label{tab:cells}
+\end{table}
+
+Fairness across the matrix is treated as a first-class design feature, enforced by three mechanisms:
+\begin{enumerate}[nosep]
+\item \textbf{A single-value policy for shared building blocks.} Every mechanism appearing in more than one condition exists with exactly one parameterisation: the clutch sync tether~\eqref{eq:fsync} and the global damper are identical in all four clutch conditions; the homing spring~\eqref{eq:fhome} and the out-of-deadzone cue in all four joystick conditions; the authority cap and device clip everywhere; the guidance gates~\eqref{eq:guidegate} in every F condition of \emph{both} modes; the guidance weights within each column; the blending law and its authority parameters in every B condition; and the autonomous-grasp buzz in all eight. A measured difference between two conditions can therefore only be attributed to the manipulated factors.
+\item \textbf{A startup condition guard.} The active condition triple is a single, centralised selection; every teleoperation node and force manager asserts at startup that it is the correct node for the selected condition and refuses to run otherwise. A mis-launched pairing fails loudly instead of silently running the wrong strategy --- protecting the integrity of a session's condition assignment.
+\item \textbf{A single inference and safety stack.} Belief estimation, goal manifolds, policies, the grasp state machine, and the QP safety controller are byte-identical across all eight conditions; a condition changes only the operator-input mapping and the rendered assistance.
+\end{enumerate}
+Two asymmetries remain by design and are declared rather than equalised: the joystick base force is a \emph{homing} spring while the clutch base force is an \emph{error-tracking} tether (equalising their magnitudes would compare the wrong quantity --- each framework mandates its own base feedback, \S\ref{sec:columnbase}); and the guidance saturation is absolute in the clutch column but deadzone-exit-calibrated in the joystick column~\eqref{eq:kappacal}, since each column's guidance must be commensurate with its own base-force landscape. Both are properties of the control-mode factor itself.
 
 %───────────────────────────────────────────────────────────────────────────────
 \section{Head Perception and the Camera-Derived Safety World}
@@ -477,7 +656,10 @@ The grasp state machine (per arm, independent) transitions through the chain of 
 \item \textbf{Measured-anchor rate damping over a slew-rate box}: gives the task-null wrist DOFs tick-to-tick memory anchored to the arm's physical state; a hard box provably risks infeasibility against a direction-switching CBF row (\S\ref{sec:rate}).
 \item \textbf{Quasi-static head model}: avoids enlarging the QP decision vector at the cost of a forward-invariance degradation bounded by the head's per-tick displacement.
 \item \textbf{Alignment-based authority over belief-gated authority}: belief selects the goal, alignment arbitrates control; opposition ramps autonomy authority to exactly zero, so the operator always wins a direct conflict.
-\item \textbf{Velocity-field guidance (not a pure position spring)}: intrinsically stable (vanishes at field velocity), smooth across belief transitions; complemented by the separate confidence-gated fixture near the goal.
+\item \textbf{Feed-forward guidance over velocity-field damping}: the $-v_{\text{handle}}$ feedback term is a virtual damper far beyond the $150$\,Hz impedance passivity budget and excited a limit cycle; the feed-forward form biases the base spring's equilibrium, is rendered stably by the device's own dissipation, and still vanishes at the goal (\S\ref{sec:guidance}).
+\item \textbf{Spring-centred joystick over force-tethered pose integration}: breaks the force $\to$ displacement $\to$ intent feedback loop structurally instead of tuning around it (\S\ref{sec:joystick}).
+\item \textbf{Deadzone-exit-calibrated guidance authority ($\kappa < 1$)}: guidance can bias but never autonomously drive --- the operator remains the sole initiator of motion in velocity mode~\eqref{eq:kappacal}.
+\item \textbf{Single-value fairness policy across the study matrix}: every shared gain and gate exists with exactly one value across the eight conditions, enforced by a startup condition guard; measured differences are attributable only to the manipulated factors (\S\ref{sec:study}).
 \item \textbf{Reference governor before the CLF}: preserves hard QP feasibility under arbitrarily aggressive teleoperation commands, without enlarging slack bounds or softening safety margins.
 \item \textbf{Frozen perceived world over per-tick perception updates}: the camera-derived collision model is convergence-gated (\S\ref{sec:convergence}) and then static, preserving the barrier's stationarity; re-scans are explicit events.
 \item \textbf{No force sensing}: grasp confirmation is purely kinematic; the perception pipeline now closes the world-modelling half of this gap (\S\ref{sec:head}).
@@ -608,8 +790,62 @@ $T_w$ & \texttt{WORLD\_CONVERGE\_WINDOW\_S} & 1.0\,s & amplitude-lock window \\
 \bottomrule
 \end{tabular}
 
+\subsection*{Teleoperation: device and control modes (\S\ref{sec:teleop})}
+\begin{tabular}{@{}llll@{}}
+\toprule
+Symbol & Name & Value & Meaning \\
+\midrule
+$f_{\text{dev}}$ & \texttt{VIRTUOSE\_FREQUENCY} & 150\,Hz & device server / teleop / force-manager rate \\
+$T_{\text{dp}}$ & \texttt{DOUBLE\_CLICK\_WINDOW} & 0.5\,s & left-button double-press window \\
+$\varepsilon_{\text{lin}}$ & \texttt{JOYSTICK\_DEADBAND\_LIN} & 0.0691\,m & linear deadband \eqref{eq:db} \\
+$\varepsilon_{\text{ang}}$ & \texttt{JOYSTICK\_DEADBAND\_ANG} & 0.2333\,rad & angular deadband ($\sim$13.4$^\circ$) \\
+$K_t$ & \texttt{JOYSTICK\_K\_TRANS} & 1.6\,s$^{-1}$ & twist gain, linear \eqref{eq:jtwist} \\
+$K_r$ & \texttt{JOYSTICK\_K\_ROT} & 1.5\,s$^{-1}$ & twist gain, angular \\
+$c_v, c_\omega$ & \texttt{JOYSTICK\_DAMP\_LIN/ANG} & 0.225 / 0.075 & twist damping fractions \\
+$V_{\max}, \Omega_{\max}$ & \texttt{JOYSTICK\_V\_MAX\_LIN/ANG} & 0.10\,m/s, 0.50\,rad/s & commanded-twist safety clamps \\
+$s_r$ & \texttt{JOYSTICK\_ROT\_HOME\_SCALE} & 1.3 & home-orientation compression \eqref{eq:homerot} \\
+$L_{\text{lin}}, L_{\text{ang}}$ & \texttt{MAX\_REF\_LEAD\_LIN/ANG} & 0.10\,m, 0.35\,rad & latched-reference lead caps \eqref{eq:latchlead} \\
+--- & \texttt{JOYSTICK\_NEUTRAL\_POSITION\_M} & $[0.5, -0.03, -0.03]$\,m & fixed home position (device frame) \\
+\bottomrule
+\end{tabular}
+
+\subsection*{Haptic force rendering (\S\ref{sec:rendering})}
+\begin{tabular}{@{}llll@{}}
+\toprule
+Symbol & Name & Value & Meaning \\
+\midrule
+$K_p^{s}, K_R^{s}$ & \texttt{Kp\_sync}, \texttt{Kp\_sync\_ang} & 30\,N/m, 0.9\,Nm/rad & clutch sync tether \eqref{eq:fsync}, all clutch cells \\
+$K_d^{\text{lin}}, K_d^{\text{ang}}$ & --- & 0.7\,Ns/m, 0.1\,Nms/rad & global damper, all clutch cells \\
+$K_P, K_D$ & \texttt{JOYSTICK\_SPRING\_KP/KD\_LIN} & 60\,N/m, 1.0\,Ns/m & homing spring \eqref{eq:fhome}, all joystick cells \\
+$K_R, K_D^{\text{ang}}$ & \texttt{JOYSTICK\_SPRING\_KP/KD\_ANG} & 1.5\,Nm/rad, 0.15\,Nms/rad & homing spring, angular \\
+$F_{\text{cap}}, \tau_{\text{cap}}$ & \texttt{MAX\_TOTAL\_FORCE/TORQUE} & 10\,N, 1\,Nm & authority cap ($=$ device clip), all cells \\
+--- & \texttt{MAX\_FORCE/TORQUE} & 10\,N, 1\,Nm & device safety clip \\
+--- & --- & 50\,\% & clutch-press wrench freeze factor \\
+--- & \texttt{LIMIT\_OUTER} & 0.25\,rad & joint-limit advice trigger margin \\
+--- & \texttt{LIMIT\_VIB\_AMP/DURATION} & 0.07\,Nm, 1.0\,s & one-shot limit burst \\
+--- & \texttt{VIB\_AMP} & 0.05\,Nm & out-of-deadzone cue, joystick cells \\
+--- & \texttt{GRASP\_VIB\_AMP} & 0.07\,Nm & autonomous-grasp buzz, all cells \\
+\bottomrule
+\end{tabular}
+
+\subsection*{Guidance force (\S\ref{sec:guidance})}
+\begin{tabular}{@{}llll@{}}
+\toprule
+Symbol & Name & Value & Meaning \\
+\midrule
+$c_{\text{lo}}, c_{\text{hi}}$ & \texttt{GUIDE\_CONF\_LO/HI} & 0.30 / 0.90 & $b_{\max}$ confidence gate \eqref{eq:guidegate}, all F cells \\
+$d_{\text{near}}, d_{\text{far}}$ & \texttt{GUIDE\_PROX\_NEAR/FAR} & 0.10 / 0.60\,m & proximity gate, all F cells \\
+$M_F, M_\tau$ & \texttt{MAX\_GUIDE\_FORCE/TORQUE} & 5.46\,N, 0.13\,Nm & guidance saturation, clutch column \\
+$D_F, D_\tau$ & \texttt{D\_guide\_lin/ang} & 43.68, 0.702 & magnitude shaping, clutch column \\
+$\kappa$ & \texttt{GUIDE\_K} & 0.55 & deadzone-exit fraction \eqref{eq:kappacal}, joystick column \\
+$M_F, M_\tau$ & (derived) & $\approx$2.28\,N, $\approx$0.19\,Nm & $\kappa K_P \varepsilon_{\text{lin}}$, $\kappa K_R \varepsilon_{\text{ang}}$ \\
+$D_F, D_\tau$ & \texttt{D\_guide\_lin/ang} & 400, 30 & magnitude shaping, joystick column \\
+--- & \texttt{alpha\_guide} & 0.15 & guidance-wrench LPF coefficient \\
+\bottomrule
+\end{tabular}
+
 \endgroup
 
-Haptic-device-side gains ($D$, confidence/proximity gates, fixture stiffness, force/torque clipping) live in the companion teleoperation package's configuration and follow the same centralisation rule.
+Robot-side parameters live in the safety/shared-autonomy package's centralised configuration; device-side parameters live in the companion teleoperation package's, with the cross-package condition selector (\S\ref{sec:study}) defined once on the robot side and imported by every operator-side node --- the same centralisation rule throughout.
 
 \end{document}

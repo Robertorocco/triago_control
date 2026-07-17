@@ -5,19 +5,18 @@ The Digital Twin.
 Thin wrapper around Pinocchio's model/data that owns everything kinematic:
     * loads the URDF and builds `pin.Model` / `pin.Data`,
     * caches the right/left arm joint indices,
-    * derives a SMOOTHED joint velocity from raw positions (simulation mode),
-    * OR uses direct sensor velocities from /joint_states (real hardware mode),
+    * derives a SMOOTHED joint velocity from raw positions (both sim and real),
     * runs forward kinematics / frame placements / joint Jacobians each tick,
     * optionally evolves a mathematically-perfect "ideal" digital twin.
 
-VELOCITY PIPELINE (environment-dependent):
-    SIMULATION (Gazebo): The TRIAGo encoders report corrupted joint velocities,
-    so we differentiate position on the Lie manifold and pass it through a
-    First-Order Low-Pass Filter (EMA, governed by `cfg.ALPHA_FILTER`).
-
-    REAL HARDWARE: The real TIAGo Pro joint velocity sensors work correctly.
-    We read `msg.velocity` directly from /joint_states — no differentiation
-    or filtering needed.
+VELOCITY PIPELINE: both simulation and real hardware differentiate position on
+the Lie manifold and pass it through a First-Order Low-Pass Filter (EMA,
+governed by `cfg.ALPHA_FILTER`) rather than trusting /joint_states' velocity
+field directly — real hardware's raw sensor velocity is unfiltered and gets
+amplified by qp_formulator's rate-damping term (`RATE_WEIGHT` tracks it hard),
+so deriving it the same way sim always has keeps that term's input clean.
+The `v_direct` param below still exists for a caller that wants to bypass
+this, but nothing currently does.
 
 DETECTION METHOD:
     The `real_hardware` flag is set by the orchestrator (`main_qp_controller.py`)
@@ -115,11 +114,12 @@ class RobotKinematics:
         self.data = self.model.createData()
 
     def update_from_joint_state(self, q_physical, time_stamp, v_direct=None):
-        """Update joint state. If v_direct is provided (real hardware), use it directly.
-        Otherwise, derive + EMA-filter joint velocity from positions (simulation)."""
+        """Update joint state. If v_direct is provided, use it directly (no
+        current caller does). Otherwise derive + EMA-filter velocity from
+        positions -- the path both sim and real hardware use today."""
 
         if v_direct is not None and self.real_hardware:
-            # REAL HARDWARE: trust the sensor velocities directly (no EMA filtering needed)
+            # Bypass path: trust the given velocity directly, skip EMA filtering.
             v_physical = v_direct
         elif self.last_q_meas is not None and self.last_msg_time is not None:
             dt = time_stamp - self.last_msg_time

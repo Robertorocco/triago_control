@@ -11,6 +11,7 @@ Panels:
         - /QP_Debug_Markers2
         - /Camera1/Topic1
         - /PointCloud21/Topic1
+        - /Image1
         - /Image1/Topic1
         - /Marker2
         - /Marker3
@@ -217,37 +218,6 @@ Visualization Manager:
           Show Axes: false
           Show Trail: false
           Value: true
-        gripper_head_camera_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        gripper_head_camera_rgbd_bottom_screw_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        gripper_head_camera_rgbd_color_optical_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        gripper_head_camera_rgbd_depth_optical_frame:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        gripper_head_camera_rgbd_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        gripper_left_base_finger_left_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        gripper_left_base_finger_right_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
         gripper_left_base_link:
           Alpha: 1
           Show Axes: false
@@ -263,10 +233,6 @@ Visualization Manager:
           Show Axes: false
           Show Trail: false
           Value: true
-        gripper_left_grasping_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
         gripper_left_inner_finger_left_link:
           Alpha: 1
           Show Axes: false
@@ -287,24 +253,6 @@ Visualization Manager:
           Show Axes: false
           Show Trail: false
           Value: true
-        gripper_left_screw_left_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        gripper_left_screw_right_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        gripper_right_base_finger_left_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        gripper_right_base_finger_right_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
         gripper_right_base_link:
           Alpha: 1
           Show Axes: false
@@ -320,10 +268,6 @@ Visualization Manager:
           Show Axes: false
           Show Trail: false
           Value: true
-        gripper_right_grasping_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
         gripper_right_inner_finger_left_link:
           Alpha: 1
           Show Axes: false
@@ -344,14 +288,6 @@ Visualization Manager:
           Show Axes: false
           Show Trail: false
           Value: true
-        gripper_right_screw_left_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-        gripper_right_screw_right_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
         suspension_front_left_link:
           Alpha: 1
           Show Axes: false
@@ -427,36 +363,6 @@ Visualization Manager:
           Show Axes: false
           Show Trail: false
           Value: true
-        wrist_left_ft_sensor_base_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        wrist_left_ft_sensor_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        wrist_left_ft_tool_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        wrist_right_ft_sensor_base_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        wrist_right_ft_sensor_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
-        wrist_right_ft_tool_link:
-          Alpha: 1
-          Show Axes: false
-          Show Trail: false
-          Value: true
       Mass Properties:
         Inertia: false
         Mass: false
@@ -508,9 +414,7 @@ Visualization Manager:
       Enabled: true
       Name: QP_Debug_Markers
       Namespaces:
-        environment: true
-        qp_debug: true
-        task_environment: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -521,6 +425,8 @@ Visualization Manager:
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
       Name: Blended_Reference
+      Namespaces:
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -543,6 +449,7 @@ Visualization Manager:
       Value: false
       Visibility:
         "": true
+        Blended_Reference: true
         Grid: true
         Image: true
         Marker: true
@@ -598,7 +505,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Best Effort
-        Value: /gripper_head_camera_rgbd/color/image_raw
+        Value: /head_arm_rgbd/color/image_raw
       Value: true
     - Class: rviz_default_plugins/Marker
       Enabled: true
@@ -630,7 +537,7 @@ Visualization Manager:
       Enabled: true
       Name: QP_Debug_Markers
       Namespaces:
-        goal_poses: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -642,7 +549,7 @@ Visualization Manager:
       Enabled: true
       Name: Marker
       Namespaces:
-        workspace: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -655,7 +562,7 @@ Visualization Manager:
       Enabled: true
       Name: QP_Debug_Markers
       Namespaces:
-        guidance_policy: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -675,6 +582,19 @@ Visualization Manager:
         Reliability Policy: Best Effort
         Value: /robot_policy_marker
       Value: false
+    - Class: rviz_default_plugins/MarkerArray
+      Enabled: true
+      Name: Real World Snapshot
+      Namespaces:
+        objects: true
+        table: true
+      Topic:
+        Depth: 5
+        Durability Policy: Volatile
+        History Policy: Keep Last
+        Reliability Policy: Reliable
+        Value: /real_perception
+      Value: true
   Enabled: true
   Global Options:
     Background Color: 48; 48; 48
@@ -806,7 +726,7 @@ Window Geometry:
   Hide Right Dock: false
   Image:
     collapsed: false
-  QMainWindow State: 000000ff00000000fd00000002000000000000018b00000525fc0200000003fb000000100044006900730070006c006100790073000000003b0000047f000000c700fffffffb0000000a0056006900650077007300000004c0000000a0000000a000fffffffb0000000c00430061006d00650072006100000003c30000008d0000002800ffffff000000020000050000000106fc0100000001fb0000000a0049006d0061006700650300000ad600000038000001a900000106000005000000052500000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd00000002000000000000018b00000525fc0200000003fb000000100044006900730070006c006100790073000000003b0000047f000000c700fffffffb0000000a0056006900650077007300000004c0000000a0000000a000fffffffb0000000c00430061006d00650072006100000003c30000008d0000002800ffffff000000020000050000000106fc0100000001fb0000000a0049006d0061006700650300000ad900000038000001a60000014c000005000000052500000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Views:
     collapsed: true
   Width: 1280

@@ -34,6 +34,13 @@ class SharedAutonomyHandler:
     ATTACH_RAMP_S = 3.0            # seconds to ramp the barrier in
     ATTACH_RAMP_SHIFT_MAX = 0.30   # initial distance shift [m] (silences the pair)
 
+    # Real gripper firm-grasp reference (rad, REAL-gripper convention: 0=open,
+    # ~0.7=fully closed). The sim closure target fully closes the fingers, which
+    # on the real hardware drives PAST the real cylinder's wall. This is the
+    # measured value that firmly holds the real cylinder, so on real hardware the
+    # closure is never commanded past it. REAL HARDWARE ONLY.
+    REAL_GRASP_FIRM_CLOSE = 0.22
+
     def __init__(self, node, col_manager, kinematics, viz_engine):
         self.node = node
         self.col = col_manager
@@ -67,6 +74,18 @@ class SharedAutonomyHandler:
         # Send a FollowJointTrajectory goal to close one gripper to `position` (rad).
         # (Per-command INFO log removed: it fired on every CLOSE_ command — including
         # the open-to-0.7 resets on startup/arm-switch — and spammed the console.)
+        if self.node.REAL_HARDWARE:
+            # This codebase's convention (0.0=closed, ~0.7=open, see below) is
+            # tuned for sim; the real gripper's joint direction is inverted
+            # (0.0=open, ~0.7=closed) -- flip so the SAME high-level command
+            # still means the same physical grip state on both.
+            position = 0.7 - position
+            # Firm-grasp hardcap: the sim closure fully closes the fingers, which
+            # here would drive PAST the real cylinder's wall (over-close). Never
+            # command the real gripper past the measured firm-grasp reference.
+            # Opens (real 0.0) sit below the cap and pass through untouched; the
+            # 2 s trajectory below still makes the approach to the cap smooth/slow.
+            position = min(position, self.REAL_GRASP_FIRM_CLOSE)
         goal_msg = FollowJointTrajectory.Goal()
         goal_msg.trajectory.joint_names = [f'gripper_{side}_finger_joint']
         point = JointTrajectoryPoint()
@@ -74,7 +93,17 @@ class SharedAutonomyHandler:
         point.time_from_start.sec = 2
         goal_msg.trajectory.points = [point]
         client = self.gripper_right_client if side == "right" else self.gripper_left_client
-        client.wait_for_server()
+        # NEVER block the (single-threaded) executor here. A no-timeout
+        # wait_for_server() hangs the ENTIRE safety loop -- timer, CBF,
+        # publishing -- indefinitely if the gripper action server is even
+        # momentarily unavailable (silent freeze, no error). Non-blocking
+        # readiness check instead; drop this command if the server isn't up
+        # (the grasp state machine re-issues gripper commands every tick).
+        if not client.server_is_ready():
+            self.node.get_logger().warn(
+                f"[GRIPPER] {side} action server not ready -- dropping command "
+                f"(control loop kept alive).", throttle_duration_sec=2.0)
+            return
         client.send_goal_async(goal_msg)
 
     def gripper_cmd_callback(self, msg):

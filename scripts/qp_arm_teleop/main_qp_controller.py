@@ -22,6 +22,7 @@ Responsibilities:
 """
 
 import rclpy
+from rclpy.signals import SignalHandlerOptions
 from rclpy.node import Node
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray, Float64, String, Bool
@@ -35,7 +36,18 @@ import numpy as np
 import time
 import tempfile
 import os
+import sys
+import traceback
+import faulthandler
 from collections import namedtuple
+
+# Catch fatal native-level crashes (segfault/abort/bus error -- e.g. a
+# malformed problem reaching quadprog's/pinocchio's C/Fortran internals) that
+# a plain Python try/except CANNOT catch: dumps the Python-level traceback of
+# whichever thread was executing to stderr right as the signal is caught,
+# BEFORE the process actually dies. Module-level so it's active regardless of
+# which entrypoint imports this file (main_qp_controller[_real|_perceived].py).
+faulthandler.enable(file=sys.stderr, all_threads=True)
 
 import triago_control.qp_controller.config as cfg
 from triago_control.qp_controller.robot_kinematics import RobotKinematics
@@ -53,7 +65,8 @@ from triago_control.qp_controller.world_loader import load_world
 CbfResult = namedtuple('CbfResult', [
     'J_soft_r', 'h_soft_r', 'J_soft_l', 'h_soft_l',
     'd_safe_r', 'd_safe_l', 'abs_min_distance', 'active_r', 'active_l',
-    'witness_distance', 'witness_points', 'top_active_pairs', 'fresh'])
+    'witness_distance', 'witness_points', 'top_active_pairs', 'fresh',
+    'n_eff_r', 'n_eff_l'])
 
 
 class SafetyQPController(Node):
@@ -68,7 +81,7 @@ class SafetyQPController(Node):
         # Obstacle layout for the CBF collision model, independent of the
         # launched Gazebo world (see world_loader.py). Override with
         # --ros-args -p world_name:=no_obstacle.
-        self.declare_parameter('world_name', 'no_obstacle')
+        self.declare_parameter('world_name', 'movement_tutorial')
         self.world_scene = self._build_world_scene()
         self.get_logger().info(
             f"\033[96m[World] Loaded scene '{self.world_scene.world_name}' "
@@ -204,7 +217,8 @@ class SafetyQPController(Node):
         self.pub_dynamic_weights = self.create_publisher(Float64MultiArray, '/qp_debug/dynamic_weights', 10)
         self.pub_d_safe_dynamic = self.create_publisher(Float64MultiArray, '/qp_debug/d_safe_dynamic', 10)
         self.pub_qdot_cmd = self.create_publisher(Float64MultiArray, '/qp_debug/qdot_cmd', 10)
-        # kin.current_v: EMA-filtered diff in sim, direct sensor on real HW.
+        # kin.current_v: always EMA-filtered diff from position, sim and real HW alike
+        # (direct sensor velocity was noisier on real hardware -- see joint_callback).
         self.pub_qdot_measured = self.create_publisher(Float64MultiArray, '/qp_debug/qdot_measured', 10)
         self.pub_task_authority = self.create_publisher(Float64MultiArray, '/qp_debug/task_authority', 10)
         self.pub_shared_col = self.create_publisher(Float64MultiArray, '/collision_constraints', 10)
@@ -242,9 +256,19 @@ class SafetyQPController(Node):
         self._refs_initialized = False
         self.create_subscription(String, '/shared_autonomy/active_arm', self.active_arm_cb, 10)
 
+        # Local-minima stall escape (see _apply_stall_escape): per-arm timer +
+        # latched escaping flag, reset only by that method itself.
+        self._stall_state = {'right': {'timer': 0.0, 'escaping': False, 'v_filt': 0.0},
+                              'left': {'timer': 0.0, 'escaping': False, 'v_filt': 0.0}}
+
         # Services for controller switching
         self.switch_srv = self.create_client(SwitchController, '/controller_manager/switch_controller')
         self.list_srv = self.create_client(ListControllers, '/controller_manager/list_controllers')
+        # What check_and_switch_controllers() actually changed at startup, so
+        # restore_controllers() can undo exactly that (and nothing else) on
+        # shutdown -- see both methods below.
+        self._ctrl_activated = []
+        self._ctrl_deactivated = []
 
         # Low-rate RViz obstacle marker timer (matches original 0.5s cadence;
         # halved on real hardware -- see the publish_every_n comment above).
@@ -307,8 +331,20 @@ class SafetyQPController(Node):
         self._control_freq = float(freq_hz)
         if self.loop_timer is not None:
             self.destroy_timer(self.loop_timer)
-        self.loop_timer = self.create_timer(1.0 / self._control_freq, self.solve_and_publish)
+        self.loop_timer = self.create_timer(1.0 / self._control_freq, self._control_tick_guarded)
         self.get_logger().info(f"[FREQ] Control loop set to {self._control_freq:.1f} Hz.")
+
+    def _control_tick_guarded(self):
+        # Timer entrypoint: NEVER let one bad tick silently take the whole loop
+        # down. An unhandled exception in a timer callback propagates out of
+        # rclpy.spin and looks like a frozen node with no error -- log the full
+        # traceback (throttled) and keep the loop alive instead.
+        try:
+            self.solve_and_publish()
+        except Exception:  # noqa: BLE001
+            self.get_logger().error(
+                "[LOOP] Unhandled exception in control tick (loop kept alive):\n"
+                + traceback.format_exc(), throttle_duration_sec=1.0)
 
     def start_control_loop(self):
         # Engage the real-time loop at the configured frequency.
@@ -421,9 +457,59 @@ class SafetyQPController(Node):
         rclpy.spin_until_future_complete(self, future)
         if future.result().ok:
             self.active_controller_mode = True
+            # Remember exactly what we changed so restore_controllers() can
+            # put the robot back the way it was found, on shutdown.
+            self._ctrl_activated = to_activate
+            self._ctrl_deactivated = to_deactivate
             return True
         self.get_logger().error("Switch Service Failed.")
         return False
+
+    def restore_controllers(self):
+        # Undo check_and_switch_controllers()'s switch: reactivate whatever we
+        # deactivated at startup, deactivate whatever we newly activated -- so
+        # a killed node leaves the robot in the SAME controller state it found
+        # it in, not stuck on the QP's velocity controllers. Safe to call even
+        # if the switch never happened (both lists empty -> no-op) or the
+        # controller_manager is already gone (logged, not raised).
+        if not self._ctrl_activated and not self._ctrl_deactivated:
+            return
+        # print(flush=True) alongside get_logger(): this fires during shutdown
+        # (possibly mid-SIGINT), where a ROS logger can be suppressed/buffered
+        # or the executor already tearing down -- print is the only channel
+        # guaranteed to reach the console at this exact moment (same reason
+        # trajectory_generator.py's banner/status lines use it too).
+        print(f"[Shutdown] Restoring original controllers: "
+              f"+{self._ctrl_deactivated} | -{self._ctrl_activated} ...", flush=True)
+        # Belt-and-braces: this runs during shutdown (possibly right after a
+        # SIGINT), a fragile moment for the rclpy context -- never let a
+        # failure here block the rest of the cleanup in main()'s finally block.
+        try:
+            if not self.switch_srv.wait_for_service(timeout_sec=2.0):
+                msg = ("[Shutdown] Switch Controller service unavailable -- cannot restore "
+                      f"original controller state (was: +{self._ctrl_activated} "
+                      f"-{self._ctrl_deactivated}).")
+                print(msg, flush=True)
+                self.get_logger().error(msg)
+                return
+            req = SwitchController.Request()
+            req.activate_controllers = self._ctrl_deactivated
+            req.deactivate_controllers = self._ctrl_activated
+            req.strictness = SwitchController.Request.STRICT
+            self.get_logger().info(
+                f"[Shutdown] Restoring original controllers: "
+                f"+{self._ctrl_deactivated} | -{self._ctrl_activated}")
+            future = self.switch_srv.call_async(req)
+            rclpy.spin_until_future_complete(self, future)
+            if future.result() is not None and future.result().ok:
+                print("[Shutdown] Original controller state restored.", flush=True)
+                self.get_logger().info("[Shutdown] Original controller state restored.")
+            else:
+                print("[Shutdown] Restore Switch Service Failed.", flush=True)
+                self.get_logger().error("[Shutdown] Restore Switch Service Failed.")
+        except Exception as e:  # noqa: BLE001 -- shutdown must proceed regardless
+            print(f"[Shutdown] restore_controllers() raised: {e}", flush=True)
+            self.get_logger().error(f"[Shutdown] restore_controllers() raised: {e}")
 
     # =====================================================================
     # CALLBACKS
@@ -433,21 +519,49 @@ class SafetyQPController(Node):
         if self.kin.model is None:
             return
         q_physical = pin.neutral(self.kin.model)
-        v_measured = np.zeros(self.kin.model.nv)  # direct velocity (real hardware only)
+        bad_fields = []  # [(joint_name, 'position'/'velocity', raw_value), ...]
         for i, name in enumerate(msg.name):
             if self.kin.model.existJointName(name):
                 jid = self.kin.model.getJointId(name)
                 idx_q = self.kin.model.joints[jid].idx_q
                 idx_v = self.kin.model.joints[jid].idx_v
                 if idx_q >= 0:
-                    q_physical[idx_q] = msg.position[i]
+                    pos = msg.position[i]
+                    if not np.isfinite(pos):
+                        bad_fields.append((name, 'position', pos))
+                    else:
+                        q_physical[idx_q] = pos
                 if self.REAL_HARDWARE and idx_v >= 0 and i < len(msg.velocity):
-                    v_measured[idx_v] = msg.velocity[i]
+                    vel = msg.velocity[i]
+                    if not np.isfinite(vel):
+                        bad_fields.append((name, 'velocity', vel))
+        if bad_fields:
+            # Non-finite sensor reading on ONE joint (e.g. a mobile-base wheel
+            # that structurally never reports a real velocity) -- sanitized to
+            # the neutral/zero placeholder for JUST that joint, every other
+            # joint in this same message still updates normally. Rejecting the
+            # WHOLE message here would be worse: if the same joint is always
+            # bad (a permanent characteristic, not a one-off fault), current_q/
+            # current_v would freeze forever and the arms would never update
+            # again. This does not, by itself, make the bad joint harmless
+            # downstream -- see qp_formulator.build_and_solve's rate-damping
+            # term, which must SELECT at the actuated arm indices rather than
+            # multiply-by-mask against the full current_v (0 * nan == nan, not
+            # 0 -- this exact mechanism is what poisoned quadprog's entire
+            # solution from a single unrelated wheel joint on 2026-07-15).
+            self.get_logger().error(
+                f"[SENSOR] Non-finite /joint_states entr{'y' if len(bad_fields)==1 else 'ies'} "
+                f"(that joint only; all others updated normally -- a bad position holds at "
+                f"neutral, a bad velocity reading has no effect since velocity is derived "
+                f"from position, not read directly): "
+                + ", ".join(f"{n}.{f}={v}" for n, f, v in bad_fields),
+                once=True)
         time_stamp = msg.header.stamp.sec + msg.header.stamp.nanosec * 1e-9
-        if self.REAL_HARDWARE:
-            self.kin.update_from_joint_state(q_physical, time_stamp, v_direct=v_measured)
-        else:
-            self.kin.update_from_joint_state(q_physical, time_stamp)
+        # Real hardware's raw /joint_states velocity is unfiltered and was found
+        # to inject sensor-noise ripple straight into the rate-damping term
+        # (RATE_WEIGHT tracks it hard) and out into qdot_cmd. Always derive +
+        # EMA-filter velocity from position (sim's path) instead of trusting v_direct.
+        self.kin.update_from_joint_state(q_physical, time_stamp)
 
     def grasp_active_cb(self, msg):
         """Tracks whether shared autonomy is autonomously driving a grasp/lift."""
@@ -582,6 +696,98 @@ class SafetyQPController(Node):
                                         self.xdot_ref_left, self.w_ref_left, self.task_dim_left)
         return e_r, v_r, e_l, v_l
 
+    def _ee_speed(self, ee_id):
+        # Measured Cartesian EE speed (m/s) from kin.current_v -- same measured
+        # joint velocities already used for rate-damping/tracking telemetry.
+        if ee_id is None or self.kin.current_v is None:
+            return 0.0
+        J_pos = pin.getFrameJacobian(self.kin.model, self.kin.data, ee_id,
+                                     pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)[:3, :]
+        return float(np.linalg.norm(J_pos @ self.kin.current_v))
+
+    def _apply_stall_escape(self, side, ee_id, e_task, v_task, n_eff, active_interaction, dt):
+        """Reactive CLF-CBF local-minima escape (real hardware: an arm reaching
+        for a goal on the far side of a flat obstacle -- e.g. up and over a
+        table from underneath -- can settle at a genuine saddle point where the
+        CLF's goal-gradient and the CBF's repulsion gradient are anti-parallel).
+
+        If this arm's measured EE speed stays near-zero for STALL_HOLD_S while
+        an active barrier (n_eff not None) is engaged and the task error is
+        still large, temporarily redirect the CLF's POSITION reference toward a
+        nearby waypoint along the component of the goal direction that is
+        TANGENTIAL to the blocking constraint's own softmax-aggregated contact
+        normal (n_eff, same weights as the barrier itself -- see
+        collision_manager.compute_softmin_jacobian). This reuses the existing,
+        already-tuned CLF/QP machinery verbatim (it just tracks a different
+        nearby point), so the escape motion stays subject to the same CBF and
+        joint-limit constraints as any other reference. Orientation error/rate
+        is left untouched.
+        """
+        st = self._stall_state[side]
+        e_pos = e_task[:3]
+        err_norm = float(np.linalg.norm(e_pos))
+        ang_err = float(np.linalg.norm(e_task[3:])) if len(e_task) > 3 else 0.0
+        # On real hardware kin.current_v is the RAW, unfiltered sensor velocity
+        # (see robot_kinematics.py::update_from_joint_state) -- it never actually
+        # settles near zero even while the arm is macroscopically still. Smooth
+        # it LOCALLY (own EMA, doesn't touch the raw signal used elsewhere for
+        # rate-damping/CBF margins) so the stall gate compares against genuine
+        # motion, not sensor jitter.
+        v_raw = self._ee_speed(ee_id)
+        st['v_filt'] += (1.0 - cfg.STALL_SPEED_FILTER_ALPHA) * (v_raw - st['v_filt'])
+        v_ee = st['v_filt']
+
+        stalled_now = (v_ee < cfg.STALL_SPEED_THRESH and
+                       (err_norm > cfg.STALL_ERR_POS_THRESH or ang_err > cfg.STALL_ERR_ANG_THRESH))
+        st['timer'] = st['timer'] + dt if stalled_now else 0.0
+
+        if not st['escaping']:
+            if st['timer'] >= cfg.STALL_HOLD_S and active_interaction and n_eff is not None:
+                st['escaping'] = True
+                # Printed with flush=True (not get_logger, which can be
+                # buffered/async) so this survives even a hard native crash
+                # right after -- EDGE-TRIGGERED (once per escape episode, not
+                # per-tick: a per-tick flushed print at control-loop rate is
+                # itself a real perf hit, see .kiro/context.md).
+                print(f"[ESCAPE-DEBUG] {side}: starting tangent computation -- "
+                     f"e_pos={np.round(e_pos, 4).tolist()} err_norm={err_norm:.4f} "
+                     f"n_eff={np.round(n_eff, 4).tolist()} v_ee={v_ee:.4f}", flush=True)
+                self.get_logger().warn(
+                    f"\033[93m[ESCAPE] {side} arm stalled >= {cfg.STALL_HOLD_S:.0f}s against an "
+                    f"active barrier -- sliding tangentially to clear it.\033[0m")
+        elif v_ee > cfg.STALL_RESUME_SPEED or not active_interaction:
+            st['escaping'] = False
+
+        if not st['escaping']:
+            return e_task, v_task
+        if n_eff is None:
+            # Barrier still active but its aggregated normal happened to cancel
+            # out THIS tick (opposing pairs) -- can't derive a tangent; hold the
+            # escaping latch and just skip the bias for this one tick rather
+            # than touch n_eff below.
+            return e_task, v_task
+
+        e_dir = e_pos / err_norm if err_norm > 1e-6 else np.zeros(3)
+        tangent = e_dir - np.dot(e_dir, n_eff) * n_eff
+        tnorm = float(np.linalg.norm(tangent))
+        if tnorm < cfg.STALL_TANGENT_MIN:
+            # Goal direction is (near-)parallel to the obstacle normal (the
+            # straight-through-the-surface case) -- fall back to a horizontal
+            # direction perpendicular to the normal, since the deadlock here is
+            # almost always a flat/near-horizontal surface (table) blocking
+            # straight-up motion.
+            tangent = np.cross(n_eff, np.array([0.0, 0.0, 1.0]))
+            tnorm = float(np.linalg.norm(tangent))
+            if tnorm < 1e-6:
+                return e_task, v_task
+        tangent = tangent / tnorm
+
+        e_pos_new = cfg.STALL_ESCAPE_STEP_M * tangent
+        v_pos_new = cfg.STALL_ESCAPE_SPEED * tangent
+        if len(e_task) > 3:
+            return np.concatenate([e_pos_new, e_task[3:]]), np.concatenate([v_pos_new, v_task[3:]])
+        return e_pos_new, v_pos_new
+
     # =====================================================================
     # OVERRIDABLE SEAMS (async-execution hooks)
     # =====================================================================
@@ -613,7 +819,7 @@ class SafetyQPController(Node):
         # async worker result and drive the staleness watchdog.
         (J_soft_r, h_soft_r, J_soft_l, h_soft_l,
          d_safe_dynamic_r, d_safe_dynamic_l, abs_min_distance,
-         active_r, active_l) = \
+         active_r, active_l, n_eff_r, n_eff_l) = \
             self.col.compute_softmin_jacobian(
                 self.kin.current_v, self.kin.idx_right, self.kin.idx_left,
                 self.hri.grasp_margin_targets, self.hri.attached_objects,
@@ -624,7 +830,7 @@ class SafetyQPController(Node):
             J_soft_r, h_soft_r, J_soft_l, h_soft_l,
             d_safe_dynamic_r, d_safe_dynamic_l, abs_min_distance, active_r, active_l,
             self.col.witness_min_distance, self.col.witness_min_points,
-            getattr(self.col, 'top_active_pairs', []), True)
+            getattr(self.col, 'top_active_pairs', []), True, n_eff_r, n_eff_l)
 
     def _gate_command(self, q_dot_safe):
         # Final gate on the joint-velocity command actually sent to hardware.
@@ -746,6 +952,34 @@ class SafetyQPController(Node):
                                         v_gov_r, w_gov_r, self.task_dim_right)
         e_l, v_l = self._arm_task_error(self.kin.ee_id_left, x_gov_l, rpy_gov_l,
                                         v_gov_l, w_gov_l, self.task_dim_left)
+
+        # Local-minima stall escape (see _apply_stall_escape) -- only while
+        # actually tracking a real reference; a frozen/idle arm's error is
+        # already ~0 so it never trips the stall condition regardless. This is
+        # brand-new logic running inside the safety control loop: any bug in it
+        # must degrade to "no bias" (never crash the whole node), so guard each
+        # arm independently and self-disable on error instead of propagating.
+        if cfg.ENABLE_STALL_ESCAPE:
+            if x_gov_r is not None and not self.right_frozen:
+                try:
+                    e_r, v_r = self._apply_stall_escape('right', self.kin.ee_id_right, e_r, v_r,
+                                                        cbf.n_eff_r, cbf.active_r, dt)
+                except Exception:  # noqa: BLE001
+                    tb = traceback.format_exc()
+                    print(f"[ESCAPE-DEBUG] right arm EXCEPTION -- disabling escape:\n{tb}",
+                         flush=True)
+                    self.get_logger().error(f"[ESCAPE] right arm error, disabling:\n{tb}")
+                    cfg.ENABLE_STALL_ESCAPE = False
+            if x_gov_l is not None and not self.left_frozen:
+                try:
+                    e_l, v_l = self._apply_stall_escape('left', self.kin.ee_id_left, e_l, v_l,
+                                                        cbf.n_eff_l, cbf.active_l, dt)
+                except Exception:  # noqa: BLE001
+                    tb = traceback.format_exc()
+                    print(f"[ESCAPE-DEBUG] left arm EXCEPTION -- disabling escape:\n{tb}",
+                         flush=True)
+                    self.get_logger().error(f"[ESCAPE] left arm error, disabling:\n{tb}")
+                    cfg.ENABLE_STALL_ESCAPE = False
         _gov_ms = (time.perf_counter() - _gov_start) * 1000.0
 
         # --- 3. Build + solve the CLF-CBF-QP ---
@@ -784,6 +1018,11 @@ class SafetyQPController(Node):
 
         self.publish_counter += 1
 
+        # Safety-critical for main_shared_autonomy.py's own CBF-gated policy solve
+        # (not dashboard telemetry) -- must NOT be downsampled like the rest of
+        # this tick's publishing, or its 3-tick staleness tolerance trips falsely.
+        self._publish_shared_collision(b_col_pair, J_soft_r, J_soft_l)
+
         # --- 4. Downsampled telemetry publishing ---
         if self.publish_counter % self.publish_every_n == 0:
             self._publish_telemetry(q_dot_safe, slack_r, slack_l, b_col_pair, lambda_joints_total,
@@ -804,6 +1043,17 @@ class SafetyQPController(Node):
         # _gate_command: identity in sim; on real hardware zeroes both arms
         # while the async CBF result is stale (staleness watchdog).
         q_dot_cmd = self._gate_command(q_dot_safe)
+        # LAST LINE OF DEFENSE: never let a non-finite value reach the actual
+        # hardware velocity command, no matter which upstream stage produced it
+        # (sensor fault, a NaN CBF pair, an ill-conditioned QP solve -- all are
+        # guarded individually upstream, but this is the one place that can
+        # never be bypassed, since every path to real hardware funnels through it).
+        if not np.isfinite(q_dot_cmd).all():
+            self.get_logger().error(
+                "[SAFETY] Non-finite joint-velocity command BLOCKED before publish "
+                "-- commanding zero instead. Check the [SENSOR]/[CBF Error]/[QP Error] "
+                "logs above for the originating stage.", throttle_duration_sec=1.0)
+            q_dot_cmd = np.zeros_like(q_dot_cmd)
         cmd_data_r = [0.0] * 7
         cmd_data_l = [0.0] * 7
         if self.active_controller_mode:
@@ -955,8 +1205,10 @@ class SafetyQPController(Node):
         # Virtual wall marker
         self.viz.publish_wall_marker()
 
+    def _publish_shared_collision(self, b_col_pair, J_soft_r, J_soft_l):
         # Cartesian collision gradient for shared autonomy, per arm: 14 floats
-        # [b_col_r, b_col_l, J_c_cart_R(6), J_c_cart_L(6)].
+        # [b_col_r, b_col_l, J_c_cart_R(6), J_c_cart_L(6)]. Called every tick
+        # (not downsampled) -- see call site in solve_and_publish for why.
         b_col_r, b_col_l = b_col_pair
         if self.kin.ee_id_right is not None and self.kin.ee_id_left is not None:
             J_EE_R_6D = pin.getFrameJacobian(self.kin.model, self.kin.data, self.kin.ee_id_right, pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)
@@ -968,7 +1220,11 @@ class SafetyQPController(Node):
 
 
 def main():
-    rclpy.init()
+    # NO signal handlers: rclpy's default SIGINT handler shuts down the whole
+    # context BEFORE our except/finally below runs, so restore_controllers()
+    # would find an already-dead context on Ctrl-C. Disabling it means Ctrl-C
+    # just raises a plain KeyboardInterrupt and WE control shutdown ordering.
+    rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
     node = SafetyQPController()
 
     # Do NOT set use_sim_time here -- a sim-time timer can catch up in bursts
@@ -1002,12 +1258,19 @@ def main():
     node.kin.print_joint_limits_table(node.get_logger())
 
     # --- PHASE 3: engage the real-time loop ---
+    # spin_once(timeout_sec=0.1) in a loop, NOT rclpy.spin(node): with the
+    # signal handler disabled above, an indefinitely-blocking spin() has
+    # nothing to wake it on Ctrl-C -- this returns to Python every 0.1s so
+    # KeyboardInterrupt actually gets raised promptly (same pattern already
+    # used by trajectory_generator.py's main()).
     node.start_control_loop()
     try:
-        rclpy.spin(node)
+        while rclpy.ok():
+            rclpy.spin_once(node, timeout_sec=0.1)
     except KeyboardInterrupt:
         pass
     finally:
+        node.restore_controllers()
         if os.path.exists(node.urdf_path):
             os.remove(node.urdf_path)
         node.destroy_node()

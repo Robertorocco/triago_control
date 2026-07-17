@@ -31,6 +31,7 @@ Dynamic safety margin, per arm:
 """
 
 import threading
+import time
 
 import pinocchio as pin
 try:
@@ -245,7 +246,7 @@ class CollisionManager:
 
         # 3. BODY COLLIDERS (mobile base + torso pillar). Format: (frame, [x,y,z] size, [x,y,z] offset)
         body_parts = [
-            ("base_link", [0.6, 0.5, 0.27], [0.0, 0.0, 0.09]),      # Mobile base box
+            ("base_link", [0.65, 0.55, 0.29], [0.0, 0.0, 0.115]),   # Mobile base box (+5cm margin all round)
             ("torso_lift_link", [0.2, 0.2, 0.6], [0.0, 0.0, 0.25]),  # Torso pillar (moves with lift)
         ]
         for parent_name, dims, offset in body_parts:
@@ -604,13 +605,18 @@ class CollisionManager:
 
         Returns: (J_soft_R, h_soft_R, J_soft_L, h_soft_L, d_safe_dynamic_r,
                   d_safe_dynamic_l, abs_min_distance, active_interaction_r,
-                  active_interaction_l)
+                  active_interaction_l, n_eff_r, n_eff_l)
             J_soft_X / h_soft_X : SoftMin gradient/value for arm X (h_soft_X=1.0
                 is a safe QP sentinel when idle, not a real margin).
             d_safe_dynamic_X : velocity-inflated margin for arm X's own row.
             abs_min_distance : true closest distance over all pairs.
             active_interaction_X : True iff arm X has an active pair this tick;
                 telemetry-only, use to publish NaN instead of the sentinel margin.
+            n_eff_X : unit Cartesian contact normal for arm X (softmax-aggregated
+                over the SAME pairs/weights as J_soft_X, world/base frame,
+                pointing away from the obstacle into arm X's geometry), or None
+                if active_interaction_X is False. Consumed only by the
+                stall-escape tangent in main_qp_controller.py.
         """
         # data/cdata default to self.* (shared main-thread pair). The real-
         # hardware CBF worker passes its OWN private pin.Data / GeometryData
@@ -677,6 +683,8 @@ class CollisionManager:
         Jdist_list = []
         route_r_list = []
         route_l_list = []
+        n_for_r_list = []   # per-pair contact normal, SIGNED so it points away
+        n_for_l_list = []   # from the obstacle into that arm's own geometry
         jacobian_cache = {}
         enabled_pairs = []   # (raw_distance, geom_id_first, geom_id_second) actually contributing
 
@@ -798,8 +806,18 @@ class CollisionManager:
             # correctly preserving "arm A may yield to help arm B" -- while a pair
             # touching only ONE arm's geometry (e.g. that arm vs. the static
             # table) NEVER pollutes the other arm's barrier.
-            touched = (self._arm_membership(first, attached_object_arm)
-                      | self._arm_membership(second, attached_object_arm))
+            mem_first = self._arm_membership(first, attached_object_arm)
+            mem_second = self._arm_membership(second, attached_object_arm)
+            touched = mem_first | mem_second
+
+            # Signed per-arm contact normal (n is p1-p2 normalized): flip it so
+            # it always points AWAY from the obstacle INTO that arm's own
+            # geometry, regardless of which side of the pair is "first".
+            # Ambiguous pairs (self-pairs, or touching both arms) default to
+            # +n -- only used by the stall-escape tangent below, never the
+            # barrier itself.
+            n_for_r = -n if ('right' in mem_second and 'right' not in mem_first) else n
+            n_for_l = -n if ('left' in mem_second and 'left' not in mem_first) else n
 
             # --- EXPERIMENTAL: INTER-ARM CLOSING-MARGIN HOOK (see config.py's
             # ENABLE_INTER_ARM_CLOSING_MARGIN) ---
@@ -818,10 +836,28 @@ class CollisionManager:
             # batched below, after the loop.
             d_eff = d + shift
 
+            # A non-finite distance/Jacobian for ONE pair (e.g. a NaN joint
+            # position/velocity corrupting forwardKinematics for whatever this
+            # pair's parent joint is -- head, gripper, anything) would otherwise
+            # poison the ENTIRE batched SoftMax sum below with zero indication of
+            # which pair was responsible. Skip just this pair and say so loudly;
+            # every other pair keeps contributing normally.
+            if not (np.isfinite(d_eff) and np.isfinite(J_dist_k).all()):
+                if time.monotonic() - getattr(self, '_last_nan_pair_warn', 0.0) > 1.0:
+                    self._last_nan_pair_warn = time.monotonic()
+                    print(f"\033[91m[CBF Error] Non-finite pair SKIPPED: "
+                          f"{self.cmodel.geometryObjects[first].name} <-> "
+                          f"{self.cmodel.geometryObjects[second].name}  "
+                          f"(d_eff={d_eff}, J_dist finite={np.isfinite(J_dist_k).all()}) "
+                          f"-- check that pair's parent joint's q/v for a sensor fault.\033[0m")
+                continue
+
             d_eff_list.append(d_eff)
             Jdist_list.append(J_dist_k)
             route_r_list.append('right' in touched)
             route_l_list.append('left' in touched)
+            n_for_r_list.append(n_for_r)
+            n_for_l_list.append(n_for_l)
 
         # --- Record the 3 closest ACTUALLY-ENABLED pairs for the debug plot ---
         enabled_pairs.sort()
@@ -850,11 +886,27 @@ class CollisionManager:
                            if active_interaction_r else np.zeros(self.model.nv))
             J_soft_sum_l = ((weights[mask_l, None] * Jdist_arr[mask_l]).sum(axis=0)
                            if active_interaction_l else np.zeros(self.model.nv))
+            # Same softmax weights, applied to the SIGNED Cartesian normals --
+            # the aggregate "which way is this arm blocked" direction, used
+            # only by the stall-escape tangent (main_qp_controller.py). Never
+            # feeds the barrier itself, so it can't affect safety margins.
+            n_r_arr = np.asarray(n_for_r_list)           # (M, 3)
+            n_l_arr = np.asarray(n_for_l_list)
+            n_eff_r = n_eff_l = None
+            if active_interaction_r:
+                n_sum_r = (weights[mask_r, None] * n_r_arr[mask_r]).sum(axis=0)
+                n_norm_r = np.linalg.norm(n_sum_r)
+                n_eff_r = n_sum_r / n_norm_r if n_norm_r > 1e-6 else None
+            if active_interaction_l:
+                n_sum_l = (weights[mask_l, None] * n_l_arr[mask_l]).sum(axis=0)
+                n_norm_l = np.linalg.norm(n_sum_l)
+                n_eff_l = n_sum_l / n_norm_l if n_norm_l > 1e-6 else None
         else:
             active_interaction_r, active_interaction_l = False, False
             sum_exp_r, sum_exp_l = 0.0, 0.0
             J_soft_sum_r = np.zeros(self.model.nv)
             J_soft_sum_l = np.zeros(self.model.nv)
+            n_eff_r, n_eff_l = None, None
 
         # No active interaction -> that arm's barrier is silent (open space).
         # Each arm's SoftMin is computed and returned INDEPENDENTLY.
@@ -871,4 +923,4 @@ class CollisionManager:
             h_soft_l = -(1.0 / cfg.ALPHA_SOFTMIN) * np.log(sum_exp_l)
 
         return (J_soft_r, h_soft_r, J_soft_l, h_soft_l, d_safe_dynamic_r, d_safe_dynamic_l,
-               abs_min_distance, active_interaction_r, active_interaction_l)
+               abs_min_distance, active_interaction_r, active_interaction_l, n_eff_r, n_eff_l)

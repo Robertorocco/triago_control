@@ -199,7 +199,7 @@ class VisualServoingHead(Node):
         self.head_geom_ids = []
 
         # 1. Base / Torso
-        body_parts = [("base_link", [0.6, 0.5, 0.27], [0.0, 0.0, 0.09]),
+        body_parts = [("base_link", [0.65, 0.55, 0.32], [0.0, 0.0, 0.115]),   # +5cm margin all round
                       ("torso_lift_link", [0.2, 0.2, 0.6], [0.0, 0.0, 0.25])]
         self.body_geom_ids = []
         for name, dims, offset in body_parts:

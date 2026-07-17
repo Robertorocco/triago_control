@@ -430,21 +430,6 @@ class QPVisualizer:
         # =========================================================
         # Broadcasts exact CBF geometric primitives to RViz for operator transparency
         
-        def create_box_marker(m_id, pos, scale, color):
-            """Helper function to instantiate primitive Box markers."""
-            m = Marker()
-            m.header.frame_id = self.ref_frame
-            m.header.stamp = timestamp
-            m.ns = "task_environment"
-            m.id = m_id
-            m.type = Marker.CUBE
-            m.action = Marker.ADD
-            m.pose.position.x, m.pose.position.y, m.pose.position.z = pos[0], pos[1], pos[2]
-            m.pose.orientation.w = 1.0
-            m.scale.x, m.scale.y, m.scale.z = scale[0], scale[1], scale[2]
-            m.color = color
-            return m
-
         def create_cylinder_marker(m_id, pos, radius, length, color):
             m = Marker()
             m.header.frame_id = self.ref_frame
@@ -469,15 +454,6 @@ class QPVisualizer:
             m.scale.z = float(length)
             m.color = color
             return m
-
-        # --- 1. Work Table (Wood Color) ---
-        markers.markers.append(create_box_marker(
-            idx, 
-            [1.0, 0.0, 0.35], 
-            [0.6, 0.5, 0.7], 
-            ColorRGBA(r=0.6, g=0.4, b=0.2, a=0.8)
-        ))
-        idx += 1
 
         # --- 2. Red Cylinder (Right Hand Manipulandum) ---
         # REMOVED: drawn by visualization_engine.py at its live collision pose

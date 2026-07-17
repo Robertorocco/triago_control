@@ -42,7 +42,7 @@
 # =============================================================================
 
 # --- WHICH TEST TO RUN -------------------------------------------------------
-active_preset: "s_curve_right"
+active_preset: "home"  # pick one of the presets below
 #crossing_swap
 # --- GLOBAL BEHAVIOUR FLAGS --------------------------------------------------
 # Lambda-driven time scaling (dynamic_trajectory / DYNAMIC_TRAJECTORY flag).
@@ -66,7 +66,7 @@ task_dimension: 6.0
 ref_frame: "base_footprint"
 
 # --- TRAJECTORY SHAPE / TIMING ----------------------------------------------
-duration: 20.0        # [s] virtual time to complete the quintic motion (fast → instantaneous feel)
+duration: 10.0        # [s] virtual time to complete the quintic motion (fast → instantaneous feel)
 delay_start: 1.0     # [s] settle window used to sample the real start pose
 cube_size: 0.1       # [m] edge of the random perturbation cube (swap_perturbed)
 

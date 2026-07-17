@@ -90,9 +90,9 @@ CLUTCH = "CLUTCH"
 JOYSTICK = "JOYSTICK"
 
 # --- Active experiment condition (edit these three to select a study cell) ---
-CONTROL_MODE   = JOYSTICK    # CLUTCH (position control) | JOYSTICK (velocity control)
-ASSIST_FEEDBACK = False      # channel F: assistive guidance forces on the handle
-ASSIST_BLENDING = True       # channel B: reference-level user<->policy blending
+CONTROL_MODE   = CLUTCH      # CLUTCH (position control) | JOYSTICK (velocity control)
+ASSIST_FEEDBACK = True      # channel F: assistive guidance forces on the handle
+ASSIST_BLENDING = False      # channel B: reference-level user<->policy blending
 
 # --- Backward-compatibility alias -------------------------------------------
 # Legacy code (teleop topic routing, main_shared_autonomy) reads cfg.BLENDING to
@@ -229,9 +229,36 @@ ALIGN_ALPHA_LPF_COEFF = 0.1          # low-pass on alpha for C0-continuity of th
 # 2. SAFETY + CONTROL HYPERPARAMETERS
 # =============================================================================
 ALPHA_SOFTMIN = 50.0            # Sharpness of the SoftMin collision aggregation
-GAMMA_CBF = 0.75               # CBF class-K gain
+GAMMA_CBF = 0.70               # CBF class-K gain
 D_SAFE_BASE = 0.015            # Base safety distance for the collision barrier
 K_V_SAFE = 0.1                 # Predictive velocity horizon (brake earlier at high speed)
+
+# Local-minima stall escape (main_qp_controller.py::_apply_stall_escape): the
+# reactive CLF-CBF QP has no planner, so a goal on the far side of a flat
+# obstacle (e.g. reaching up and over a table from underneath) can settle at a
+# genuine saddle point -- goal-gradient and barrier-gradient anti-parallel.
+ENABLE_STALL_ESCAPE = False
+STALL_SPEED_FILTER_ALPHA = 0.97 # EMA coeff smoothing the raw EE-speed estimate
+                                 # before the stall check (real hardware's raw
+                                 # current_v is jittery and rarely reads near-zero)
+STALL_SPEED_THRESH = 0.01       # [m/s] "almost zero" measured EE speed
+STALL_HOLD_S = 3.0              # [s] sustained stall before escaping
+STALL_ERR_POS_THRESH = 0.10     # [m] position error still counts as "not there yet"
+STALL_ERR_ANG_THRESH = np.deg2rad(30.0)  # [rad] orientation error, same idea
+STALL_RESUME_SPEED = 0.03       # [m/s] speed that counts as "moving again" -> drop escape
+STALL_TANGENT_MIN = 0.15        # goal direction's component tangential to the
+                                 # blocking normal below this -> use the fallback tangent
+STALL_ESCAPE_STEP_M = 0.05      # [m] waypoint offset along the tangent
+STALL_ESCAPE_SPEED = 0.03       # [m/s] feedforward speed along the tangent
+
+# Near-goal policy strength (main_shared_autonomy.py, real hardware + unattended
+# policy-test runs ONLY -- see its own use of these next to the POLICY_BELIEF_TEST
+# virtual-cursor dt-stretch. The QP controller itself is NOT touched: this only
+# shapes the REFERENCE main_shared_autonomy.py publishes, same as it always has.
+POLICY_NEAR_GOAL_POS_M = 0.10                 # [m]
+POLICY_NEAR_GOAL_ANG_RAD = np.deg2rad(15.0)   # [rad]
+POLICY_NEAR_GOAL_MIN_LEAD_M = 0.05            # [m] stretched carrot-lead floor
+POLICY_NEAR_GOAL_DT_MAX_S = 2.0               # [s] stretched dt_virtual cap
 
 # In compute_softmin_jacobian, an inter-arm pair's margin normally reflects only
 # the row-owning arm's own speed (d_safe_dynamic_r/l below); when True, it's
@@ -243,7 +270,7 @@ ALPHA_FILTER = 0.5            # EMA coefficient for hardware velocity filtering 
 DAMP = 12.0                    # Joint velocity regularization (Lambda) in the QP cost.
                                # 12 is tuned: 10 left a bimanual-convergence ripple, 15 bought
                                # nothing more and cost tracking (see .kiro/context.md).
-P_GAIN_LIMITS = 2.5            # Joint-limit CBF gamma (braking aggressiveness)
+P_GAIN_LIMITS = 1.8            # Joint-limit CBF gamma (braking aggressiveness)
 JOINT_LIMIT_BUFFER_BASE = 0.15  # Base joint-limit braking buffer
 JOINT_LIMIT_K_V = 0.1          # Joint-limit velocity horizon (seconds to look ahead)
 # Do not add a hard slew-rate box on q_dot: it can't relieve the CBF row and
@@ -253,9 +280,9 @@ JOINT_LIMIT_K_V = 0.1          # Joint-limit velocity horizon (seconds to look a
 # barrier that diverges at each joint's limits, evaluated on the normalized joint
 # position so every joint is defended at the same fraction of its travel. Near-zero
 # in mid-range (CLF keeps tracking priority), grows sharply (clamped) near a limit.
-K_GRADIENT = 0.05              # gain on the negative potential gradient
+K_GRADIENT = 0.07              # gain on the negative potential gradient
 V_MAX_POSTURE = 1.0            # rad/s hard clamp on the posture reference (solver safety)
-W_CENTER = 1.0                 # posture-task weight in the QP cost (vs DAMP=10)
+W_CENTER = 0.96                # posture-task weight in the QP cost (vs DAMP=10)
 POSTURE_GRASP_SCALE = 0.05     # posture weight scaled to this (x W_CENTER) during autonomous
                                #   precision phases (grasp/align/approach/close/lift)
 POSTURE_SCALE_TAU = 0.2        # s -- first-order ramp time-constant for the posture-scale switch
@@ -266,17 +293,18 @@ POSTURE_SCALE_TAU = 0.2        # s -- first-order ramp time-constant for the pos
 # output instead -- rejected: a self-referential low-pass, worse real motion.
 ENABLE_RATE_DAMPING = True
 RATE_DAMPING_VS_MEASURED = True
-RATE_WEIGHT = 50.0             # 10 -> 26.6% / 25 -> 14.0% / 50 -> 8.3% worst-case cmd ripple
+RATE_WEIGHT =1700.0           # hand-tuned on real hardware -- adopted, current solution
 
 # =============================================================================
 # 3. DYNAMIC SCALING BOUNDARIES
 # =============================================================================
 # Decoupled dynamic slack weighting
 BASE_WEIGHT_SLACK = 25.0        # Standard slack weight (active against an obstacle)
-MAX_WEIGHT_SLACK = 100.0       # Max slack weight (free space); also the fixed slack
+MAX_WEIGHT_SLACK = 120.0       # Max slack weight (free space); also the fixed slack
                                #   weight pinned on an inactive (frozen) arm to decouple it
 BETA = 0.4                     # How fast slack weights return to baseline as lambda grows
 SLACK_FILTER_TAU = 0.15        # LPF time constant on the shadow prices feeding the scheduler
+WEIGHT_SLACK_FILTER_TAU = 0.2  # 2nd-stage LPF on the slack weight itself (smooths the jump)
 
 # Dynamic gamma (CLF) scheduling
 GAMMA_CLF_DEFAULT = 0.75       # Static / initial CLF convergence rate (Vdot <= -gamma*V)
@@ -295,10 +323,10 @@ GAMMA_FILTER_TAU = 0.125       # Low-pass time constant for the gamma scheduler
 ENABLE_REFERENCE_GOVERNOR = True       # Master switch (False = raw passthrough, no filtering)
 
 GOV_V_MAX_LIN = 0.20                  # [m/s] max linear reference velocity passed to the CLF
-GOV_V_MAX_ANG = 1.2                   # [rad/s] max angular reference velocity passed to the CLF
+GOV_V_MAX_ANG = 0.3                   # [rad/s] max angular reference velocity passed to the CLF
 
 GOV_E_MAX_POS = 0.30                  # [m] max allowed position error norm (30 cm)
-GOV_E_MAX_ORI = 0.524                 # [rad] max allowed orientation error norm (~30 deg)
+GOV_E_MAX_ORI = 1.0                   # [rad] max allowed orientation error norm
 
 GOV_A_MAX_LIN = 1.0                   # [m/s^2] max linear acceleration of the governed reference
 GOV_A_MAX_ANG = 4.0                   # [rad/s^2] max angular acceleration of the governed reference
@@ -332,7 +360,7 @@ CBF_STALENESS_MAX_TICKS = 3    # Freeze both arms if the CBF is unrefreshed this
 # Diagonal task weights [Px,Py,Pz,Roll,Pitch,Yaw]: heavily penalize position, barely
 # penalize orientation (25:1 ratio), so the QP prioritizes closing position error
 # over matching orientation when the two conflict near an obstacle.
-TASK_WEIGHTS_6D = np.array([1.0, 1.0, 1.0, 0.04, 0.04, 0.04]) * 10.0
+TASK_WEIGHTS_6D = np.array([1.0, 1.0, 1.0, 0.05, 0.05, 0.05]) * 10.0
 
 # Task weights used by an arm doing PRECISION work with the object (qp_formulator
 # selects this per arm from orient_boost_arms). Applies to: the active arm during
@@ -462,7 +490,7 @@ OFFLINE_PLOT_ROOT_DIR = "~/exchange/ros2-ws/triago_offline_plots"
 # How long (seconds) offline_plotter.py keeps recording after the trigger above goes
 # False, before finalizing and saving the figures (captures the settling phase on the
 # same time axis as the tracking motion).
-OFFLINE_PLOT_POST_TRIGGER_S = 10.0
+OFFLINE_PLOT_POST_TRIGGER_S = 15.0
 
 # The WAITING->TRACKING trigger is a single VOLATILE Bool; a late-joining
 # subscriber (e.g. cross-network) can miss it. The generator holds in WAITING
@@ -474,10 +502,12 @@ OFFLINE_RECORD_WAIT_TIMEOUT_S = 10.0
 OFFLINE_BAG_ENABLE = True
 OFFLINE_BAG_STORAGE_ID = "sqlite3"
 
-# QP-controller telemetry only -- deliberately NOT the curated allowlist in
-# scripts/analysis/study_config.py (BAG_TOPICS), which also carries
-# shared_autonomy/* and virtuose/* (teleoperation + shared-autonomy) topics
-# that don't apply to a solo QP-controller trajectory run.
+# The OFFICIAL recorder: superset of the QP-controller telemetry this file
+# always had PLUS scripts/analysis/study_config.py's curated shared_autonomy/*
+# + virtuose/* (teleoperation) allowlist PLUS the head-perception topics that
+# allowlist never carried. One list, so a bag from either workflow captures
+# the same data; harmless to list topics nothing publishes this run (ros2 bag
+# record only captures what's actually publishing).
 OFFLINE_BAG_TOPICS = [
     "/joint_states",
     "/tf",
@@ -510,7 +540,32 @@ OFFLINE_BAG_TOPICS = [
     "/head_perception/markers",
     "/head_perception/qdot_cmd",
     "/head_perception/qdot_measured",
+    "/head_perception/debug_json",
     "/perceived_world/snapshot",
+    "/real_perception",
     "/head_active_tracking/telemetry",
     "/head_active_tracking/qdot",
+    # Teleoperation device (haption_teleoperation) -- optional per trial.
+    "/arm_right/user_cartesian_reference",
+    "/arm_left/user_cartesian_reference",
+    "/virtuose/pose",
+    "/virtuose/velocity",
+    "/virtuose/button_right",
+    "/virtuose/button_left",
+    "/virtuose/deadman",
+    "/virtuose/articular_position",
+    "/virtuose/force_cmd",
+    "/joystick/home_pose",
+    # Shared autonomy (main_shared_autonomy.py) -- optional per trial.
+    "/shared_autonomy/blend_debug",
+    "/shared_autonomy/goal_names",
+    "/shared_autonomy/goal_probabilities",
+    "/shared_autonomy/ee_policy",
+    "/shared_autonomy/user_policy",
+    "/shared_autonomy/active_goal_pose",
+    "/shared_autonomy/grasp_active",
+    "/shared_autonomy/active_arm",
+    "/shared_autonomy/gripper_cmd",
+    "/shared_autonomy/target_ignore",
+    "/shared_autonomy/grasp_margin",
 ]

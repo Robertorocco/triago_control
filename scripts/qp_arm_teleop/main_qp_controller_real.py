@@ -55,6 +55,7 @@ import threading
 import numpy as np
 import pinocchio as pin
 import rclpy
+from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import Float64, Float64MultiArray
 
 # The QP entrypoints install flat into lib/triago_control/ alongside each other;
@@ -217,7 +218,7 @@ class RealQPController(SafetyQPController):
         return CbfResult(
             np.zeros(nv), 1.0, np.zeros(nv), 1.0,
             cfg.D_SAFE_BASE, cfg.D_SAFE_BASE, float('nan'), False, False,
-            float('nan'), None, [], False)
+            float('nan'), None, [], False, None, None)
 
     def _set_fresh(self, fresh):
         # Edge-triggered logging on the freeze/resume transition (no per-tick spam).
@@ -263,7 +264,7 @@ class RealQPController(SafetyQPController):
                     self.col.update_geometry(q, data=self._data_cbf, cdata=self._cdata_cbf)
                     (J_soft_r, h_soft_r, J_soft_l, h_soft_l,
                      d_safe_r, d_safe_l, abs_min,
-                     active_r, active_l) = self.col.compute_softmin_jacobian(
+                     active_r, active_l, n_eff_r, n_eff_l) = self.col.compute_softmin_jacobian(
                         v, snap['idx_r'], snap['idx_l'],
                         snap['margin_targets'], snap['attached_objs'],
                         snap['attached_adjacency'], snap['ignored_targets'],
@@ -279,7 +280,7 @@ class RealQPController(SafetyQPController):
                     top = list(self.col.top_active_pairs)
                 result = CbfResult(J_soft_r, h_soft_r, J_soft_l, h_soft_l,
                                    d_safe_r, d_safe_l, abs_min, active_r, active_l,
-                                   witness_d, witness_p, top, True)
+                                   witness_d, witness_p, top, True, n_eff_r, n_eff_l)
                 with self._cbf_cond:
                     self._cbf_result = result
                     self._cbf_out_seq += 1
@@ -330,7 +331,11 @@ class RealQPController(SafetyQPController):
 
 
 def main():
-    rclpy.init()
+    # NO signal handlers: rclpy's default SIGINT handler shuts down the whole
+    # context BEFORE our except/finally below runs, so restore_controllers()
+    # would find an already-dead context on Ctrl-C. Disabling it means Ctrl-C
+    # just raises a plain KeyboardInterrupt and WE control shutdown ordering.
+    rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
     node = RealQPController()
 
     # Wall-clock control loop by design -- do not set use_sim_time here.
@@ -360,13 +365,20 @@ def main():
     node.kin.print_joint_limits_table(node.get_logger())
 
     # --- PHASE 3: engage the real-time loop ---
+    # spin_once(timeout_sec=0.1) in a loop, NOT rclpy.spin(node): with the
+    # signal handler disabled above, an indefinitely-blocking spin() has
+    # nothing to wake it on Ctrl-C -- this returns to Python every 0.1s so
+    # KeyboardInterrupt actually gets raised promptly (same pattern already
+    # used by trajectory_generator.py's main()).
     node.start_control_loop()
     try:
-        rclpy.spin(node)
+        while rclpy.ok():
+            rclpy.spin_once(node, timeout_sec=0.1)
     except KeyboardInterrupt:
         pass
     finally:
         node.shutdown_workers()
+        node.restore_controllers()
         if os.path.exists(node.urdf_path):
             os.remove(node.urdf_path)
         node.destroy_node()

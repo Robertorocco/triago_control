@@ -97,8 +97,14 @@ class TableSegmenter:
         refined_d = -refined_normal @ centroid
         plane = PlaneModel(refined_normal, refined_d)
 
-        # Height gate: the detected top must be near the known table top.
-        if abs(plane.height - cfg.TABLE_TOP_Z_WORLD) > cfg.PLANE_Z_TOLERANCE:
+        # Height gate: the detected top must be a plausible table top.
+        # Real hardware knows only "taller than 0.5m, not the ground" (the exact
+        # real table height is unmeasured) -> a robust floor/ceiling, not a tight
+        # window around the SIM 0.70m prior which sometimes let the ground slip.
+        if cfg.REAL_HARDWARE_HEAD:
+            if not (cfg.REAL_PLANE_Z_MIN <= plane.height <= cfg.REAL_PLANE_Z_MAX):
+                return None, None
+        elif abs(plane.height - cfg.TABLE_TOP_Z_WORLD) > cfg.PLANE_Z_TOLERANCE:
             return None, None
 
         # Recompute the inlier mask with the refined plane.

@@ -21,6 +21,9 @@ base_footprint. We look up both frames and compute
 so the result is correct no matter what the root is.
 """
 
+import contextlib
+import os
+
 import numpy as np
 import pinocchio as pin
 
@@ -29,6 +32,25 @@ from controller_manager_msgs.srv import SwitchController, ListControllers
 import rclpy
 
 import triago_control.head_control.config as cfg
+
+
+@contextlib.contextmanager
+def _suppress_native_output():
+    """Pinocchio's URDF parser warns on raw stdout/stderr (C++-level, not
+    Python logging) for tags it doesn't recognise -- TIAGo's ros2_control/
+    suspension/laser tags, harmless and not ours to fix upstream."""
+    devnull = os.open(os.devnull, os.O_WRONLY)
+    saved_out, saved_err = os.dup(1), os.dup(2)
+    try:
+        os.dup2(devnull, 1)
+        os.dup2(devnull, 2)
+        yield
+    finally:
+        os.dup2(saved_out, 1)
+        os.dup2(saved_err, 2)
+        os.close(saved_out)
+        os.close(saved_err)
+        os.close(devnull)
 
 
 class HeadKinematics:
@@ -51,6 +73,9 @@ class HeadKinematics:
         self._last_q = None
         self._last_time = None
         self._v_filtered = None     # (nv,) EMA-filtered velocity
+
+        self._ctrl_started = []     # controllers WE activated (restore_controllers reverses)
+        self._ctrl_stopped = []     # controllers WE deactivated
 
     # ================================================================== #
     # Model construction                                                  #
@@ -99,7 +124,7 @@ class HeadKinematics:
         except Exception as e:                                   # noqa: BLE001
             self._log.warn(f"Could not parse soft limits ({e}); using hard limits.")
 
-        # Cache frame ids we need every tick.
+        self._ensure_camera_frame()
         self._fid_cam = self.model.getFrameId(cfg.CAMERA_OPTICAL_FRAME)
         self._fid_base = (
             self.model.getFrameId(cfg.BASE_FRAME)
@@ -110,6 +135,52 @@ class HeadKinematics:
             self._log.warn(
                 f"Frame '{cfg.BASE_FRAME}' not found in model; using model root as base."
             )
+
+    def _ensure_camera_frame(self):
+        """Inject cfg.CAMERA_OPTICAL_FRAME into the model if the URDF lacks it.
+
+        Real hardware: the camera is a separately-mounted module, not baked
+        into the base URDF the way Gazebo's sim camera plugin is, so
+        getFrameId would silently return an out-of-range sentinel (crashing
+        forward()'s oMf indexing). Same pattern as robot_kinematics.py's
+        _ensure_grasping_frames() -- inject at the MEASURED arm_head_tool_link
+        -> head_arm_rgbd_link mount offset (see launch/head_real.launch.py's
+        static_transform_publisher). This is the camera body's own reference
+        frame, not the exact colour/depth sensor optical centre within it --
+        adequate for the look-at controller's coarse aiming, not precision work.
+        """
+        if self.model.existFrame(cfg.CAMERA_OPTICAL_FRAME):
+            return  # sim: already native to the URDF
+        parent_body_name = 'arm_head_tool_link'
+        if not self.model.existFrame(parent_body_name):
+            self._log.error(
+                f"Cannot inject '{cfg.CAMERA_OPTICAL_FRAME}': parent frame "
+                f"'{parent_body_name}' not found in model.")
+            return
+        t_mount = np.array([-0.056783, 0.034171, 0.011676])
+        R_mount = pin.Quaternion(0.69556217, 0.00914972, -0.71833972, 0.00987883).matrix()
+        # realsense2_camera (like every ROS camera driver) publishes the mount
+        # link in BODY convention (X-fwd, Y-left, Z-up) then a fixed rotation to
+        # the OPTICAL convention (Z-fwd, X-right, Y-down) that images -- and
+        # look_at_controller.py's "z-axis is the current look direction" law --
+        # actually use. Standard ROS body->optical quaternion (x,y,z,w) =
+        # (-0.5, 0.5, -0.5, 0.5); apply it on top of the measured mount offset,
+        # or the injected frame's Z axis doesn't point where the lens looks.
+        R_optical = pin.Quaternion(0.5, -0.5, 0.5, -0.5).matrix()
+        placement = pin.SE3(R_mount, t_mount) * pin.SE3(R_optical, np.zeros(3))
+        parent_frame_id = self.model.getFrameId(parent_body_name)
+        parent_joint_id = self.model.frames[parent_frame_id].parentJoint
+        parent_placement = self.model.frames[parent_frame_id].placement
+        frame_placement = parent_placement * placement
+        new_frame = pin.Frame(
+            cfg.CAMERA_OPTICAL_FRAME, parent_joint_id, parent_frame_id,
+            frame_placement, pin.FrameType.OP_FRAME,
+        )
+        self.model.addFrame(new_frame)
+        self.data = self.model.createData()   # rebuild data for the new frame
+        self._log.info(
+            f"[Init] Injected frame '{cfg.CAMERA_OPTICAL_FRAME}' into Pinocchio "
+            f"model (parent: {parent_body_name}).")
 
     # ================================================================== #
     # Live state                                                          #
@@ -166,6 +237,59 @@ class HeadKinematics:
         )
         J_cam = J_full[:, self.head_v_idx]          # 6 x 7
         return T_cam_base, J_cam
+
+    def solve_posture_for_position(self, target_pos, iters=150, tol=0.03):
+        """Numeric position-only IK for the camera ORIGIN to reach target_pos
+        (base_footprint, (3,)): damped least-squares task + null-space
+        regularisation toward the CURRENT posture (so the solve stays close to
+        a sensible configuration rather than wandering). AIM is deliberately
+        NOT solved here -- the live look-at QP (LookAtController) already
+        closes that loop every control tick; this only needs to produce a
+        reachable null-space POSTURE target (config's HEAD_POSTURE_TARGET
+        role), used by main_head.py's close-inspection sequence to derive a
+        closer/differently-angled view from the LIVE measured table geometry
+        instead of an offline-computed constant.
+
+        Runs on a LOCAL copy of q_real -- never mutates live state (self.data
+        gets overwritten with the real q on the next forward() tick regardless).
+        Returns the solved head-joint vector (7,), or None if the final
+        residual exceeds `tol` (unreachable -- caller should not move there).
+        """
+        q_full = self.q_real.copy()
+        q_min, q_max = self.get_head_joint_limits()
+        buf = 0.15   # same safety buffer used elsewhere (JOINT_LIMIT_BUFFER-ish)
+        lo, hi = q_min + buf, q_max - buf
+        q_seed = np.array([q_full[i] for i in self.head_q_idx])
+        q_head = q_seed.copy()
+        err = np.zeros(3)
+
+        for _ in range(iters):
+            for i, idx in enumerate(self.head_q_idx):
+                q_full[idx] = q_head[i]
+            pin.forwardKinematics(self.model, self.data, q_full)
+            pin.updateFramePlacements(self.model, self.data)
+            oMf_cam = self.data.oMf[self._fid_cam]
+            p = (self.data.oMf[self._fid_base].inverse() * oMf_cam).translation \
+                if self._fid_base is not None else oMf_cam.translation
+            err = np.asarray(target_pos, dtype=float) - p
+            if np.linalg.norm(err) < 1e-3:
+                break
+            J_full = pin.computeFrameJacobian(
+                self.model, self.data, q_full, self._fid_cam,
+                pin.ReferenceFrame.LOCAL_WORLD_ALIGNED
+            )
+            J = J_full[:3, self.head_v_idx]              # 3x7 position Jacobian
+            JJt = J @ J.T + 1e-4 * np.eye(3)
+            dq_task = J.T @ np.linalg.solve(JJt, err)
+            Jpinv = J.T @ np.linalg.inv(JJt)
+            N = np.eye(len(self.head_v_idx)) - Jpinv @ J
+            dq_null = 0.2 * (q_seed - q_head)
+            dq = dq_task + N @ dq_null
+            q_head = np.clip(q_head + np.clip(dq, -0.15, 0.15), lo, hi)
+
+        if np.linalg.norm(err) > tol:
+            return None
+        return q_head
 
     def get_head_joint_positions(self):
         return np.array([self.q_real[i] for i in self.head_q_idx])
@@ -253,6 +377,38 @@ class HeadKinematics:
         ok = future.result() is not None and future.result().ok
         if ok:
             self._log.info("Head controller switch succeeded.")
+            self._ctrl_started = to_start
+            self._ctrl_stopped = to_stop
         else:
             self._log.error("Head controller switch FAILED.")
         return ok
+
+    def restore_controllers(self):
+        """Reverse switch_controllers() on shutdown: stop what we started,
+        start what we stopped -- returns the robot to its pre-launch state."""
+        if not self._ctrl_started and not self._ctrl_stopped:
+            return
+        print(f"[Shutdown] Restoring original head controllers: "
+              f"+{self._ctrl_stopped} | -{self._ctrl_started} ...", flush=True)
+        switch_client = self._node.create_client(
+            SwitchController, "/controller_manager/switch_controller"
+        )
+        if not switch_client.wait_for_service(timeout_sec=2.0):
+            msg = ("[Shutdown] Switch Controller service unavailable -- cannot restore "
+                   f"original head controller state (was: +{self._ctrl_started} "
+                   f"-{self._ctrl_stopped}).")
+            print(msg, flush=True)
+            self._log.error(msg)
+            return
+        req = SwitchController.Request()
+        req.activate_controllers = self._ctrl_stopped
+        req.deactivate_controllers = self._ctrl_started
+        req.strictness = SwitchController.Request.STRICT
+        future = switch_client.call_async(req)
+        rclpy.spin_until_future_complete(self._node, future, timeout_sec=3.0)
+        if future.result() is not None and future.result().ok:
+            print("[Shutdown] Original head controller state restored.", flush=True)
+            self._log.info("Original head controller state restored.")
+        else:
+            print("[Shutdown] Restore Switch Service Failed.", flush=True)
+            self._log.error("Restore Switch Service Failed.")

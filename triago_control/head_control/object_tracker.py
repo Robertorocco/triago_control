@@ -68,6 +68,7 @@ class TrackedObject:
             else np.zeros(self._N_BINS, dtype=bool)
         )
         self.best_fit_rms = float(det.fit_rms)
+        self.vertical_coverage = float(det.vertical_coverage)
         self.frames_unseen = 0
         self.matched = False
 
@@ -108,6 +109,8 @@ class TrackedObject:
             self.arc_bins = self.arc_bins | det.arc_bins
         # Keep the best (lowest) fit residual ever seen for this object.
         self.best_fit_rms = min(self.best_fit_rms, float(det.fit_rms))
+        # Best (highest) vertical coverage seen -- more of the column observed.
+        self.vertical_coverage = max(self.vertical_coverage, float(det.vertical_coverage))
 
         if det.color_name != "unknown":
             self.color_name = det.color_name

@@ -41,17 +41,26 @@ exits.
 Figures produced (mirrors plotter.py's content, minus the two windows that
 are meaningless as a static artifact -- the live CBF-active-pairs debug view
 and the live joint-position slider GUI):
-    fig0_summary                   The 10 headline metrics below, rendered as
+    fig0_summary                   The 10+ headline metrics below, rendered as
                                     a monospace text page (same numbers as
                                     summary_metrics.json / trial_summary.txt,
-                                    just viewable as PDF/PNG alongside fig1..6)
+                                    just viewable as PDF/PNG alongside fig1..7)
     fig1_joint_kinematics          Position / Velocity / QP solution, 3x2
                                     (col 0 = Left arm, col 1 = Right arm)
-    fig2_qp_data                   Slacks, CBF/joint shadow prices, loop
-                                    frequency, safety margin, min distance
-    fig3_task_error_adaptation     Cartesian tracking error + dynamic weights
-    fig4_task_authority            Soft-task QP cost decomposition (shares)
-    fig5_3d_trajectory              3D commanded vs. executed gripper path
+    fig2_qp_data                   Slacks, CBF/joint shadow prices, safety
+                                    margin, min distance (loop frequency moved
+                                    to fig4_adaptive_parameters below)
+    fig3_task_tracking_error       Cartesian position/velocity tracking error
+                                    PLUS angular tracking error (geodesic
+                                    SO(3) angle) and angular velocity tracking
+                                    error (see cb_real for how the latter is
+                                    estimated -- ee_real carries no measured
+                                    angular velocity directly)
+    fig4_adaptive_parameters       Slack weight, CLF convergence rate, dynamic
+                                    safety margin (all flat-if-disabled, see
+                                    that method's docstring) + loop frequency
+    fig5_task_authority            Soft-task QP cost decomposition (shares)
+    fig6_3d_trajectory              3D commanded vs. executed gripper path
                                     (solid = commanded reference, dashed =
                                     executed EE pose; red = Right, blue =
                                     Left). Saved as PDF + PNG always; ALSO
@@ -60,7 +69,7 @@ and the live joint-position slider GUI):
                                     `plotly` package is installed --
                                     `pip install plotly` to enable it, no
                                     other change needed.
-    fig6_reference_governor        Commanded ("raw") vs. governed reference
+    fig7_reference_governor        Commanded ("raw") vs. governed reference
                                     signal (linear/angular velocity, position/
                                     orientation tracking error), per arm, with
                                     a DASHED horizontal line marking the
@@ -70,7 +79,7 @@ and the live joint-position slider GUI):
                                     immediately visible when/how much the
                                     governor reshaped the input trajectory.
                                     (only emitted if cfg.ENABLE_REFERENCE_GOVERNOR)
-    fig7_head_perception            Head camera perception: per-object (red/
+    fig8_head_perception            Head camera perception: per-object (red/
                                     blue) position/radius/height/confidence
                                     over time, active-vision phase + rate-based
                                     convergence progress + drift rate, cloud/
@@ -80,16 +89,39 @@ and the live joint-position slider GUI):
                                     vertical marker line is drawn at the exact
                                     instant /perceived_world/snapshot latched,
                                     if it did during this trial.
-    fig8_head_kinematics            Head joint position / measured velocity /
+    fig9_head_kinematics            Head joint position / measured velocity /
                                     QP-commanded velocity, 3x1 (single chain,
                                     no left/right split). Only emitted if head
                                     joints appeared on /joint_states this trial.
-    fig9_head_active_tracking       head_active_arm_tracking.py's camera-
+    fig10_head_active_tracking      head_active_arm_tracking.py's camera-
                                     framing performance: pixel centering error,
                                     angular errors (pointing/roll/approach),
                                     stand-off distance vs. target. Only emitted
                                     if that node was running this trial (data
                                     on /head_active_tracking/telemetry).
+    fig11_haption_device            Haption handle telemetry (position, speed,
+                                    clutch/grasp-trigger/deadman buttons,
+                                    force/torque wrench) from
+                                    haption_teleoperation. Only emitted if
+                                    that device was publishing this trial
+                                    (data on virtuose/pose or
+                                    virtuose/force_cmd).
+    fig12_shared_autonomy           main_shared_autonomy.py's belief/blend
+                                    telemetry: reference-blending authority
+                                    alpha, resulting user/policy action share,
+                                    per-goal belief probabilities, active-arm/
+                                    autonomous-grasp state. Only emitted if
+                                    that node was running this trial.
+
+    fig3/fig11/fig12 all shade, in green, the windows where virtuose/deadman
+    was held AND virtuose/button_right (clutch) was released -- i.e. the
+    operator was actually driving, as opposed to indexing or having let go
+    of the handle. This is a HIGHLIGHT, not a filter: every data series still
+    plots for the FULL trial regardless of grip state (robot motion doesn't
+    stop just because the operator let go), so nothing is ever silently
+    hidden. Shading is skipped entirely (no green anywhere) if
+    virtuose/deadman never published this trial -- an older
+    haption_teleoperation build, or no teleop device at all.
 
     summary_metrics.json           Up to 10 headline numbers ("was this trial
                                     smooth / accurate / safe") distilled from
@@ -106,10 +138,13 @@ and the live joint-position slider GUI):
 
     bag/                        A `ros2 bag record` capture spanning the exact
                                     same t=0..end window as the figures above
-                                    (cfg.OFFLINE_BAG_TOPICS -- QP-controller
-                                    telemetry only, no shared-autonomy/
-                                    teleoperation topics), so any trial can be
-                                    replayed offline later. Off via
+                                    (cfg.OFFLINE_BAG_TOPICS -- QP-controller +
+                                    head-perception + haption/teleoperation +
+                                    shared-autonomy telemetry, the merged
+                                    superset of this script's own topics and
+                                    scripts/analysis/study_config.py's
+                                    allowlist), so any trial can be replayed
+                                    offline later. Off via
                                     cfg.OFFLINE_BAG_ENABLE = False.
     trial_summary.txt           Plain-text copy of the console block printed
                                     at finalize time (reason, duration, figure
@@ -127,6 +162,20 @@ import signal
 import datetime
 import textwrap
 import subprocess
+import threading
+import time
+
+# Tkinter GUI (Start/Stop front-end) is optional -- guarded the same way
+# scripts/analysis/study_recorder.py does, but here a missing python3-tk
+# degrades to the ORIGINAL headless/topic-only behavior (see main()) rather
+# than exiting, since this script is meant to always be runnable.
+try:
+    import tkinter as tk
+    from tkinter import messagebox, ttk
+    _TK_IMPORT_ERROR = None
+except Exception as _exc:  # pragma: no cover - environment dependent
+    tk = ttk = messagebox = None  # type: ignore
+    _TK_IMPORT_ERROR = _exc
 
 import numpy as np
 import pinocchio as pin
@@ -135,7 +184,9 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray, Float64, String, Bool
+from geometry_msgs.msg import Pose, Twist, Wrench
 from visualization_msgs.msg import MarkerArray
+from rosgraph_msgs.msg import Clock
 
 import matplotlib.pyplot as plt
 from matplotlib.lines import Line2D
@@ -186,6 +237,11 @@ TRIGGER_LINE_KW = dict(color='0.45', linestyle='--', linewidth=1.1, zorder=0)
 # forcing (same grace-period pattern as scripts/analysis/study_recorder.py).
 _BAG_STOP_GRACE_S = 15.0
 
+# EMA smoothing for the finite-differenced angular-velocity estimate (see
+# cb_real) -- same idiom as cfg.STALL_SPEED_FILTER_ALPHA elsewhere in this
+# codebase, applied here rather than in cfg since it's an analysis-only knob.
+_ANG_VEL_EMA_ALPHA = 0.85
+
 
 def _draw_trigger_line(ax, t_off):
     if t_off is not None:
@@ -198,6 +254,18 @@ def _draw_world_snapshot_line(ax, t_snap):
     Green, dotted, distinct from the grey trajectory-finished trigger line."""
     if t_snap is not None:
         ax.axvline(t_snap, color='green', linestyle=':', linewidth=1.3, zorder=0)
+
+
+# Shading, not masking: robot/shared-autonomy/haption data stays plotted for
+# the FULL trial regardless of grip state -- this only highlights, on top,
+# the windows where the operator was actually driving (handle held, clutch
+# released), so a trial's data is never silently incomplete.
+_CONTROL_SPAN_KW = dict(color='#2ca02c', alpha=0.12, zorder=0, linewidth=0)
+
+
+def _draw_control_spans(ax, intervals):
+    for start, end in intervals:
+        ax.axvspan(start, end, **_CONTROL_SPAN_KW)
 
 
 def _moving_average(x, win):
@@ -246,6 +314,7 @@ class OfflinePlotter(Node):
         self.post_roll_deadline = None  # ROS time [s] at which to finalize
         self.trial_index = 0
         self.out_dir = None       # this trial's output folder (created at t0, not finalize)
+        self.last_saved_dir = None  # out_dir of the last FINALIZED trial (survives the reset below, for the GUI)
         self.bag_proc = None      # subprocess.Popen for `ros2 bag record`, or None
 
         # Latest real EE pose (position + RPY), kept for the governor figure's
@@ -276,6 +345,13 @@ class OfflinePlotter(Node):
         # --- The one topic that governs everything (see module docstring) ---
         self.create_subscription(
             Bool, cfg.OFFLINE_RECORD_TRIGGER_TOPIC, self.record_trigger_callback, 10)
+        # Manual GUI Start/Stop publishes on this SAME topic (see _RecorderGUI /
+        # main()) -- it is just another source of the one signal this node
+        # already understands, exactly like trajectory_generator.py. The two
+        # can coexist: whichever edge arrives first drives the state machine,
+        # and a redundant edge from the other source is already a documented no-op.
+        self.pub_manual_trigger = self.create_publisher(
+            Bool, cfg.OFFLINE_RECORD_TRIGGER_TOPIC, 10)
 
         # --- Joint state (position; velocity comes from qdot_measured instead) ---
         self.create_subscription(JointState, '/joint_states', self.listener_callback, qos_profile)
@@ -352,9 +428,48 @@ class OfflinePlotter(Node):
         self.create_subscription(Float64MultiArray, '/head_active_tracking/qdot',
                                  self.head_active_qdot_callback, qos_profile)
 
+        # --- Haption device (haption_teleoperation) -- optional; a trial with
+        # no teleop node running simply never populates these buffers, and
+        # fig11_haption_device is skipped at finalize time (see the docstring
+        # of triago_control/CLAUDE.md's runtime-interface table for topic
+        # ownership: this repo only CONSUMES these, never publishes them). ---
+        self.create_subscription(Pose, 'virtuose/pose', self.virt_pose_callback, qos_profile)
+        self.create_subscription(Twist, 'virtuose/velocity', self.virt_vel_callback, qos_profile)
+        self.create_subscription(Wrench, 'virtuose/force_cmd', self.force_callback, qos_profile)
+        self.create_subscription(Bool, 'virtuose/button_right', self.clutch_callback, qos_profile)
+        self.create_subscription(Bool, 'virtuose/button_left', self.grasp_trigger_callback, qos_profile)
+        self.create_subscription(Bool, 'virtuose/deadman', self.deadman_callback, qos_profile)
+        self.create_subscription(Float64MultiArray, 'joystick/home_pose',
+                                 self.home_pose_callback, qos_profile)
+
+        # --- Shared autonomy (main_shared_autonomy.py) -- optional, same
+        # "skip if absent" handling as the head/haption topics above. ---
+        self.create_subscription(Float64MultiArray, '/shared_autonomy/blend_debug',
+                                 self.blend_debug_callback, qos_profile)
+        self.create_subscription(Float64MultiArray, '/shared_autonomy/goal_probabilities',
+                                 self.goal_prob_callback, qos_profile)
+        self.create_subscription(String, '/shared_autonomy/goal_names',
+                                 self.goal_names_callback, qos_profile)
+        self.create_subscription(String, '/shared_autonomy/active_arm',
+                                 self.active_arm_callback, qos_profile)
+        self.create_subscription(Bool, '/shared_autonomy/grasp_active',
+                                 self.grasp_active_callback, qos_profile)
+
         # Slow watchdog: finalizes a POST_ROLL trial once its grace window
         # elapses. Deliberately NOT tied to any particular data topic's rate.
         self.create_timer(0.2, self._check_post_roll_deadline)
+
+        # Clock-stall watchdog: self._t() (every buffer's x-axis) is
+        # self.get_clock().now() - t0, which SILENTLY collapses every sample
+        # to ~0 if the node's clock stops advancing mid-recording (sim paused,
+        # or a stale/non-advancing /clock source) -- no exception, just a
+        # ruined trial discovered only after the fact. Checked against WALL
+        # time (datetime.now()), never the ROS clock itself, or a frozen ROS
+        # clock would hide its own stall.
+        self._clock_watch_last_ros_t = None
+        self._clock_watch_last_wall_t = None
+        self._clock_stall_warned = False
+        self.create_timer(1.0, self._clock_watchdog_tick)
 
         self.get_logger().info(
             f"[offline_plotter] Ready. Waiting for a rising edge on "
@@ -381,6 +496,20 @@ class OfflinePlotter(Node):
         self.err_pos_l = []
         self.err_vel_r = []
         self.err_vel_l = []
+
+        # Angular tracking error (geodesic SO(3) angle, same metric as
+        # gov_callback's _geodesic_angle) + a finite-differenced angular
+        # velocity error -- see cb_real for how both are computed. Reset
+        # each trial so the first sample never diffs across a trial boundary.
+        self.err_ang_r = []
+        self.err_ang_l = []
+        self.err_ang_vel_r = []
+        self.err_ang_vel_l = []
+        self._prev_R_r = None
+        self._prev_R_l = None
+        self._prev_ang_t = None
+        self._w_est_ema_r = None
+        self._w_est_ema_l = None
 
         # Raw EE speed (not tracking error -- the actual executed speed), same
         # tick/timestamps as time_err. Used only by _compute_summary_metrics's
@@ -473,6 +602,34 @@ class OfflinePlotter(Node):
         self.time_head_active_qdot = []
         self.head_active_qdot_buffer = []
 
+        # --- Haption device (haption_teleoperation) -- all optional; a trial
+        # with no teleop node running simply leaves these empty. ---
+        self.time_virt_pose = []
+        self.virt_pose_buffer = []          # [px,py,pz, qx,qy,qz,qw]
+        self.time_virt_vel = []
+        self.virt_vel_buffer = []           # [lx,ly,lz, ax,ay,az]
+        self.time_force = []
+        self.force_buffer = []              # [fx,fy,fz, tx,ty,tz]
+        self.time_clutch = []
+        self.clutch_buffer = []             # virtuose/button_right (1.0/0.0)
+        self.time_grasp_trigger = []
+        self.grasp_trigger_buffer = []      # virtuose/button_left (1.0/0.0)
+        self.time_deadman = []
+        self.deadman_buffer = []            # virtuose/deadman (1.0/0.0) -- grip-presence sensor
+        self.time_home_pose = []
+        self.home_pose_buffer = []          # [px,py,pz, qx,qy,qz,qw] (JOYSTICK mode)
+
+        # --- Shared autonomy (main_shared_autonomy.py) -- all optional. ---
+        self.time_blend = []
+        self.blend_buffer = []              # [alpha, v_user(6), v_policy(6), v_blend(6)]
+        self.time_goal_prob = []
+        self.goal_prob_buffer = []
+        self.goal_names = None              # latest CSV name list (String, rare updates)
+        self.time_active_arm = []
+        self.active_arm_buffer = []         # 1.0=right, 0.0=left
+        self.time_grasp_active = []
+        self.grasp_active_buffer = []       # 1.0/0.0
+
     def _now(self):
         return self.get_clock().now().nanoseconds / 1e9
 
@@ -523,6 +680,36 @@ class OfflinePlotter(Node):
     def _check_post_roll_deadline(self):
         if self.state == self.STATE_POST_ROLL and self._now() >= self.post_roll_deadline:
             self._finalize_and_save(reason='post_roll_elapsed')
+
+    def _clock_watchdog_tick(self):
+        """Loudly warn if self._now() hasn't moved in >1.5s of WALL time while
+        recording -- sim paused / stale or non-advancing /clock -- BEFORE the
+        trial ends, not after (every buffer's timestamp collapses toward 0,
+        which otherwise only shows up as tiny figures nobody notices until
+        the trial is already lost)."""
+        if not self._recording_active():
+            self._clock_watch_last_ros_t = None
+            self._clock_watch_last_wall_t = None
+            self._clock_stall_warned = False
+            return
+        now_ros = self._now()
+        now_wall = datetime.datetime.now().timestamp()
+        if self._clock_watch_last_ros_t is not None:
+            ros_dt = now_ros - self._clock_watch_last_ros_t
+            wall_dt = now_wall - self._clock_watch_last_wall_t
+            if wall_dt > 1.5 and ros_dt < 0.05:
+                if not self._clock_stall_warned:
+                    self._clock_stall_warned = True
+                    self.get_logger().error(
+                        f"[offline_plotter] ROS clock has NOT advanced in {wall_dt:.1f}s "
+                        "of real time while recording -- every timestamp from here "
+                        "collapses toward t=0. Is the simulation PAUSED, or is /clock "
+                        "stale/not publishing? (use_sim_time="
+                        f"{self.get_parameter('use_sim_time').value})")
+            elif ros_dt >= 0.05:
+                self._clock_stall_warned = False   # recovered -- re-arm for next stall
+        self._clock_watch_last_ros_t = now_ros
+        self._clock_watch_last_wall_t = now_wall
 
     # =====================================================================
     # ROSBAG CAPTURE (raw replay data, alongside the figures/metrics below)
@@ -729,11 +916,58 @@ class OfflinePlotter(Node):
         e_p_l = float(np.linalg.norm(self.ref_left[0:3] - p_real_l)) if self.has_ref_left else 0.0
         e_v_l = float(np.linalg.norm(self.ref_left[6:9] - v_real_l)) if self.has_ref_left else 0.0
 
-        self.time_err.append(self._t())
+        # Angular tracking error -- geodesic SO(3) angle ||log3(R_ref R_real^T)||,
+        # the SAME metric already used by gov_callback's _geodesic_angle (0.0,
+        # not NaN, when ee_real carries no RPY -- same sentinel convention as
+        # that panel, for consistency within this file).
+        t_now = self._t()
+        R_real_r = pin.rpy.rpyToMatrix(*self.last_real_rpy_r) if len(real) >= 18 else None
+        R_real_l = pin.rpy.rpyToMatrix(*self.last_real_rpy_l) if len(real) >= 18 else None
+        e_ang_r = self._geodesic_angle(self.ref_right[3:6], R_real_r)
+        e_ang_l = self._geodesic_angle(self.ref_left[3:6], R_real_l) if self.has_ref_left else 0.0
+
+        # Angular velocity error: the reference angular velocity vs. a
+        # finite-differenced angular velocity estimated from consecutive
+        # measured rotations (w_est = log3(R_now R_prev^T) / dt) -- ee_real
+        # carries no measured angular velocity directly (only linear), so
+        # this is derived the same way analyze_trial.py differentiates EE
+        # position to get speed (its own ee_real velocity slots read ~0).
+        # Raw finite differences of a real-hardware-sourced signal are noisy
+        # (1/dt amplifies FK/encoder noise) -- EMA-smoothed same idiom as
+        # cfg.STALL_SPEED_FILTER_ALPHA elsewhere in this codebase. Only fed
+        # on ticks where a fresh difference was actually computed, so a
+        # missing-orientation or duplicate-timestamp tick can't drag the
+        # filter toward a spurious zero.
+        w_est_r = self._w_est_ema_r if self._w_est_ema_r is not None else np.zeros(3)
+        w_est_l = self._w_est_ema_l if self._w_est_ema_l is not None else np.zeros(3)
+        if R_real_r is not None and R_real_l is not None:
+            if self._prev_R_r is not None and self._prev_ang_t is not None:
+                dt_ang = t_now - self._prev_ang_t
+                if dt_ang > 1e-4:
+                    raw_w_r = pin.log3(R_real_r @ self._prev_R_r.T) / dt_ang
+                    raw_w_l = pin.log3(R_real_l @ self._prev_R_l.T) / dt_ang
+                    if self._w_est_ema_r is None:
+                        self._w_est_ema_r, self._w_est_ema_l = raw_w_r, raw_w_l
+                    else:
+                        a = _ANG_VEL_EMA_ALPHA
+                        self._w_est_ema_r = a * self._w_est_ema_r + (1.0 - a) * raw_w_r
+                        self._w_est_ema_l = a * self._w_est_ema_l + (1.0 - a) * raw_w_l
+                    w_est_r, w_est_l = self._w_est_ema_r, self._w_est_ema_l
+            self._prev_R_r, self._prev_R_l = R_real_r, R_real_l
+            self._prev_ang_t = t_now
+        e_ang_vel_r = float(np.linalg.norm(self.ref_right[9:12] - w_est_r))
+        e_ang_vel_l = (float(np.linalg.norm(self.ref_left[9:12] - w_est_l))
+                       if self.has_ref_left else 0.0)
+
+        self.time_err.append(t_now)
         self.err_pos_r.append(e_p_r)
         self.err_pos_l.append(e_p_l)
         self.err_vel_r.append(e_v_r)
         self.err_vel_l.append(e_v_l)
+        self.err_ang_r.append(e_ang_r)
+        self.err_ang_l.append(e_ang_l)
+        self.err_ang_vel_r.append(e_ang_vel_r)
+        self.err_ang_vel_l.append(e_ang_vel_l)
         self.ee_speed_r.append(float(np.linalg.norm(v_real_r)))
         self.ee_speed_l.append(float(np.linalg.norm(v_real_l)))
 
@@ -895,6 +1129,87 @@ class OfflinePlotter(Node):
         self.gov_ori_err_raw_l.append(self._geodesic_angle(raw_rpy_l, R_real_l))
         self.gov_ori_err_gov_l.append(self._geodesic_angle(gov_rpy_l, R_real_l))
 
+    # --- Haption device (haption_teleoperation) --------------------------
+    def virt_pose_callback(self, msg):
+        if not self._recording_active():
+            return
+        self.time_virt_pose.append(self._t())
+        self.virt_pose_buffer.append([
+            msg.position.x, msg.position.y, msg.position.z,
+            msg.orientation.x, msg.orientation.y, msg.orientation.z, msg.orientation.w])
+
+    def virt_vel_callback(self, msg):
+        if not self._recording_active():
+            return
+        self.time_virt_vel.append(self._t())
+        self.virt_vel_buffer.append([
+            msg.linear.x, msg.linear.y, msg.linear.z,
+            msg.angular.x, msg.angular.y, msg.angular.z])
+
+    def force_callback(self, msg):
+        if not self._recording_active():
+            return
+        self.time_force.append(self._t())
+        self.force_buffer.append([
+            msg.force.x, msg.force.y, msg.force.z,
+            msg.torque.x, msg.torque.y, msg.torque.z])
+
+    def clutch_callback(self, msg):
+        if not self._recording_active():
+            return
+        self.time_clutch.append(self._t())
+        self.clutch_buffer.append(1.0 if msg.data else 0.0)
+
+    def grasp_trigger_callback(self, msg):
+        if not self._recording_active():
+            return
+        self.time_grasp_trigger.append(self._t())
+        self.grasp_trigger_buffer.append(1.0 if msg.data else 0.0)
+
+    def deadman_callback(self, msg):
+        if not self._recording_active():
+            return
+        self.time_deadman.append(self._t())
+        self.deadman_buffer.append(1.0 if msg.data else 0.0)
+
+    def home_pose_callback(self, msg):
+        if not self._recording_active() or len(msg.data) < 7:
+            return
+        self.time_home_pose.append(self._t())
+        self.home_pose_buffer.append(list(msg.data[:7]))
+
+    # --- Shared autonomy (main_shared_autonomy.py) ------------------------
+    def blend_debug_callback(self, msg):
+        # 19 floats: [alpha, v_user(6), v_policy(6), v_blend(6)].
+        if not self._recording_active() or len(msg.data) < 19:
+            return
+        self.time_blend.append(self._t())
+        self.blend_buffer.append(list(msg.data[:19]))
+
+    def goal_prob_callback(self, msg):
+        if not self._recording_active() or not msg.data:
+            return
+        self.time_goal_prob.append(self._t())
+        self.goal_prob_buffer.append(list(msg.data))
+
+    def goal_names_callback(self, msg):
+        # Rare/near-static (only changes when the goal set itself changes) --
+        # cached outside the recording gate like last_real_pos_r, so fig11's
+        # legend always has a name even if this fired before t=0 this trial.
+        self.goal_names = msg.data
+
+    def active_arm_callback(self, msg):
+        if not self._recording_active():
+            return
+        self.time_active_arm.append(self._t())
+        self.active_arm_buffer.append(1.0 if msg.data == 'right' else 0.0)
+
+    def grasp_active_callback(self, msg):
+        if not self._recording_active():
+            return
+        self.time_grasp_active.append(self._t())
+        self.grasp_active_buffer.append(1.0 if msg.data else 0.0)
+
     # =====================================================================
     # FINALIZATION: build + save every figure, then reset for the next trial
     # =====================================================================
@@ -927,24 +1242,33 @@ class OfflinePlotter(Node):
             trial_name, reason, out_dir, trial_duration, bag_note, metrics)))
         figs.append(('fig1_joint_kinematics', self._build_fig_joint_kinematics()))
         figs.append(('fig2_qp_data', self._build_fig_qp_data()))
-        figs.append(('fig3_task_error_adaptation', self._build_fig_task_error_adaptation()))
-        figs.append(('fig4_task_authority', self._build_fig_task_authority()))
-        figs.append(('fig5_3d_trajectory', self._build_fig_3d_trajectory()))
+        figs.append(('fig3_task_tracking_error', self._build_fig_task_tracking_error()))
+        figs.append(('fig4_adaptive_parameters', self._build_fig_adaptive_parameters()))
+        figs.append(('fig5_task_authority', self._build_fig_task_authority()))
+        figs.append(('fig6_3d_trajectory', self._build_fig_3d_trajectory()))
         if cfg.ENABLE_REFERENCE_GOVERNOR:
             fig_gov = self._build_fig_reference_governor()
             if fig_gov is not None:
-                figs.append(('fig6_reference_governor', fig_gov))
+                figs.append(('fig7_reference_governor', fig_gov))
 
         # --- Head figures (main_head.py / head_active_arm_tracking.py) --
         # only emitted if the corresponding node was actually running this
         # trial (checked via whether its buffers ever received data), so a
         # trial with no head node produces no empty/blank head figures.
         if self.time_head_tel or self.head_obj["red"]["t"] or self.head_obj["blue"]["t"]:
-            figs.append(('fig7_head_perception', self._build_fig_head_perception()))
+            figs.append(('fig8_head_perception', self._build_fig_head_perception()))
         if self.time_head_js or self.time_head_qdot_measured or self.time_head_qdot_cmd:
-            figs.append(('fig8_head_kinematics', self._build_fig_head_kinematics()))
+            figs.append(('fig9_head_kinematics', self._build_fig_head_kinematics()))
         if self.time_head_active_tel:
-            figs.append(('fig9_head_active_tracking', self._build_fig_head_active_tracking()))
+            figs.append(('fig10_head_active_tracking', self._build_fig_head_active_tracking()))
+
+        # --- Haption device + shared-autonomy figures -- only emitted if the
+        # corresponding node was actually running this trial, same "skip if
+        # absent" gating as the head figures above. ---
+        if self.time_virt_pose or self.time_force:
+            figs.append(('fig11_haption_device', self._build_fig_haption_device()))
+        if self.time_blend or self.time_goal_prob or self.time_active_arm:
+            figs.append(('fig12_shared_autonomy', self._build_fig_shared_autonomy()))
 
         for name, fig in figs:
             if fig is None:
@@ -961,9 +1285,9 @@ class OfflinePlotter(Node):
         # Purely additive on top of the PDF/PNG saved above.
         if self.traj_time:
             if _HAS_PLOTLY:
-                html_path = os.path.join(out_dir, 'fig5_3d_trajectory.html')
+                html_path = os.path.join(out_dir, 'fig6_3d_trajectory.html')
                 self._save_3d_trajectory_html(html_path)
-                self.get_logger().info(f"[offline_plotter]   saved fig5_3d_trajectory.html (interactive)")
+                self.get_logger().info(f"[offline_plotter]   saved fig6_3d_trajectory.html (interactive)")
             else:
                 self.get_logger().info(
                     "[offline_plotter]   skipped interactive 3D HTML export "
@@ -1007,6 +1331,7 @@ class OfflinePlotter(Node):
             f.write("\n".join(lines) + "\n")
 
         # Reset for the next trial.
+        self.last_saved_dir = out_dir   # survives the reset below, for the GUI's "Last saved" line
         self._reset_buffers()
         self.state = self.STATE_WAITING
         self.t0 = None
@@ -1068,6 +1393,25 @@ class OfflinePlotter(Node):
             gov_arr = np.asarray(self.gov_buffer, dtype=float)
             gov_activity_frac = float(np.mean(np.linalg.norm(gov_arr, axis=1) > 1e-3))
 
+        force_arr = np.asarray(self.force_buffer, dtype=float)
+        peak_device_force = (float(np.max(np.linalg.norm(force_arr[:, 0:3], axis=1)))
+                            if force_arr.size else float('nan'))
+
+        clutch_arr = np.asarray(self.clutch_buffer, dtype=float)
+        clutch_duty_frac = float(np.mean(clutch_arr > 0.5)) if clutch_arr.size else float('nan')
+
+        control_intervals = self._control_intervals(trial_duration)
+        teleop_in_control_frac = (sum(end - start for start, end in control_intervals) / trial_duration
+                                  if control_intervals and trial_duration > 1e-9 else float('nan'))
+
+        blend_alpha_mean = float('nan')
+        if self.blend_buffer:
+            blend_alpha_mean = float(np.mean(np.asarray(self.blend_buffer, dtype=float)[:, 0]))
+
+        autonomy_grasp_frac = float('nan')
+        if self.grasp_active_buffer:
+            autonomy_grasp_frac = float(np.mean(np.asarray(self.grasp_active_buffer, dtype=float) > 0.5))
+
         def _entry(value, note):
             v = round(value, 5) if isinstance(value, float) and not np.isnan(value) else value
             return {'value': v, 'note': note}
@@ -1081,6 +1425,8 @@ class OfflinePlotter(Node):
                 'std/mean of loop_freq -- timing regularity, lower is steadier'),
             'ee_pos_tracking_rms_m': _entry(_rms(self.err_pos_r, self.err_pos_l),
                 'combined R+L Cartesian position tracking error (accuracy)'),
+            'ee_ang_tracking_rms_rad': _entry(_rms(self.err_ang_r, self.err_ang_l),
+                'combined R+L angular tracking error, geodesic SO(3) angle (accuracy)'),
             'ee_speed_ripple_rms_max_mps': _entry(ripple_max,
                 'worse-arm EE-speed ripple (same definition as freq_oscillation_diagnostic.py)'),
             'qdot_cmd_vs_measured_rms_rads': _entry(qdot_mismatch_rms,
@@ -1093,6 +1439,16 @@ class OfflinePlotter(Node):
                 'closest approach seen (NaN = nothing within DISTANCE_FILTER_THRESHOLD all trial)'),
             'governor_activity_frac': _entry(gov_activity_frac,
                 'fraction of ticks the reference governor visibly reshaped the reference'),
+            'peak_device_force_n': _entry(peak_device_force,
+                'peak Haption handle force magnitude (NaN = no teleop device this trial)'),
+            'clutch_duty_frac': _entry(clutch_duty_frac,
+                'fraction of trial spent with the clutch (right button) engaged'),
+            'teleop_in_control_frac': _entry(teleop_in_control_frac,
+                'fraction of trial with the deadman held AND clutch released (NaN = no virtuose/deadman this trial)'),
+            'blend_alpha_mean': _entry(blend_alpha_mean,
+                'mean reference-blending authority, 0=user 1=policy (NaN = ASSIST_BLENDING off/absent)'),
+            'autonomy_grasp_frac': _entry(autonomy_grasp_frac,
+                'fraction of trial spent in an autonomous (non-teleoperated) grasp'),
         }
 
     # =====================================================================
@@ -1101,6 +1457,38 @@ class OfflinePlotter(Node):
     def _max_time(self, *time_lists):
         candidates = [tl[-1] for tl in time_lists if tl]
         return max(candidates) if candidates else 1.0
+
+    def _control_intervals(self, end_t):
+        """Contiguous [start, end) windows, clipped to [0, end_t], where the
+        operator was actively driving: deadman held AND clutch released.
+        Both signals are async step functions (button/deadman edges), so
+        state at any query time is the last-known value at-or-before it.
+        Returns [] if virtuose/deadman never published this trial (older
+        haption_teleoperation build without it) -- shading nothing is more
+        honest than guessing a state we never actually observed."""
+        if not self.time_deadman:
+            return []
+
+        def _last_at(times, values, t, default):
+            idx = np.searchsorted(times, t, side='right') - 1
+            return bool(values[idx]) if idx >= 0 else default
+
+        breakpoints = sorted(set(self.time_deadman) | set(self.time_clutch) | {0.0, end_t})
+        intervals = []
+        run_start = None
+        for t in breakpoints:
+            if t > end_t:
+                break
+            in_control = (_last_at(self.time_deadman, self.deadman_buffer, t, False)
+                         and not _last_at(self.time_clutch, self.clutch_buffer, t, False))
+            if in_control and run_start is None:
+                run_start = t
+            elif not in_control and run_start is not None:
+                intervals.append((run_start, t))
+                run_start = None
+        if run_start is not None:
+            intervals.append((run_start, end_t))
+        return intervals
 
     def _build_fig_summary(self, trial_name, reason, out_dir, trial_duration, bag_note, metrics):
         """A publication-styled TEXT page (fig0_summary) rendering the same
@@ -1194,8 +1582,8 @@ class OfflinePlotter(Node):
         return fig
 
     def _build_fig_qp_data(self):
-        fig, axs = plt.subplots(6, 1, sharex=True, figsize=(8, 11))
-        fig.suptitle('QP Data -- Slacks, Shadow Prices, Loop Health')
+        fig, axs = plt.subplots(5, 1, sharex=True, figsize=(8, 10))
+        fig.suptitle('QP Data -- Slacks, Shadow Prices, Safety')
 
         # Row 0: CLF Slack -- both arms on the SAME axis (red=Right, blue=Left),
         # matching the shadow-price rows below instead of two separate axes.
@@ -1258,46 +1646,29 @@ class OfflinePlotter(Node):
         axs[4].axhline(0, color='r', linestyle='--', linewidth=1)
         axs[4].set_title('Absolute Minimum Collision Distance')
         axs[4].set_ylabel('Dist [m]')
+        axs[4].set_xlabel('Time [s]')
         axs[4].legend(loc='upper right', fontsize=8)
 
-        # Row 5 (bottom): Loop frequency -- a loop-health diagnostic, moved
-        # below the safety-relevant rows above rather than sitting in the middle.
-        if self.time_freq:
-            axs[5].plot(self.time_freq, self.freq_buffer, 'g-', label='Loop frequency')
-        axs[5].set_title('Control Loop Frequency')
-        axs[5].set_ylabel('Freq [Hz]')
-        axs[5].legend(loc='upper right')
-        axs[5].set_xlabel('Time [s]')
-
+        # Loop frequency moved to fig4_adaptive_parameters (see that method).
         max_t = self._max_time(self.time_slack, self.time_lambda_cbf, self.time_lambda_joints,
-                               self.time_freq, self.time_h, self.time_min_dist)
+                               self.time_h, self.time_min_dist)
         for ax in axs:
             ax.set_xlim(0, max_t)
             _draw_trigger_line(ax, self.t_off)
         fig.tight_layout(rect=(0, 0, 1, 0.97))
         return fig
 
-    def _build_fig_task_error_adaptation(self):
-        # Always plot all three adaptive quantities, regardless of their
-        # cfg.DYNAMIC_* flags -- same philosophy as fig4's E_rate share: a
-        # flat line at the default when a flag is off is itself useful
-        # information (confirms nothing is silently adapting), and it makes
-        # a flag-on/off A/B a straight before/after comparison of the same
-        # figure. Previously d_safe_dynamic was gated on cfg.DYNAMIC_CBF --
-        # the WRONG flag (that one controls pair removal, not the margin
-        # formula) -- so this panel had never actually appeared in any trial
-        # this project has run; d_safe_dynamic = D_SAFE_BASE + K_V_SAFE*|v| is
-        # computed unconditionally every tick (collision_manager.py).
-        dyn_plots = [
-            ('weight_slack', r'$w_{\delta}$', 'Slack Weight'),
-            ('gamma_clf', r'$\gamma_{CLF}$', 'CLF Convergence Rate'),
-            ('d_safe_dynamic', r'$d_{safe}$ [m]', 'Dynamic Safety Margin (base + velocity term)'),
-        ]
-
-        n_rows = 2 + len(dyn_plots)
-        fig, axs = plt.subplots(n_rows, 1, sharex=True, squeeze=False, figsize=(8, 3 * n_rows))
-        axs = axs.flatten()
-        fig.suptitle('Task Tracking Error and Adaptive Weighting')
+    def _build_fig_task_tracking_error(self):
+        """Cartesian + angular tracking error, position and velocity domain
+        (4 rows). Angular error uses the geodesic SO(3) angle
+        ||log3(R_ref R_real^T)|| -- the standard robotics metric for
+        orientation-tracking error (same one gov_callback's
+        _geodesic_angle already used for the reference-governor figure) --
+        and angular velocity error compares the commanded angular velocity
+        against a finite-differenced estimate of the measured one (see
+        cb_real; ee_real carries no measured angular velocity directly)."""
+        fig, axs = plt.subplots(4, 1, sharex=True, figsize=(8, 10))
+        fig.suptitle('Task Tracking Error (Position + Orientation)')
 
         if self.time_err:
             axs[0].plot(self.time_err, self.err_pos_r, 'r-', label=r'$\|e_{p,R}\|$')
@@ -1313,55 +1684,110 @@ class OfflinePlotter(Node):
         axs[1].set_ylabel('Error [m/s]')
         axs[1].legend(loc='upper right')
 
-        for idx, (key, ylabel, title) in enumerate(dyn_plots):
-            ax = axs[2 + idx]
-            ax.set_title(title)
-            ax.set_ylabel(ylabel)
-            if key == 'weight_slack' and self.time_dyn_weights:
-                data = np.array(self.dyn_weights_buffer)
-                # Both solid; differentiated by linewidth + zorder so a
-                # coincident overlap still shows a visible rim, not one hidden line.
-                ax.plot(self.time_dyn_weights, data[:, 0], color='r', linestyle='-',
-                        linewidth=2.6, zorder=2, label=r'$w_{\delta,R}$')
-                ax.plot(self.time_dyn_weights, data[:, 1], color='b', linestyle='-',
-                        linewidth=1.3, zorder=3, label=r'$w_{\delta,L}$')
-                ax.legend(loc='upper right')
-            elif key == 'gamma_clf' and self.time_dyn_weights:
-                data = np.array(self.dyn_weights_buffer)
-                # gamma_clf_r/l: per-arm, same overlap-safety convention as above.
-                ax.plot(self.time_dyn_weights, data[:, 3], color='r', linestyle='-',
-                        linewidth=2.6, zorder=2, label=r'$\gamma_{CLF,R}$')
-                ax.plot(self.time_dyn_weights, data[:, 4], color='b', linestyle='-',
-                        linewidth=1.3, zorder=3, label=r'$\gamma_{CLF,L}$')
-                # cfg.GAMMA_CLF_DEFAULT is what BOTH pin to whenever
-                # cfg.DYNAMIC_GAMMA_CLF is False -- flat lines exactly on this
-                # reference confirm the scheduler is off, not silently broken.
-                ax.axhline(cfg.GAMMA_CLF_DEFAULT, color='0.5', linestyle=':',
-                          linewidth=1, zorder=1, label=r'$\gamma_{CLF}^{default}$')
-                ax.legend(loc='upper right')
-            elif key == 'd_safe_dynamic' and self.time_d_safe:
-                data = np.array(self.d_safe_buffer)
-                # Only the TOTAL effective margin per arm + the static floor --
-                # the gap between a total curve and the floor line already IS
-                # the velocity term (d_safe_dynamic = D_SAFE_BASE + K_V_SAFE*|v|,
-                # collision_manager.py), so a separate dotted remainder line
-                # was redundant. Names chosen to read standalone in the legend.
-                ax.plot(self.time_d_safe, data[:, 0], 'r-', zorder=2,
-                       label=r'Effective Margin -- Right ($d_{safe,R}$)')
-                ax.plot(self.time_d_safe, data[:, 1], 'b-', zorder=2,
-                       label=r'Effective Margin -- Left ($d_{safe,L}$)')
-                # Drawn thicker, pure black, and at a high zorder so it is
-                # never buried under a curve that sits close to it (e.g. an
-                # idle/frozen arm's margin, which stays near d0 the whole
-                # trial) -- an explicit y-floor at 0 also keeps it clear of
-                # the bottom axis spine instead of hugging it.
-                ax.axhline(cfg.D_SAFE_BASE, color='k', linestyle='--',
-                          linewidth=1.6, zorder=5, label=r'Static Floor ($d_0$)')
-                ax.set_ylim(bottom=0)
-                ax.legend(loc='upper right', fontsize=8)
+        if self.time_err:
+            axs[2].plot(self.time_err, self.err_ang_r, 'r-', label=r'$\|e_{\theta,R}\|$')
+            axs[2].plot(self.time_err, self.err_ang_l, 'b-', label=r'$\|e_{\theta,L}\|$')
+        axs[2].set_title('Angular Tracking Error (geodesic SO(3) angle)')
+        axs[2].set_ylabel('Error [rad]')
+        axs[2].legend(loc='upper right')
 
-        axs[-1].set_xlabel('Time [s]')
-        max_t = self._max_time(self.time_err, self.time_dyn_weights, self.time_d_safe)
+        if self.time_err:
+            axs[3].plot(self.time_err, self.err_ang_vel_r, 'r-', label=r'$\|e_{\omega,R}\|$')
+            axs[3].plot(self.time_err, self.err_ang_vel_l, 'b-', label=r'$\|e_{\omega,L}\|$')
+        axs[3].set_title('Angular Velocity Tracking Error')
+        axs[3].set_ylabel('Error [rad/s]')
+        axs[3].set_xlabel('Time [s]')
+        axs[3].legend(loc='upper right')
+
+        max_t = self._max_time(self.time_err)
+        control_intervals = self._control_intervals(max_t)
+        for ax in axs:
+            ax.set_xlim(0, max_t)
+            _draw_trigger_line(ax, self.t_off)
+            _draw_control_spans(ax, control_intervals)
+        if control_intervals:
+            fig.text(0.99, 0.005, 'green = operator in control (handle held, clutch released)',
+                    ha='right', va='bottom', fontsize=7, color='#2ca02c', alpha=0.9)
+        fig.tight_layout(rect=(0, 0, 1, 0.96))
+        return fig
+
+    def _build_fig_adaptive_parameters(self):
+        # Always plot all three adaptive quantities, regardless of their
+        # cfg.DYNAMIC_* flags -- a flat line at the default when a flag is off
+        # is itself useful information (confirms nothing is silently
+        # adapting), and it makes a flag-on/off A/B a straight before/after
+        # comparison of the same figure. Previously d_safe_dynamic was gated
+        # on cfg.DYNAMIC_CBF -- the WRONG flag (that one controls pair
+        # removal, not the margin formula) -- so this panel had never
+        # actually appeared in any trial this project has run;
+        # d_safe_dynamic = D_SAFE_BASE + K_V_SAFE*|v| is computed
+        # unconditionally every tick (collision_manager.py). Loop frequency
+        # (a loop-health diagnostic, not a task-adaptive quantity) lives here
+        # rather than in fig2_qp_data purely to keep this figure's theme --
+        # "things that change the QP's behavior over the trial" -- coherent.
+        fig, axs = plt.subplots(4, 1, sharex=True, figsize=(8, 10))
+        fig.suptitle('Adaptive QP Parameters + Loop Health')
+
+        ax = axs[0]
+        ax.set_title('Slack Weight'); ax.set_ylabel(r'$w_{\delta}$')
+        if self.time_dyn_weights:
+            data = np.array(self.dyn_weights_buffer)
+            # Both solid; differentiated by linewidth + zorder so a
+            # coincident overlap still shows a visible rim, not one hidden line.
+            ax.plot(self.time_dyn_weights, data[:, 0], color='r', linestyle='-',
+                    linewidth=2.6, zorder=2, label=r'$w_{\delta,R}$')
+            ax.plot(self.time_dyn_weights, data[:, 1], color='b', linestyle='-',
+                    linewidth=1.3, zorder=3, label=r'$w_{\delta,L}$')
+            ax.legend(loc='upper right')
+
+        ax = axs[1]
+        ax.set_title('CLF Convergence Rate'); ax.set_ylabel(r'$\gamma_{CLF}$')
+        if self.time_dyn_weights:
+            data = np.array(self.dyn_weights_buffer)
+            # gamma_clf_r/l: per-arm, same overlap-safety convention as above.
+            ax.plot(self.time_dyn_weights, data[:, 3], color='r', linestyle='-',
+                    linewidth=2.6, zorder=2, label=r'$\gamma_{CLF,R}$')
+            ax.plot(self.time_dyn_weights, data[:, 4], color='b', linestyle='-',
+                    linewidth=1.3, zorder=3, label=r'$\gamma_{CLF,L}$')
+            # cfg.GAMMA_CLF_DEFAULT is what BOTH pin to whenever
+            # cfg.DYNAMIC_GAMMA_CLF is False -- flat lines exactly on this
+            # reference confirm the scheduler is off, not silently broken.
+            ax.axhline(cfg.GAMMA_CLF_DEFAULT, color='0.5', linestyle=':',
+                      linewidth=1, zorder=1, label=r'$\gamma_{CLF}^{default}$')
+            ax.legend(loc='upper right')
+
+        ax = axs[2]
+        ax.set_title('Dynamic Safety Margin (base + velocity term)')
+        ax.set_ylabel(r'$d_{safe}$ [m]')
+        if self.time_d_safe:
+            data = np.array(self.d_safe_buffer)
+            # Only the TOTAL effective margin per arm + the static floor --
+            # the gap between a total curve and the floor line already IS
+            # the velocity term (d_safe_dynamic = D_SAFE_BASE + K_V_SAFE*|v|,
+            # collision_manager.py), so a separate dotted remainder line
+            # was redundant. Names chosen to read standalone in the legend.
+            ax.plot(self.time_d_safe, data[:, 0], 'r-', zorder=2,
+                   label=r'Effective Margin -- Right ($d_{safe,R}$)')
+            ax.plot(self.time_d_safe, data[:, 1], 'b-', zorder=2,
+                   label=r'Effective Margin -- Left ($d_{safe,L}$)')
+            # Drawn thicker, pure black, and at a high zorder so it is
+            # never buried under a curve that sits close to it (e.g. an
+            # idle/frozen arm's margin, which stays near d0 the whole
+            # trial) -- an explicit y-floor at 0 also keeps it clear of
+            # the bottom axis spine instead of hugging it.
+            ax.axhline(cfg.D_SAFE_BASE, color='k', linestyle='--',
+                      linewidth=1.6, zorder=5, label=r'Static Floor ($d_0$)')
+            ax.set_ylim(bottom=0)
+            ax.legend(loc='upper right', fontsize=8)
+
+        ax = axs[3]
+        ax.set_title('Control Loop Frequency'); ax.set_ylabel('Freq [Hz]')
+        ax.set_xlabel('Time [s]')
+        if self.time_freq:
+            ax.plot(self.time_freq, self.freq_buffer, 'g-', label='Loop frequency')
+        ax.legend(loc='upper right')
+
+        max_t = self._max_time(self.time_dyn_weights, self.time_d_safe, self.time_freq)
         for ax in axs:
             ax.set_xlim(0, max_t)
             _draw_trigger_line(ax, self.t_off)
@@ -1797,35 +2223,342 @@ class OfflinePlotter(Node):
         fig.tight_layout(rect=(0, 0, 1, 0.94))
         return fig
 
+    def _build_fig_haption_device(self):
+        """Haption handle telemetry during teleoperation: position, speed,
+        clutch/grasp-trigger buttons, and the commanded force/torque wrench --
+        the device-side counterpart of fig1..6 (robot side), same signals
+        analyze_trial.py's Haption dashboard shows for a recorded study bag."""
+        fig, axs = plt.subplots(5, 1, sharex=True, figsize=(9, 15))
+        fig.suptitle('Haption Device -- Teleoperation Telemetry')
+
+        ax = axs[0]
+        ax.set_title('Handle Position (Haption base frame)')
+        ax.set_ylabel('Position [m]')
+        if self.virt_pose_buffer:
+            P = np.array(self.virt_pose_buffer)
+            for i, lab in enumerate(('x', 'y', 'z')):
+                ax.plot(self.time_virt_pose, P[:, i], linewidth=1.2, label=lab)
+            ax.legend(loc='upper right', fontsize=8, ncol=3)
+
+        ax = axs[1]
+        ax.set_title('Handle Speed')
+        ax.set_ylabel('Speed')
+        if self.virt_vel_buffer:
+            V = np.array(self.virt_vel_buffer)
+            lin = np.linalg.norm(V[:, 0:3], axis=1)
+            ang = np.linalg.norm(V[:, 3:6], axis=1)
+            ax.plot(self.time_virt_vel, lin, color='#1f77b4', linewidth=1.2, label='|v| lin [m/s]')
+            ax.plot(self.time_virt_vel, ang, color='#ff7f0e', linewidth=1.2, label='|ω| ang [rad/s]')
+            ax.legend(loc='upper right', fontsize=8)
+
+        ax = axs[2]
+        ax.set_title('Buttons / Deadman')
+        ax.set_ylabel('Pressed / Held'); ax.set_ylim(-0.1, 1.1); ax.set_yticks([0, 1])
+        if self.clutch_buffer:
+            ax.step(self.time_clutch, self.clutch_buffer, where='post',
+                   color='#add8e6', linewidth=1.4, label='clutch (right btn)')
+        if self.grasp_trigger_buffer:
+            ax.step(self.time_grasp_trigger, self.grasp_trigger_buffer, where='post',
+                   color='#8c564b', linewidth=1.2, label='grasp trigger (left btn)')
+        if self.deadman_buffer:
+            ax.step(self.time_deadman, self.deadman_buffer, where='post',
+                   color='#2ca02c', linewidth=1.6, label='deadman (handle held)')
+        ax.legend(loc='upper right', fontsize=8, ncol=3)
+
+        # Hardcoded device wrench safety clips (the force managers' final
+        # MAX_FORCE/MAX_TORQUE clip -- matches analyze_trial.py's constants).
+        ax = axs[3]
+        ax.set_title('Device Force on the Handle (virtuose/force_cmd)')
+        ax.set_ylabel('Force [N]')
+        if self.force_buffer:
+            F = np.array(self.force_buffer)
+            for i, lab in enumerate(('Fx', 'Fy', 'Fz')):
+                ax.plot(self.time_force, F[:, i], linewidth=1.2, label=lab)
+            ax.axhline(10.0, color='0.2', linestyle='--', linewidth=1.0, alpha=0.7, label='±10 N limit')
+            ax.axhline(-10.0, color='0.2', linestyle='--', linewidth=1.0, alpha=0.7)
+            ax.legend(loc='upper right', fontsize=7, ncol=4)
+
+        ax = axs[4]
+        ax.set_title('Device Torque on the Handle (virtuose/force_cmd)')
+        ax.set_ylabel('Torque [Nm]'); ax.set_xlabel('Time [s]')
+        if self.force_buffer:
+            F = np.array(self.force_buffer)
+            for i, lab in enumerate(('Tx', 'Ty', 'Tz')):
+                ax.plot(self.time_force, F[:, 3 + i], linewidth=1.2, label=lab)
+            ax.axhline(1.0, color='0.2', linestyle='--', linewidth=1.0, alpha=0.7, label='±1 Nm limit')
+            ax.axhline(-1.0, color='0.2', linestyle='--', linewidth=1.0, alpha=0.7)
+            ax.legend(loc='upper right', fontsize=7, ncol=4)
+
+        max_t = self._max_time(self.time_virt_pose, self.time_virt_vel, self.time_clutch,
+                               self.time_grasp_trigger, self.time_force, self.time_deadman)
+        control_intervals = self._control_intervals(max_t)
+        for ax in axs:
+            ax.set_xlim(0, max_t)
+            _draw_trigger_line(ax, self.t_off)
+            _draw_control_spans(ax, control_intervals)
+        if control_intervals:
+            fig.text(0.99, 0.005, 'green = operator in control (handle held, clutch released)',
+                    ha='right', va='bottom', fontsize=7, color='#2ca02c', alpha=0.9)
+        fig.tight_layout(rect=(0, 0, 1, 0.97))
+        return fig
+
+    def _build_fig_shared_autonomy(self):
+        """main_shared_autonomy.py's belief/blend telemetry: reference-blending
+        authority alpha, the resulting user/policy action share, per-goal
+        belief probabilities, and active-arm/autonomous-grasp state over time."""
+        fig, axs = plt.subplots(4, 1, sharex=True, figsize=(9, 12))
+        fig.suptitle('Shared Autonomy -- Belief / Blend Telemetry')
+
+        blend = np.array(self.blend_buffer) if self.blend_buffer else None
+
+        ax = axs[0]
+        ax.set_title('Blending Authority (0 = user, 1 = policy)')
+        ax.set_ylabel(r'$\alpha$'); ax.set_ylim(-0.05, 1.05)
+        if blend is not None:
+            ax.plot(self.time_blend, blend[:, 0], color='#ff7f0e', linewidth=1.3)
+            ax.axhline(0.5, color='0.5', linestyle=':', linewidth=0.9)
+
+        ax = axs[1]
+        ax.set_title(r'Blended-Action Share:  $(1-\alpha)\Vert v_{user}\Vert$  vs  '
+                    r'$\alpha\Vert v_{policy}\Vert$')
+        ax.set_ylabel('Share [%]'); ax.set_ylim(-5, 105)
+        if blend is not None:
+            alpha = blend[:, 0]
+            v_user = blend[:, 1:7]
+            v_policy = blend[:, 7:13]
+            u = (1.0 - alpha) * np.linalg.norm(v_user, axis=1)
+            p = alpha * np.linalg.norm(v_policy, axis=1)
+            tot = u + p
+            good = tot > 1e-9
+            u_pct = np.full_like(alpha, np.nan)
+            p_pct = np.full_like(alpha, np.nan)
+            u_pct[good] = 100.0 * u[good] / tot[good]
+            p_pct[good] = 100.0 * p[good] / tot[good]
+            ax.plot(self.time_blend, u_pct, color='#1f77b4', linewidth=1.3, label='user %')
+            ax.plot(self.time_blend, p_pct, color='#ff7f0e', linewidth=1.3, label='policy %')
+            ax.legend(loc='upper right', fontsize=8, ncol=2)
+
+        ax = axs[2]
+        ax.set_title('Goal Belief Probabilities')
+        ax.set_ylabel('P(goal)'); ax.set_ylim(-0.05, 1.05)
+        if self.goal_prob_buffer:
+            P = np.array(self.goal_prob_buffer)
+            names = self.goal_names.split(',') if self.goal_names else []
+            for i in range(P.shape[1]):
+                lab = names[i] if i < len(names) else f'g{i}'
+                ax.plot(self.time_goal_prob, P[:, i], linewidth=1.2, label=lab)
+            ax.legend(loc='upper right', fontsize=7, ncol=min(P.shape[1], 4))
+
+        ax = axs[3]
+        ax.set_title('Active Arm / Autonomous Grasp State')
+        ax.set_ylabel('State'); ax.set_xlabel('Time [s]'); ax.set_ylim(-0.1, 1.1)
+        if self.active_arm_buffer:
+            ax.step(self.time_active_arm, self.active_arm_buffer, where='post',
+                   color='purple', linewidth=1.3, label='active arm (1=R, 0=L)')
+        if self.grasp_active_buffer:
+            ax.step(self.time_grasp_active, self.grasp_active_buffer, where='post',
+                   color='teal', linewidth=1.3, linestyle='--', label='autonomous grasp')
+        ax.legend(loc='upper right', fontsize=8, ncol=2)
+
+        max_t = self._max_time(self.time_blend, self.time_goal_prob,
+                               self.time_active_arm, self.time_grasp_active)
+        control_intervals = self._control_intervals(max_t)
+        for ax in axs:
+            ax.set_xlim(0, max_t)
+            _draw_trigger_line(ax, self.t_off)
+            _draw_control_spans(ax, control_intervals)
+        if control_intervals:
+            fig.text(0.99, 0.005, 'green = operator in control (handle held, clutch released)',
+                    ha='right', va='bottom', fontsize=7, color='#2ca02c', alpha=0.9)
+        fig.tight_layout(rect=(0, 0, 1, 0.96))
+        return fig
+
+
+class _RecorderGUI:
+    """Thin Start/Stop front-end (Tkinter, same idiom as study_recorder.py)
+    for OfflinePlotter. Manual clicks and trajectory_generator.py's automatic
+    phase-based triggering are just two publishers of the SAME
+    cfg.OFFLINE_RECORD_TRIGGER_TOPIC -- this class contains no recording
+    logic of its own, only a thin view over the node's existing state
+    machine (see record_trigger_callback)."""
+
+    def __init__(self, root: "tk.Tk", node: OfflinePlotter):
+        self.root = root
+        self.node = node
+
+        root.title("Offline Plotter -- Trial Recorder")
+        root.protocol("WM_DELETE_WINDOW", self._on_close)
+        root.resizable(False, False)
+
+        pad = {"padx": 10, "pady": 6}
+        frm = ttk.Frame(root, padding=14)
+        frm.grid(row=0, column=0, sticky="nsew")
+
+        self.var_status = tk.StringVar(value="Idle.")
+        ttk.Label(frm, textvariable=self.var_status,
+                 font=("TkDefaultFont", 10, "bold")).grid(
+            row=0, column=0, columnspan=2, sticky="w", **pad)
+
+        self.btn_start = ttk.Button(frm, text="●  START", command=self.on_start)
+        self.btn_start.grid(row=1, column=0, **pad)
+        self.btn_stop = ttk.Button(frm, text="■  STOP", command=self.on_stop)
+        self.btn_stop.grid(row=1, column=1, **pad)
+
+        ttk.Label(frm, text="Auto-triggered too (e.g. trajectory_generator.py) -- "
+                            "whichever fires first drives the recording.",
+                 foreground="#666", wraplength=280).grid(
+            row=2, column=0, columnspan=2, sticky="w", **pad)
+
+        self.var_last = tk.StringVar(value="")
+        ttk.Label(frm, textvariable=self.var_last,
+                 foreground="#666", wraplength=280).grid(
+            row=3, column=0, columnspan=2, sticky="w", **pad)
+
+        self._tick()
+
+    def on_start(self):
+        self.node.pub_manual_trigger.publish(Bool(data=True))
+
+    def on_stop(self):
+        self.node.pub_manual_trigger.publish(Bool(data=False))
+
+    def _tick(self):
+        # A timer already queued via root.after() can still fire once after
+        # the window is torn down (e.g. Ctrl-C destroys root directly,
+        # bypassing _on_close) -- bail out rather than touch dead widgets.
+        try:
+            node = self.node
+            state = node.state
+            if state == node.STATE_RECORDING:
+                elapsed = node._now() - node.t0
+                name = os.path.basename(node.out_dir or "")
+                self.var_status.set(f"● REC  {elapsed:6.1f}s   -> {name}")
+                self.btn_start.configure(state="disabled")
+                self.btn_stop.configure(state="normal")
+            elif state == node.STATE_POST_ROLL:
+                remaining = max(0.0, (node.post_roll_deadline or node._now()) - node._now())
+                name = os.path.basename(node.out_dir or "")
+                self.var_status.set(
+                    f"○ settling ({remaining:0.1f}s left)   -> {name}   "
+                    "(press START to extend)")
+                self.btn_start.configure(state="normal")
+                self.btn_stop.configure(state="disabled")
+            else:
+                self.var_status.set("Idle -- press START, or wait for an auto-trigger.")
+                self.btn_start.configure(state="normal")
+                self.btn_stop.configure(state="disabled")
+
+            if node.last_saved_dir:
+                self.var_last.set(f"Last saved: {node.last_saved_dir}")
+
+            self.root.after(300, self._tick)
+        except tk.TclError:
+            pass
+
+    def _on_close(self):
+        if self.node.state != self.node.STATE_WAITING:
+            if not messagebox.askyesno(
+                    "Recording in progress",
+                    "A trial is still recording/settling. Quit and save what's "
+                    "been recorded so far?"):
+                return
+        self.root.destroy()
+
+
+def _clock_is_actually_ticking(node, timeout_s=1.0):
+    """`/clock` appearing in the ROS graph only means SOMETHING somewhere
+    advertises it -- a stale/leftover sim process elsewhere on the same ROS
+    domain (real-hardware sessions run over a shared network) can do that
+    without ever publishing, which silently freezes every recorded timestamp
+    to ~0. Require an ACTUAL received message before trusting it."""
+    received = []
+    sub = node.create_subscription(Clock, '/clock', lambda msg: received.append(msg), 10)
+    start = time.time()
+    while not received and (time.time() - start) < timeout_s:
+        rclpy.spin_once(node, timeout_sec=0.1)
+    node.destroy_subscription(sub)
+    return bool(received)
+
 
 def main(args=None):
     _apply_publication_style()
     rclpy.init(args=args)
     node = OfflinePlotter()
 
-    # Auto-detect sim vs. real hardware for the ROS clock, same convention
-    # as plotter.py -- otherwise the time axis freezes at 0 on real hardware
-    # (no /clock topic) or drifts out of sync with the simulated world.
+    # Sim-vs-real clock source. 'auto' (default) detects it; pass
+    # -p sim_time_mode:=false to force wall-clock on real hardware regardless
+    # of what else is on the ROS graph (see _clock_is_actually_ticking).
+    node.declare_parameter('sim_time_mode', 'auto')
+    mode = node.get_parameter('sim_time_mode').get_parameter_value().string_value or 'auto'
     topic_names = [name for name, _ in node.get_topic_names_and_types()]
-    use_sim = '/clock' in topic_names
+    if mode == 'true':
+        use_sim = True
+    elif mode == 'false':
+        use_sim = False
+    else:
+        use_sim = '/clock' in topic_names and _clock_is_actually_ticking(node)
+        if '/clock' in topic_names and not use_sim:
+            node.get_logger().warn(
+                "[offline_plotter] '/clock' is advertised on the ROS graph but never "
+                "published a message in 1s -- treating it as a stale/unrelated source "
+                "and staying on wall-clock time. Override with -p sim_time_mode:=true "
+                "if this IS your real clock source.")
     node.set_parameters([
         rclpy.parameter.Parameter('use_sim_time', rclpy.Parameter.Type.BOOL, use_sim)
     ])
     node.get_logger().info(
         f"[ENV] use_sim_time={'TRUE (sim)' if use_sim else 'FALSE (real hardware)'}")
 
-    try:
-        rclpy.spin(node)
-    except KeyboardInterrupt:
-        print("\n[offline_plotter] Ctrl-C received -- saving whatever was recorded so far...",
-              flush=True)
-        if node.t0 is not None:
-            node._finalize_and_save(reason='keyboard_interrupt')
-        else:
-            print("[offline_plotter] No trial was in progress -- nothing to save.", flush=True)
-    finally:
-        node.destroy_node()
-        rclpy.shutdown()
+    if tk is None:
+        print(f"[offline_plotter] Tkinter unavailable ({_TK_IMPORT_ERROR}) -- running "
+              "headless, auto-trigger only (no Start/Stop GUI). Install with: "
+              "sudo apt install python3-tk", flush=True)
+        try:
+            rclpy.spin(node)
+        except KeyboardInterrupt:
+            print("\n[offline_plotter] Ctrl-C received -- saving whatever was recorded so far...",
+                  flush=True)
+            if node.t0 is not None:
+                node._finalize_and_save(reason='keyboard_interrupt')
+            else:
+                print("[offline_plotter] No trial was in progress -- nothing to save.", flush=True)
+        finally:
+            node.destroy_node()
+            rclpy.shutdown()
+        return
+
+    # GUI path: Tkinter needs the main thread's event loop, so ROS callbacks
+    # (the auto-trigger from trajectory_generator.py included) run on a
+    # background thread via the same spin_once-loop pattern already used by
+    # every real-time entrypoint in this repo (see main_qp_controller.py) --
+    # a single thread calling spin_once, never spin() and spin_once() at once.
+    stop_spin = threading.Event()
+
+    def _spin_loop():
+        while rclpy.ok() and not stop_spin.is_set():
+            rclpy.spin_once(node, timeout_sec=0.1)
+
+    spin_thread = threading.Thread(target=_spin_loop, daemon=True)
+    spin_thread.start()
+
+    root = tk.Tk()
+    _RecorderGUI(root, node)
+
+    # Ctrl-C in the terminal should still work like every other entrypoint in
+    # this repo -- break Tk's mainloop instead of being silently swallowed by it.
+    signal.signal(signal.SIGINT, lambda signum, frame: root.destroy())
+
+    root.mainloop()
+
+    print("\n[offline_plotter] GUI closed -- saving whatever was recorded so far...", flush=True)
+    stop_spin.set()
+    spin_thread.join(timeout=2.0)   # ROS context still alive here -- logger/finalize below are safe
+    if node.t0 is not None:
+        node._finalize_and_save(reason='gui_closed')
+    else:
+        print("[offline_plotter] No trial was in progress -- nothing to save.", flush=True)
+    node.destroy_node()
+    rclpy.shutdown()
 
 
 if __name__ == '__main__':

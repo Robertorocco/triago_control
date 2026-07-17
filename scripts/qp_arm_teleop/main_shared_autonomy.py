@@ -119,8 +119,22 @@ class SharedControlNode(Node):
         #   ros2 run triago_control main_shared_autonomy.py --ros-args \
         #        -p world_name:=no_obstacle
         self.declare_parameter('world_name', 'no_obstacle')
-        world_name = self.get_parameter('world_name').get_parameter_value().string_value
-        self.world_scene = load_world(world_name)
+        # world_source: 'yaml' (default, load_world by name) or 'perceived' (block
+        # for the head camera's latched snapshot, same as main_qp_controller_
+        # perceived.py). 'perceived' makes the goals track the real cylinders.
+        #   ros2 run triago_control main_shared_autonomy.py --ros-args \
+        #        -p world_source:=perceived
+        self.declare_parameter('world_source', 'yaml')
+        world_source = self.get_parameter('world_source').get_parameter_value().string_value
+        if world_source == 'perceived':
+            from triago_control.qp_controller.perceived_world_builder import wait_for_scene
+            self.get_logger().info(
+                "\033[96m[World] Perceived mode: waiting for the head camera's "
+                "latched world snapshot (press ENTER in main_head to load it)...\033[0m")
+            self.world_scene = wait_for_scene(self)
+        else:
+            world_name = self.get_parameter('world_name').get_parameter_value().string_value
+            self.world_scene = load_world(world_name)
         self.get_logger().info(
             f"\033[96m[World] Loaded scene '{self.world_scene.world_name}' for "
             f"shared autonomy (grasp_roles={self.world_scene.grasp_roles}).\033[0m")
@@ -154,15 +168,23 @@ class SharedControlNode(Node):
         self._ee_twist = np.zeros(6)
         self._prev_T_EE = None
 
-        self.POLICY_BELIEF_TEST = False   # <-- flip this to switch modes
+        # policy_belief_test (was a hardcoded flag -- now a ROS param so it can
+        # be enabled from the launch line without editing/rebuilding, since it
+        # makes the arm drive itself):
+        #   ros2 run triago_control main_shared_autonomy.py --ros-args \
+        #        -p policy_belief_test:=true -p test_goal:=Blue_Side
         # When True:  the node injects pi_stars[test_goal_key] as the fake human
         #             velocity instead of reading from the Haption topic, and
         #             commands the robot directly via /arm_right/cartesian_reference.
         # When False: normal operation (Haption + assistive_reference topic).
+        self.declare_parameter('policy_belief_test', False)
+        self.POLICY_BELIEF_TEST = self.get_parameter('policy_belief_test').value
 
-        # test_goal_key's actual starting value is set further below, once
-        # self.target_keys is known (see the world-scene-aware default there)
-        # -- it must be a key that this world's GoalSet actually offers.
+        # test_goal: which goal key to drive toward in policy_belief_test mode.
+        # '' (default) falls back to the world-scene-aware default resolved
+        # below, once self.target_keys is known -- it must be a key this
+        # world's GoalSet actually offers.
+        self.declare_parameter('test_goal', '')
         self.test_goal_key = None
         self._test_goal_lock = threading.Lock()
 
@@ -176,8 +198,13 @@ class SharedControlNode(Node):
         self.freq_window_s = 10.0
         self._control_ticks = 0
         self._control_last_print = time.time()
-        self.last_collision_time = 0.0
-        self.max_data_age = 0.05
+        # Staleness measured in THIS node's own timer_callback ticks (not wall
+        # time): incremented every tick, reset to 0 whenever a fresh
+        # /collision_constraints message lands. Robust to the publisher's own
+        # rate (e.g. main_qp_controller_perceived.py on real hardware can run
+        # slower than this node's 100 Hz) without hand-tuning a time constant.
+        self._ticks_since_collision = 0
+        self.max_stale_ticks = 3
 
         # --- Visualization rate decoupling ---
         # The control loop runs at 100 Hz. Publish markers at EVERY tick (no
@@ -213,8 +240,27 @@ class SharedControlNode(Node):
         _preferred_default_goal = 'Red_Side'
         _default_goal = (_preferred_default_goal if _preferred_default_goal in self.target_keys
                          else self.target_keys[0])
+
+        # test_goal param overrides the default IF it names a key this world
+        # actually offers; otherwise fall back + tell the operator what's valid
+        # (this only matters in policy_belief_test mode, but resolve it
+        # unconditionally so switching modes later doesn't need a restart).
+        _requested_goal = self.get_parameter('test_goal').get_parameter_value().string_value
+        if _requested_goal:
+            if _requested_goal in self.target_keys:
+                _default_goal = _requested_goal
+            else:
+                self.get_logger().error(
+                    f"[INIT] test_goal:='{_requested_goal}' is not offered by this world. "
+                    f"Available goal keys: {self.target_keys}. Falling back to '{_default_goal}'.")
+
         self.active_goal_key = _default_goal
         self.test_goal_key = _default_goal   # keep POLICY_BELIEF_TEST's console default in sync
+        if self.POLICY_BELIEF_TEST:
+            self.get_logger().info(
+                f"\033[93m[TEST MODE] policy_belief_test=True -- driving toward "
+                f"'{self.test_goal_key}' autonomously. Available goal keys: "
+                f"{self.target_keys}\033[0m")
 
         # --- Intent Inference (delegated to BeliefEstimator) ---
         # Weighting matrix (penalizes translation heavily, respects rotation)
@@ -312,6 +358,16 @@ class SharedControlNode(Node):
         # --- Grasping Interaction Topics & State ---
         self.pub_gripper_cmd = self.create_publisher(String, '/shared_autonomy/gripper_cmd', 10)
 
+        # real_hardware: on the real robot there is no Gazebo, so the LinkAttacher
+        # kinematic-weld plugin is not just unavailable but MEANINGLESS -- the
+        # real gripper physically closes on the cylinder (driven by
+        # /shared_autonomy/gripper_cmd) and needs no simulated weld. Without this
+        # flag, attach_cli.wait_for_service(timeout_sec=1.0) would block this
+        # node's control-loop thread for a full second on EVERY completed grasp,
+        # forever, since /ATTACHLINK will never come up on real hardware.
+        self.declare_parameter('real_hardware', False)
+        self.real_hardware = self.get_parameter('real_hardware').value
+
         # --- Gazebo Link Attacher plugin (kinematic grasp in simulation) ---
         # Robot model name in Gazebo + per-arm gripper grasping links.
         # Overridable at runtime: --ros-args -p robot_model_name:=tiago_dual
@@ -341,7 +397,11 @@ class SharedControlNode(Node):
         self.plugin_attached = {}  # {arm: (model2_name, link2_name)}
         self.attach_cli = None
         self.detach_cli = None
-        if _HAS_LINKATTACHER:
+        if self.real_hardware:
+            self.get_logger().info(
+                "[INIT] real_hardware=True -- LinkAttacher plugin grasp disabled "
+                "(the real gripper closes via /shared_autonomy/gripper_cmd instead).")
+        elif _HAS_LINKATTACHER:
             self.attach_cli = self.create_client(AttachLink, '/ATTACHLINK')
             self.detach_cli = self.create_client(DetachLink, '/DETACHLINK')
             self.get_logger().info(
@@ -441,6 +501,20 @@ class SharedControlNode(Node):
         # can follow the arm switch (they need to know which /arm_*/cartesian_reference
         # to publish/subscribe and which EE slice to read from /qp_debug/ee_real).
         self.pub_active_arm = self.create_publisher(String, '/shared_autonomy/active_arm', 10)
+
+        # Test-mode auto arm-selection: the perceived world's fixed side
+        # convention is red=RIGHT, blue=LEFT (main_head.py), so the goal's own
+        # colour tells us which hand should drive -- no manual arm switch
+        # needed before starting a policy_belief_test run. Placed after
+        # pub_active_arm/plot_manager exist since _switch_active_arm uses both.
+        if self.POLICY_BELIEF_TEST:
+            if self.test_goal_key.startswith('Red'):
+                self._switch_active_arm('right')
+            elif self.test_goal_key.startswith('Blue'):
+                self._switch_active_arm('left')
+            self.get_logger().info(
+                f"\033[93m[TEST MODE] Auto-selected active_arm='{self.active_arm}' "
+                f"for goal '{self.test_goal_key}'.\033[0m")
 
         # Active goal pose + confidence for the haptic position virtual fixture.
         # [x, y, z, roll, pitch, yaw, confidence] in base_footprint.
@@ -1030,7 +1104,7 @@ class SharedControlNode(Node):
         compatible extensions still work.
         """
         if len(msg.data) >= 14:
-            self.last_collision_time = time.time()
+            self._ticks_since_collision = 0
             if self.active_arm == 'right':
                 self.h_c = np.array([msg.data[0]])
                 self.J_c = np.array(msg.data[2:8]).reshape(1, 6)
@@ -1040,6 +1114,7 @@ class SharedControlNode(Node):
 
     def timer_callback(self):
         """Main loop: evaluates optimal policies, updates belief, and integrates output."""
+        self._ticks_since_collision += 1
 
         # --- Frequency Monitoring (Control Loop) ---
         self._control_ticks += 1
@@ -1067,7 +1142,7 @@ class SharedControlNode(Node):
                 # No collision data has EVER arrived yet — nothing to draw/solve.
                 return
             # Bug fix (green gripper marker disappearing): the old code did a hard
-            # `return` here whenever the collision data was older than max_data_age,
+            # `return` here whenever the collision data was older than max_stale_ticks,
             # which halted the WHOLE callback — including marker publishing. With
             # the 500 ms marker lifetime, any jitter in the QP's /collision_constraints
             # rate then blinked the green policy gripper out of RViz. In teleop
@@ -1076,7 +1151,7 @@ class SharedControlNode(Node):
             # staleness is folded into `valid_matrices` below, so the policy QP is
             # skipped (policies -> 0, a safe halt that also stops the test-mode
             # command), but visualization keeps publishing and stays alive.
-            if (time.time() - self.last_collision_time) > self.max_data_age:
+            if self._ticks_since_collision > self.max_stale_ticks:
                 self.get_logger().warn(
                     "Collision data stale — skipping policy solve (viz kept alive).",
                     throttle_duration_sec=1.0)
@@ -1108,7 +1183,7 @@ class SharedControlNode(Node):
         # valid_matrices now also requires the collision data to be FRESH: stale
         # data -> policies solved to zero (safe halt) but visualization continues.
         valid_matrices = (self.J_c is not None and self.h_c is not None
-                          and (time.time() - self.last_collision_time) <= self.max_data_age)
+                          and self._ticks_since_collision <= self.max_stale_ticks)
         excluded = self.belief_estimator.get_excluded_goals()
 
         if in_free_space and valid_matrices:
@@ -1659,6 +1734,23 @@ class SharedControlNode(Node):
                 if self.POLICY_BELIEF_TEST:
                     _MIN_LEAD_LIN = 0.005       # [m] minimum linear carrot lead
                     _DT_VIRTUAL_MAX = 0.5       # [s] cap as twist -> 0
+                    # Real hardware only: stretch much further once the ACTUAL
+                    # position/orientation error (not just twist magnitude --
+                    # solve_local_policy's CBF shaping can shrink the twist for
+                    # other reasons too, e.g. proximity to the cylinder/table)
+                    # is already small. This is the same "integrate for a
+                    # bigger dt" mechanism above, just under-powered on real
+                    # hardware where the gripper was observed to stall short
+                    # of the goal instead of finishing the approach.
+                    if self.real_hardware:
+                        err_pos = float(np.linalg.norm(
+                            T_active_goal[:3, 3] - self.current_T_EE[:3, 3]))
+                        R_err = T_active_goal[:3, :3] @ self.current_T_EE[:3, :3].T
+                        err_ang = float(np.linalg.norm(R.from_matrix(R_err).as_rotvec()))
+                        if (err_pos < cfg.POLICY_NEAR_GOAL_POS_M
+                                or err_ang < cfg.POLICY_NEAR_GOAL_ANG_RAD):
+                            _MIN_LEAD_LIN = cfg.POLICY_NEAR_GOAL_MIN_LEAD_M
+                            _DT_VIRTUAL_MAX = cfg.POLICY_NEAR_GOAL_DT_MAX_S
                     lin_speed = float(np.linalg.norm(target_twist[:3]))
                     if lin_speed > 1e-6:
                         dt_needed_lin = _MIN_LEAD_LIN / lin_speed

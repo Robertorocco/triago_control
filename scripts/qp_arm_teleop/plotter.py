@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import sys
+import traceback
 from std_msgs.msg import Float64MultiArray, Float64, String
 import rclpy
 from rclpy.node import Node
@@ -128,85 +130,137 @@ class TriagoDashboard(Node):
             history=HistoryPolicy.KEEP_LAST,
             depth=10
         )
-        
+
+        # Per-topic raw message-arrival counters, independent of any
+        # downstream processing/guards in the real callback (e.g. cb_real's
+        # has_ref_right early-return) -- powers _check_subscriber_health, the
+        # decisive "did DDS actually deliver anything" report. See _counted().
+        self._msg_counts = {}
+
         # [ADD] Slack Subscriber
-        self.create_subscription(Float64MultiArray, '/qp_debug/slacks', self.slack_callback, qos_profile)
+        self.create_subscription(Float64MultiArray, '/qp_debug/slacks', self._counted('/qp_debug/slacks', self.slack_callback), qos_profile)
         
         # 1. Cartesian References from Shared Autonomy Node
         self.ref_right = np.zeros(13)
         self.ref_left = np.zeros(13)
         self.has_ref_right = False
         self.has_ref_left = False
-        self.create_subscription(Float64MultiArray, '/arm_right/cartesian_reference', self.cb_ref_right, qos_profile)
-        self.create_subscription(Float64MultiArray, '/arm_left/cartesian_reference', self.cb_ref_left, qos_profile)
-        
+        self.create_subscription(Float64MultiArray, '/arm_right/cartesian_reference', self._counted('/arm_right/cartesian_reference', self.cb_ref_right), qos_profile)
+        self.create_subscription(Float64MultiArray, '/arm_left/cartesian_reference', self._counted('/arm_left/cartesian_reference', self.cb_ref_left), qos_profile)
+
         # 2. Real State from QP Controller Subscriber
-        self.create_subscription(Float64MultiArray, '/qp_debug/ee_real', self.cb_real, qos_profile)
+        self.create_subscription(Float64MultiArray, '/qp_debug/ee_real', self._counted('/qp_debug/ee_real', self.cb_real), qos_profile)
 
         # [ADD] Minimum Distance Subscriber
-        self.create_subscription(Float64, '/qp_debug/min_distance', self.min_dist_callback, qos_profile)
-        
+        self.create_subscription(Float64, '/qp_debug/min_distance', self._counted('/qp_debug/min_distance', self.min_dist_callback), qos_profile)
+
         # [ADD] Performance and Safety Subscribers
-        self.create_subscription(Float64, '/qp_debug/loop_freq', self.freq_callback, qos_profile)
-        self.create_subscription(Float64MultiArray, '/qp_debug/safety_margin', self.h_callback, qos_profile)
+        self.create_subscription(Float64, '/qp_debug/loop_freq', self._counted('/qp_debug/loop_freq', self.freq_callback), qos_profile)
+        self.create_subscription(Float64MultiArray, '/qp_debug/safety_margin', self._counted('/qp_debug/safety_margin', self.h_callback), qos_profile)
 
         # [ADD] Adaptive Controller Subscribers
-        self.create_subscription(Float64MultiArray, '/qp_debug/dynamic_weights', self.dyn_weights_callback, qos_profile)
-        self.create_subscription(Float64, '/trajectory/time_scale', self.time_scale_callback, qos_profile)
+        self.create_subscription(Float64MultiArray, '/qp_debug/dynamic_weights', self._counted('/qp_debug/dynamic_weights', self.dyn_weights_callback), qos_profile)
+        self.create_subscription(Float64, '/trajectory/time_scale', self._counted('/trajectory/time_scale', self.time_scale_callback), qos_profile)
 
         # [d_safe_R, d_safe_L]
         self.d_safe_buffer = deque(maxlen=self.history_len)
         self.d_safe_time = deque(maxlen=self.history_len)
-        self.create_subscription(Float64MultiArray, '/qp_debug/d_safe_dynamic', self.d_safe_callback, qos_profile)
+        self.create_subscription(Float64MultiArray, '/qp_debug/d_safe_dynamic', self._counted('/qp_debug/d_safe_dynamic', self.d_safe_callback), qos_profile)
 
         # --- Top-3 enabled collision pairs (debug) ---
         self.top_pairs_time = deque(maxlen=self.history_len)
         self.top_pairs_dist = [deque(maxlen=self.history_len) for _ in range(3)]
         self.top_pairs_names = ["", "", ""]
-        self.create_subscription(String, '/qp_debug/top_pairs', self.top_pairs_callback, qos_profile)
+        self.create_subscription(String, '/qp_debug/top_pairs', self._counted('/qp_debug/top_pairs', self.top_pairs_callback), qos_profile)
 
         # --- NEW: TRACKING ERROR SUBSCRIBERS ---
         self.sub_qdot_err = self.create_subscription(
-            Float64MultiArray, '/qp_debug/qdot_err', self.qdot_err_callback, 10)
+            Float64MultiArray, '/qp_debug/qdot_err', self._counted('/qp_debug/qdot_err', self.qdot_err_callback), 10)
         self.sub_xdot_err = self.create_subscription(
-            Float64MultiArray, '/qp_debug/xdot_err', self.xdot_err_callback, 10)
+            Float64MultiArray, '/qp_debug/xdot_err', self._counted('/qp_debug/xdot_err', self.xdot_err_callback), 10)
 
 
         self.subscription = self.create_subscription(
             JointState,
             '/joint_states',
-            self.listener_callback,
-            qos_profile 
+            self._counted('/joint_states', self.listener_callback),
+            qos_profile
         )
         self.get_logger().info('Dashboard Initialized. Waiting for 14-DoF stream...')
-    
+
         # --- NEW: Lagrangian Subscribers ---
-        self.create_subscription(Float64MultiArray, '/qp_debug/lambda_cbf', self.lambda_cbf_callback, qos_profile)
-        self.create_subscription(Float64MultiArray, '/qp_debug/lambda_joints', self.lambda_joints_callback, qos_profile)
+        self.create_subscription(Float64MultiArray, '/qp_debug/lambda_cbf', self._counted('/qp_debug/lambda_cbf', self.lambda_cbf_callback), qos_profile)
+        self.create_subscription(Float64MultiArray, '/qp_debug/lambda_joints', self._counted('/qp_debug/lambda_joints', self.lambda_joints_callback), qos_profile)
         # --- NEW: Task-authority (soft-task cost decomposition) ---
-        self.create_subscription(Float64MultiArray, '/qp_debug/task_authority', self.task_authority_callback, qos_profile)
+        self.create_subscription(Float64MultiArray, '/qp_debug/task_authority', self._counted('/qp_debug/task_authority', self.task_authority_callback), qos_profile)
 
         self.sub_qdot_cmd = self.create_subscription(
             Float64MultiArray,
             '/qp_debug/qdot_cmd',
-            self.cmd_callback,
+            self._counted('/qp_debug/qdot_cmd', self.cmd_callback),
             10
         )
 
         # --- Live joint limits for the slider GUI (from the real Pinocchio model) ---
         self.joint_limits = {}   # name -> (lower, upper)
-        self.create_subscription(String, '/qp_debug/joint_limits', self.joint_limits_callback, qos_profile)
+        self.create_subscription(String, '/qp_debug/joint_limits', self._counted('/qp_debug/joint_limits', self.joint_limits_callback), qos_profile)
 
         # Reference governor telemetry
         # [pos_diff_R(3), ori_diff_R(3), vel_diff_R(3), wvel_diff_R(3),
         #  pos_diff_L(3), ori_diff_L(3), vel_diff_L(3), wvel_diff_L(3)] = 24 floats
         self.gov_buffer = deque(maxlen=self.history_len)
         self.gov_time = deque(maxlen=self.history_len)
-        self.create_subscription(Float64MultiArray, '/qp_debug/governor', self.gov_callback, qos_profile)
+        self.create_subscription(Float64MultiArray, '/qp_debug/governor', self._counted('/qp_debug/governor', self.gov_callback), qos_profile)
 
         # Logs once ~6s after startup: compares /joint_states update rate of
         # an arm joint against the two gripper finger joints.
         self._sanity_timer = self.create_timer(6.0, self._check_topic_sanity)
+
+        # Periodic (repeating) subscriber-health report: did DDS actually
+        # deliver ANYTHING on each topic, independent of any downstream
+        # processing/guards in the real callback? Decisive for "windows open
+        # but empty, no error" -- separates "nothing arriving at all" (network/
+        # DDS/QoS problem, nothing to fix in this file) from "data IS arriving
+        # but a specific dependency chain (e.g. cb_real needs a reference
+        # message first) is blocking it" from "arriving fine, rendering bug".
+        self._health_timer = self.create_timer(5.0, self._check_subscriber_health)
+
+    def _counted(self, topic, cb):
+        """Wrap a subscription callback to count RAW message arrivals before
+        any downstream logic runs (e.g. cb_real's has_ref_right early-return
+        would otherwise hide that /qp_debug/ee_real messages ARE arriving).
+        Purely additive -- the wrapped callback still runs exactly as before."""
+        self._msg_counts[topic] = 0
+        def _wrapped(msg, _topic=topic, _cb=cb):
+            self._msg_counts[_topic] += 1
+            _cb(msg)
+        return _wrapped
+
+    def _check_subscriber_health(self):
+        """Repeating report: message count received so far per subscribed
+        topic. A 0 after several intervals means DDS never delivered a single
+        message on that topic to THIS process -- a network/QoS/domain-ID
+        problem (or the expected publisher genuinely isn't running), not a
+        bug in this file's plotting logic. A nonzero, growing count for a
+        topic whose PANEL still looks empty instead points at this file's own
+        buffering/rendering code for that specific panel."""
+        zero = sorted(t for t, c in self._msg_counts.items() if c == 0)
+        nonzero = sorted(((t, c) for t, c in self._msg_counts.items() if c > 0),
+                         key=lambda kv: -kv[1])
+        lines = ["[SUB-HEALTH] message counts so far:"]
+        lines.append("  RECEIVING: " + (", ".join(f"{t}={c}" for t, c in nonzero) or "(none)"))
+        if zero:
+            lines.append("  SILENT (0 messages ever): " + ", ".join(zero))
+        self.get_logger().info("\n".join(lines))
+        if zero and not nonzero:
+            self.get_logger().error(
+                "[SUB-HEALTH] EVERY subscribed topic is silent -- DDS is not "
+                "delivering ANY data to this process (discovery via `ros2 "
+                "topic list` succeeding does NOT prove this; run `ros2 topic "
+                "echo <topic>` on THIS machine to confirm independently of "
+                "this dashboard). Check ROS_DOMAIN_ID match, firewall/UDP "
+                "rules for RTPS data traffic (not just multicast discovery), "
+                "and CycloneDDS peer config between the two machines.")
 
     def _check_topic_sanity(self):
         """Diagnose the reported gripper-slider lag: compare the median
@@ -860,15 +914,32 @@ def main(args=None):
     # On real hardware there is NO /clock topic, so we must use the wall
     # clock -- otherwise self.get_clock().now() freezes at t=0 forever and
     # the entire dashboard appears dead (all plot x-values collapse).
-    # Override via CLI if needed: --ros-args -p use_sim_time:=true/false
-    topic_names = [name for name, _ in node.get_topic_names_and_types()]
-    use_sim = '/clock' in topic_names
-    node.set_parameters([
-        rclpy.parameter.Parameter('use_sim_time', rclpy.Parameter.Type.BOOL, use_sim)
-    ])
-    node.get_logger().info(
-        f"[ENV] use_sim_time={'TRUE (sim)' if use_sim else 'FALSE (real hardware)'} "
-        f"— /clock {'found' if use_sim else 'NOT found'} in active topics.")
+    #
+    # The auto-detect is a HEURISTIC, not authoritative: on a shared
+    # ROS_DOMAIN_ID / distributed setup (robot + a remote PC over Cyclone
+    # DDS), /clock can be visible from a completely unrelated sim instance
+    # elsewhere on the network, falsely flipping this to sim-time on a real-
+    # hardware run -- exactly the frozen-dashboard failure mode described
+    # above. An explicit --ros-args -p use_sim_time:=... MUST win over the
+    # heuristic (previously it didn't: this call unconditionally overwrote
+    # whatever the CLI had already set).
+    explicit_override = any(a.startswith('use_sim_time:=') for a in sys.argv)
+    if explicit_override:
+        use_sim = node.get_parameter('use_sim_time').value
+        node.get_logger().info(
+            f"[ENV] use_sim_time={use_sim} (explicit --ros-args override, "
+            f"auto-detect skipped).")
+    else:
+        topic_names = [name for name, _ in node.get_topic_names_and_types()]
+        use_sim = '/clock' in topic_names
+        node.set_parameters([
+            rclpy.parameter.Parameter('use_sim_time', rclpy.Parameter.Type.BOOL, use_sim)
+        ])
+        node.get_logger().info(
+            f"[ENV] use_sim_time={'TRUE (sim)' if use_sim else 'FALSE (real hardware)'} "
+            f"— /clock {'found' if use_sim else 'NOT found'} in active topics "
+            f"(auto-detected; pass --ros-args -p use_sim_time:=false to force "
+            f"this if /clock is a false positive from elsewhere on the network).")
 
     spinner = threading.Thread(target=ros_thread_entry, args=(node,), daemon=True)
     spinner.start()
@@ -1287,26 +1358,57 @@ def main(args=None):
     # ===================================================================
     # ANIMATION
     # ===================================================================
+    # Both animations run on Tk's own callback loop, which -- unlike a plain
+    # Python exception -- can print a TRUNCATED traceback if the process is
+    # interrupted mid-print, and (depending on matplotlib/Tk version) can
+    # otherwise silently stop refreshing that figure with no visible error at
+    # all. Wrap each in a rate-limited try/except that logs the FULL
+    # traceback exactly once (flush=True, survives an interrupt) instead of
+    # either extreme.
+    _crash_counts = {'plot': 0, 'sliders': 0}
+
+    def _log_crash(which, exc_info_str):
+        _crash_counts[which] += 1
+        if _crash_counts[which] <= 1:
+            print(f"[PLOTTER-DEBUG] update_{which} EXCEPTION (animation disabled "
+                 f"for this figure until restart):\n{exc_info_str}", flush=True)
+            node.get_logger().error(f"[PLOTTER] update_{which} crashed:\n{exc_info_str}")
+
+    def _guarded_update_plot(frame, *args):
+        if _crash_counts['plot'] > 0:
+            return []
+        try:
+            return update_plot(frame, *args)
+        except Exception:  # noqa: BLE001
+            _log_crash('plot', traceback.format_exc())
+            return []
+
     def update_sliders(frame):
-        # Apply real limits once they arrive (joint_limits published latched,
-        # every 2s until the first successful send -- see main_qp_controller).
-        for jname, slider in slider_widgets.items():
-            lo, hi = node.joint_limits.get(jname, slider_limits[jname])
-            if (lo, hi) != slider_limits[jname]:
-                slider.ax.set_xlim(lo, hi)
-                slider.valmin, slider.valmax = lo, hi
-                slider_limits[jname] = (lo, hi)
-            # Use the EMA-smoothed display value (identical to the raw value
-            # for arm/head joints; smoothed for the gripper fingers to hide
-            # their lower-rate controller-broadcast steps -- see
-            # listener_callback and _check_topic_sanity).
-            val = node.slider_display.get(jname, 0.0)
-            val = min(max(val, slider.valmin), slider.valmax)
-            slider.set_val(val)
-        fig6.canvas.draw_idle()
+        if _crash_counts['sliders'] > 0:
+            return []
+        try:
+            # Apply real limits once they arrive (joint_limits published
+            # latched, every 2s until the first successful send -- see
+            # main_qp_controller).
+            for jname, slider in slider_widgets.items():
+                lo, hi = node.joint_limits.get(jname, slider_limits[jname])
+                if (lo, hi) != slider_limits[jname]:
+                    slider.ax.set_xlim(lo, hi)
+                    slider.valmin, slider.valmax = lo, hi
+                    slider_limits[jname] = (lo, hi)
+                # Use the EMA-smoothed display value (identical to the raw
+                # value for arm/head joints; smoothed for the gripper fingers
+                # to hide their lower-rate controller-broadcast steps -- see
+                # listener_callback and _check_topic_sanity).
+                val = node.slider_display.get(jname, 0.0)
+                val = min(max(val, slider.valmin), slider.valmax)
+                slider.set_val(val)
+            fig6.canvas.draw_idle()
+        except Exception:  # noqa: BLE001
+            _log_crash('sliders', traceback.format_exc())
         return []
 
-    ani = FuncAnimation(fig1, update_plot,
+    ani = FuncAnimation(fig1, _guarded_update_plot,
                         fargs=(node, lines_map, axs1, axs2, axs3, ax_pairs, dyn_plots, figs),
                         interval=100)
     ani_sliders = FuncAnimation(fig6, update_sliders, interval=100)

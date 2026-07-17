@@ -75,6 +75,7 @@ class DetectedObject:
     mean_rgb: np.ndarray = field(default_factory=lambda: np.zeros(3))
     n_points: int = 0
     arc_coverage: float = 0.0               # [0..1] fraction of circumference seen
+    vertical_coverage: float = 0.0          # [0..1] fraction of the height with points
     fit_rms: float = 0.0                    # [m] RMS radial residual of the circle fit
     confidence: float = 0.0                 # [0..1] overall estimation confidence
     arc_bins: np.ndarray = None             # (36,) bool mask of observed 10-deg sectors
@@ -202,17 +203,34 @@ class ObjectDetector:
         # CYL_TOP_SLICE of the max) is far less sensitive to that tail while
         # still using only genuine top-face points (not the sloped/noisy
         # side wall below).
-        z_max = pts[:, 2].max()
-        top_slice_mask = pts[:, 2] > (z_max - cfg.CYL_TOP_SLICE)
-        top_z = float(np.median(pts[top_slice_mask, 2])) if np.any(top_slice_mask) else float(z_max)
+        # Real hardware: a high percentile rejects flying-pixel z-spikes above
+        # the true top face; sim keeps the exact z-max (no such outliers).
+        z_ref = (float(np.percentile(pts[:, 2], cfg.CYL_TOP_PERCENTILE_REAL))
+                 if cfg.REAL_HARDWARE_HEAD else float(pts[:, 2].max()))
+        top_slice_mask = pts[:, 2] > (z_ref - cfg.CYL_TOP_SLICE)
+        top_z = float(np.median(pts[top_slice_mask, 2])) if np.any(top_slice_mask) else float(z_ref)
         base_z = plane.height
         height = float(top_z - base_z)
         center_z = base_z + height / 2.0
+
+        # Vertical coverage: fraction of the height (plane->top) whose z-slices
+        # actually contain points. A real upright cylinder viewed from the side
+        # fills its whole column; a top-disc-only blob (or a flat table artifact)
+        # does not. Enforced on real hardware so an inferred-but-unobserved
+        # height can't pass as a cylinder.
+        if height > 1e-3:
+            edges = np.linspace(base_z, top_z, cfg.REAL_VERT_COVERAGE_BINS + 1)
+            hist, _ = np.histogram(pts[:, 2], bins=edges)
+            vertical_coverage = float(np.count_nonzero(hist)) / cfg.REAL_VERT_COVERAGE_BINS
+        else:
+            vertical_coverage = 0.0
 
         # Plausibility gates (reject walls, specks, the robot's own gripper...).
         if not (cfg.CYL_MIN_RADIUS <= radius <= cfg.CYL_MAX_RADIUS):
             return None
         if not (cfg.CYL_MIN_HEIGHT <= height <= cfg.CYL_MAX_HEIGHT):
+            return None
+        if cfg.REAL_HARDWARE_HEAD and vertical_coverage < cfg.REAL_VERT_COVERAGE_MIN:
             return None
 
         # --- Estimation-quality metrics --------------------------------
@@ -245,7 +263,13 @@ class ObjectDetector:
         rms_quality = float(np.exp(-fit_rms / 0.005))       # 1 at 0mm, ~0.14 at 1cm
         confidence = float(np.clip(arc_coverage * rms_quality, 0.0, 1.0))
 
-        color_name, mean_rgb = ObjectDetector._classify_color(cols)
+        if cfg.REAL_HARDWARE_HEAD:
+            # White table vs white paper cylinder: colour is unreliable on the
+            # real scene -- classify by height instead (config §11 bands).
+            color_name = ObjectDetector._classify_size(height)
+            mean_rgb = cols.astype(np.float64).mean(axis=0)
+        else:
+            color_name, mean_rgb = ObjectDetector._classify_color(cols)
         label = f"{color_name}_cylinder" if color_name != "unknown" else "unknown_object"
 
         # Optional empirical head-camera bias correction (calibration). Default
@@ -263,6 +287,7 @@ class ObjectDetector:
             mean_rgb=mean_rgb,
             n_points=len(pts),
             arc_coverage=arc_coverage,
+            vertical_coverage=vertical_coverage,
             fit_rms=fit_rms,
             confidence=confidence,
             arc_bins=arc_bins,
@@ -393,6 +418,16 @@ class ObjectDetector:
     # ------------------------------------------------------------------ #
     # 4. Colour classification (HSV)                                      #
     # ------------------------------------------------------------------ #
+    @staticmethod
+    def _classify_size(height):
+        """Real hardware: the two cylinders differ by height, not by any
+        light-stable colour. The gap between the bands is the unknown zone."""
+        if height <= cfg.GEOM_SHORT_HEIGHT_MAX:
+            return "red"       # short black cylinder -> "red" slot
+        if height >= cfg.GEOM_TALL_HEIGHT_MIN:
+            return "blue"      # tall white/paper cylinder -> "blue" slot
+        return "unknown"
+
     @staticmethod
     def _classify_color(cols):
         mean_rgb = cols.astype(np.float64).mean(axis=0)         # 0..255

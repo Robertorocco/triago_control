@@ -223,7 +223,9 @@ class TrajectoryGenerator(Node):
         self.control_orientation = bool(self.cfg.get('control_orientation', True))
         self.task_dimension = float(self.cfg.get('task_dimension', 6.0))
 
-        self.preset_name = str(self.cfg.get('active_preset', ''))
+        self.declare_parameter('preset', '')
+        preset_override = self.get_parameter('preset').get_parameter_value().string_value
+        self.preset_name = preset_override if preset_override else str(self.cfg.get('active_preset', ''))
         self.preset = self._resolve_preset(self.preset_name)
         self.arms = str(self.preset.get('arms', 'both')).lower()
         self.mode = str(self.preset.get('mode', 'absolute')).lower()
