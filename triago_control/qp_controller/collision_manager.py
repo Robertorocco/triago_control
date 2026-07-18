@@ -1,34 +1,6 @@
 # collision_manager.py
-"""
-The Environmental Awareness module.
-
-Owns the `hppfcl` geometry model and every proximity query the controller needs:
-    * builds arm capsules from `calculate_offsets` (dominant-axis snapping),
-    * adds simplified gripper bounding boxes, body colliders, ground, wall and
-      the bimanual workspace obstacles (table + red/blue cylinders),
-    * declares the collision-pair graph (with all the original exclusions),
-    * runs the per-tick distance queries and aggregates them into TWO
-      INDEPENDENT per-arm SoftMin Control Barrier Function gradients.
-
-----------------------------------------------------------------------------
-SoftMin CBF math, per arm X in {R, L}, each over its OWN subset of pairs:
-
-    h_soft_X(q) = -(1/alpha) * log( sum_{k in Pairs(X)} exp(-alpha * d_k(q)) )
-
-    J_soft_X(q) = sum_{k in Pairs(X)} ( exp(-alpha*d_k(q)) / sum_{j in Pairs(X)} exp(-alpha*d_j(q)) ) * J_k(q)
-
-  Pairs(X) = every active pair touching arm X's own geometry (links, gripper,
-  or a held cylinder). A genuine inter-arm pair belongs to both Pairs(R) and
-  Pairs(L); otherwise J_soft_X has zero columns in the other arm's joints.
-
-Dynamic safety margin, per arm:
-
-    d_safe_dynamic_X = d_safe_base + k_v_safe * ||v_X||      for X in {R, L}
-
-  Thickens with that arm's own speed only, so a fast arm never tightens the
-  other (idle) arm's margin.
-----------------------------------------------------------------------------
-"""
+"""Collision world + per-arm SoftMin CBF: h_X = -(1/a)log(sum exp(-a d_k)) and its gradient over
+each arm's OWN pair subset; d_safe_X = base + k_v*||v_X|| thickens with that arm's speed only."""
 
 import threading
 import time
@@ -56,13 +28,7 @@ class CollisionManager:
         self.cmodel = pin.GeometryModel()
         self.cdata = None
 
-        # Serializes STRUCTURAL cmodel mutation (add/remove collision pairs on
-        # grasp attach/detach) against a concurrent reader. Only used when the
-        # real-hardware CBF runs on a worker thread (main_qp_controller_real.py):
-        # the worker holds it around its compute, and the subclass's topology
-        # seam holds it around attach/detach, so the two never touch cmodel at
-        # once. Uncontended (and effectively free) in the synchronous/sim path,
-        # where attach/detach is the only accessor and no worker exists.
+        # Serializes structural cmodel mutation (grasp attach/detach) against the async CBF worker.
         self.geom_lock = threading.Lock()
 
         # Geometry id bookkeeping
@@ -74,22 +40,18 @@ class CollisionManager:
         self.workspace_obstacle_ids = []
         self.table_id = None               # set in build_collision_model (role=="table")
         self.top_active_pairs = []         # [(name1, name2, dist)] 3 closest enabled pairs (debug)
-        # Cached once (right/left_geom_ids never change after build_collision_model)
-        # by compute_softmin_jacobian -- see its "allowed_grasp_ids" comment.
+        # Cached once: geometry ids never change after build_collision_model.
         self._allowed_grasp_ids_cache = None
-        # Global (unfiltered) closest-pair witness, refreshed every tick by
-        # compute_softmin_jacobian -- consumed by qp_visualizer_tutorial.py's
-        # publish_debug instead of it re-scanning cdata.distanceResults itself.
+        # Global closest-pair witness, refreshed every tick for the RViz witness line.
         self.witness_min_distance = float('nan')
         self.witness_min_points = None
 
-        # Lazy sets (built on first use in _arm_membership) for O(1) "does this
-        # geom_id belong to the right/left arm's own geometry" lookups.
+        # O(1) membership sets for the per-arm barrier split.
         self._right_geom_id_set = set()
         self._left_geom_id_set = set()
 
     def calculate_offsets(self, chain, tool_link_name):
-        # Build per-link capsule placements by snapping each link to its dominant axis.
+        """Builds per-link capsule placements by snapping each link to its dominant joint-to-joint axis."""
         print(f"[Init] Calibrating offsets for {chain[0]}... (Dominant Axis Mode)")
         offsets = {}
         full_chain = chain + [tool_link_name]
@@ -118,72 +80,42 @@ class CollisionManager:
                 vec_global = pose_next.translation - pose_i.translation
                 vec_local = pose_i.rotation.T @ vec_global
 
-                # --- DOMINANT AXIS SNAPPING ---
-                # 1. Find which axis the CAD "tube" is actually built along
+                # Dominant-axis snap: axis the CAD tube is built along, length along it only.
                 dominant_idx = np.argmax(np.abs(vec_local))
                 dominant_dir = np.zeros(3)
                 dominant_dir[dominant_idx] = np.sign(vec_local[dominant_idx])
-                # 2. Length strictly along that main tube, ignoring side-offsets
                 length = abs(vec_local[dominant_idx])
                 if length < 0.001:
                     length = 0.01
-                # 3. Midpoint placed straight down the dominant axis
                 midpoint = (length / 2.0) * dominant_dir
-                # 4. Align the capsule's Z-axis with the dominant direction
+                # Capsule Z-axis aligned with the dominant direction, placed relative to the joint.
                 R_cyl = pin.Quaternion.FromTwoVectors(np.array([0., 0., 1.]), dominant_dir).matrix()
 
-                # Store placement exactly relative to the JOINT
                 offsets[link_name] = (pin.SE3(R_cyl, midpoint), length)
             except Exception as e:
                 print(f"  Failed {link_name}: {e}")
         return offsets
 
     def _apply_capsule_override(self, link_name, placement_wrt_joint, length):
-        """Applies this link's cfg.CAPSULE_OFFSET_OVERRIDES entry (if any) to
-        its raw calculate_offsets() placement/length, and returns the
-        possibly-corrected (placement, length, radius). A link with NO entry
-        returns (placement_wrt_joint, length, cfg.CAPSULE_RADIUS) UNCHANGED --
-        this function is a pure additive correction, never a rewrite of
-        calculate_offsets' own straight-line-segment math.
-
-        See config.py section 6b for the full field-by-field derivation.
-        `lateral_offset` is applied in the capsule's OWN local frame (i.e.
-        rotated by placement_wrt_joint.rotation), since it was computed
-        relative to that same joint-relative axis by capsule_alignment_
-        audit.py's `_compute_capsule_fix` -- NOT in the parent joint's raw
-        x/y/z, which would apply the correction in the wrong direction
-        whenever the dominant-axis snap picked something other than a pure
-        Z-axis alignment relative to the joint frame.
-        """
+        """Applies the link's cfg.CAPSULE_OFFSET_OVERRIDES correction (pure additive; no-op without an entry)."""
         override = cfg.CAPSULE_OFFSET_OVERRIDES.get(link_name)
         if override is None:
             return placement_wrt_joint, length, cfg.CAPSULE_RADIUS
 
-        # lateral_offset/extensions are stored in mm (see config.py) -- convert once here.
+        # Override fields are stored in mm.
         lateral_mm = np.array(override['lateral_offset'], dtype=float)
         lateral_local = lateral_mm / 1000.0
         prox_ext = override['proximal_extension'] / 1000.0
         dist_ext = override['distal_extension'] / 1000.0
         radius = override['radius'] / 1000.0
 
-        # The capsule's own Z axis, expressed in the joint-local frame (same
-        # convention calculate_offsets itself uses: "Align the capsule's
-        # Z-axis with the dominant direction").
         z_axis_local = np.array([0., 0., 1.])
 
-        # Shift the midpoint sideways (already _|_ to z_axis_local by
-        # construction from _compute_capsule_fix -- see config.py), THEN
-        # re-center to accommodate the axial extension: extending the
-        # proximal end by prox_ext and the distal end by dist_ext grows the
-        # segment by (prox_ext + dist_ext) and shifts its midpoint by
-        # (dist_ext - prox_ext) / 2 along z_axis_local.
+        # Extensions grow the segment and shift its midpoint by (dist-prox)/2 along the capsule axis.
         new_length = length + prox_ext + dist_ext
         axial_recenter = (dist_ext - prox_ext) / 2.0
 
-        # lateral_offset is already in placement_wrt_joint's frame (see
-        # capsule_alignment_audit.py's _compute_capsule_fix), so it's added
-        # directly, not rotated again. The axial term uses the capsule's own
-        # pre-rotation [0,0,1] axis, so it does need rotating into the joint frame.
+        # lateral_offset is already expressed in the joint frame; only the axial term needs rotating.
         new_translation = (placement_wrt_joint.translation
                           + lateral_local
                           + placement_wrt_joint.rotation @ (axial_recenter * z_axis_local))
@@ -193,14 +125,8 @@ class CollisionManager:
 
     def build_collision_model(self, right_offsets, left_offsets, head_offsets=None,
                               world_scene=None):
-        # Assemble the full collision geometry model: arms, grippers, body, ground, obstacles.
-        #
-        # `world_scene` (triago_control.qp_controller.world_loader.WorldScene, optional):
-        # the loaded world's static obstacle layout (table + red/blue cylinders +
-        # optional wall/extra obstacles -- see world_loader.py). When omitted, falls
-        # back to the legacy cfg.TABLE_POS/RED_CYLINDER_POS/... constants (section 6
-        # below), so any external caller that never passes a world_scene keeps the
-        # exact old, unchanged behavior.
+        """Assembles the collision model: arm capsules, grippers, body, ground, and the world's obstacles."""
+        # world_scene=None falls back to the legacy cfg obstacle constants.
 
         # 1. ARM CAPSULES (from the calculated, joint-relative offsets)
         def add_arm_geoms(offsets_data, prefix, id_list):
@@ -212,9 +138,7 @@ class CollisionManager:
                 except Exception:
                     frame_id = self.model.getFrameId(link_name)
                 parent_joint_id = self.model.frames[frame_id].parentJoint
-                # placement_wrt_joint is already relative to the joint origin (no extra multiply)
-                #
-                # Per-link mesh-alignment correction, see config.py §6b.
+                # placement_wrt_joint is already joint-relative; apply the per-link mesh correction.
                 placement_fixed, length_fixed, radius = self._apply_capsule_override(
                     link_name, placement_wrt_joint, length)
                 shape = hppfcl.Capsule(radius, length_fixed)
@@ -224,9 +148,7 @@ class CollisionManager:
         add_arm_geoms(right_offsets, "shadow_right", self.right_geom_ids)
         add_arm_geoms(left_offsets, "shadow_left", self.left_geom_ids)
 
-        # Head capsules: same geometry recipe as the arms, but never added to
-        # right_geom_ids/left_geom_ids, so they stay pure geometry to the CBF
-        # and never enter idx_right/idx_left or the QP decision vector.
+        # Head capsules: pure CBF geometry, never in the arm id sets or the QP decision vector.
         if head_offsets:
             add_arm_geoms(head_offsets, "shadow_head", self.head_geom_ids)
 
@@ -268,16 +190,11 @@ class CollisionManager:
         self.ground_id = self.cmodel.addGeometryObject(
             pin.GeometryObject("ground_plane", 0, ground_pose, hppfcl.Box(20.0, 20.0, 1.0)))
 
-        # World scene (wall + table + cylinders + extras), built generically
-        # from world_scene.WorldScene (see world_loader.py); falls back to the
-        # deprecated cfg constants if no scene is passed.
+        # World obstacles from the loaded scene (fallback: legacy cfg constants).
         self._geom_id_by_obstacle_name = {}   # {obstacle name -> hppfcl geometry id}
         if world_scene is not None:
             for obs in world_scene.static_obstacles:
-                # collision:false means the geometry must not exist in cmodel
-                # at all -- Meshcat renders cmodel directly, so a geometry that
-                # merely skips pair bookkeeping would still show up as a solid
-                # black slab (no meshColor ever set).
+                # collision:false geometry must not exist in cmodel at all (Meshcat renders cmodel directly).
                 if not obs.collision:
                     continue
 
@@ -303,11 +220,7 @@ class CollisionManager:
                         # Name-based, not positional -- obstacle order isn't guaranteed.
                         self.table_id = geom_id
 
-            # Resolve the grasp-role indirection (today's grasp state machine,
-            # shared_autonomy_handler, and visualization_engine all key on the
-            # literal attribute names `red_cyl_id`/`blue_cyl_id` -- this keeps
-            # every one of those call sites working unchanged, just pointed at
-            # whichever named obstacle plays that role in THIS world).
+            # Grasp-role indirection: downstream code keys on red_cyl_id/blue_cyl_id attribute names.
             red_name = world_scene.grasp_roles.get('red')
             blue_name = world_scene.grasp_roles.get('blue')
             if red_name and red_name in self._geom_id_by_obstacle_name:
@@ -315,7 +228,7 @@ class CollisionManager:
             if blue_name and blue_name in self._geom_id_by_obstacle_name:
                 self.blue_cyl_id = self._geom_id_by_obstacle_name[blue_name]
         else:
-            # --- Legacy path (no world_scene given): unchanged from before. ---
+            # Legacy path: obstacles from the cfg constants.
             if cfg.WALL_COLLIDER:
                 wall_pose = pin.SE3.Identity()
                 wall_pose.translation = np.array(cfg.WALL_POS)
@@ -337,14 +250,12 @@ class CollisionManager:
                 pin.GeometryObject("blue_cylinder", 0, blue_pose, hppfcl.Cylinder(*cfg.CYLINDER_SIZE)))
             self.workspace_obstacle_ids.append(self.blue_cyl_id)
 
-        # Finalize the per-arm membership sets used by _arm_membership to split
-        # the SoftMin CBF into independent per-arm barriers (right_geom_ids /
-        # left_geom_ids already include each arm's gripper collision box).
+        # Finalize the per-arm membership sets that split the SoftMin into independent barriers.
         self._right_geom_id_set = set(self.right_geom_ids)
         self._left_geom_id_set = set(self.left_geom_ids)
 
     def define_collision_pairs(self):
-        # Declare every checked collision pair, preserving the original exclusion rules.
+        """Declares every checked collision pair with the standard exclusion rules."""
         all_arm_ids = self.right_geom_ids + self.left_geom_ids
         base_joints_exclusions = ["arm_right_1", "arm_right_2", "arm_left_1", "arm_left_2"]
 
@@ -369,10 +280,7 @@ class CollisionManager:
             for obs_id in self.workspace_obstacle_ids:
                 self.cmodel.addCollisionPair(pin.CollisionPair(obs_id, arm_id))
 
-        # Arms vs head: the head is a quasi-static CBF obstacle only, never
-        # part of either arm's own geometry set (config.py's HEAD_CHAIN).
-        # Per instruction: SKIP any pair touching arm_right_1 or arm_left_1
-        # (that link cannot collide with the head chain).
+        # Arms vs head (quasi-static obstacle); link 1 cannot reach the head chain, so skipped.
         for arm_id in all_arm_ids:
             arm_name = self.cmodel.geometryObjects[arm_id].name
             if "arm_right_1" in arm_name or "arm_left_1" in arm_name:
@@ -380,10 +288,7 @@ class CollisionManager:
             for head_id in self.head_geom_ids:
                 self.cmodel.addCollisionPair(pin.CollisionPair(arm_id, head_id))
 
-        # 2b. Cylinder vs Cylinder: so that when BOTH grippers hold a cylinder
-        # (bimanual), the two held cylinders cannot inter-penetrate. Harmless while
-        # both rest on the table (static, far apart); becomes a real CBF pair once
-        # both are re-parented to the arm chains on grasp.
+        # 2b. Cylinder vs cylinder: two simultaneously-held objects must not inter-penetrate.
         if hasattr(self, 'red_cyl_id') and hasattr(self, 'blue_cyl_id'):
             self.cmodel.addCollisionPair(pin.CollisionPair(self.red_cyl_id, self.blue_cyl_id))
 
@@ -408,7 +313,7 @@ class CollisionManager:
                     name_b = self.cmodel.geometryObjects[geom_ids[j]].name.lower()
                     is_hand_b = any(k in name_b for k in hand_kw_intra)
                     is_upper_b = any(k in name_b for k in upper_arm_keywords)
-                    # Pair only a clear hand against a strictly-base arm link
+                    # Pair only a clear hand against a strictly-base arm link.
                     if (is_hand_a and is_upper_b) or (is_upper_a and is_hand_b):
                         self.cmodel.addCollisionPair(pin.CollisionPair(geom_ids[i], geom_ids[j]))
 
@@ -428,31 +333,15 @@ class CollisionManager:
         print("--------------------------------------------------")
 
     def update_geometry(self, current_q, data=None, cdata=None):
-        # Refresh geometry placements and run all pairwise distance queries.
-        # data/cdata default to self.* (the shared main-thread pair). The real-
-        # hardware CBF worker (main_qp_controller_real.py) passes its OWN private
-        # pin.Data / GeometryData so it never races the main thread's kinematics
-        # refresh -- see that file's isolation invariant. cmodel/model are shared
-        # read-only structure and stay self.*.
+        """Refreshes geometry placements and runs all pairwise distance queries."""
+        # The async CBF worker passes its own private data/cdata so it never races the main thread.
         data = self.data if data is None else data
         cdata = self.cdata if cdata is None else cdata
         pin.updateGeometryPlacements(self.model, data, self.cmodel, cdata, current_q)
         pin.computeDistances(self.cmodel, cdata)
 
     def add_attached_object_pairs(self, cyl_id, arm_side, current_q):
-        """Treat a grasped cylinder as a moving link of `arm_side`.
-
-        Builds the adjacency-exclusion set (own-arm links 6, 7, gripper, fingers
-        — too close to the grasp to check) and dynamically CREATES the collision
-        pairs that were missing while the cylinder was a static obstacle:
-        cylinder vs base, torso, ground, wall, table and the other cylinder.
-        Pairs vs both arms already exist from startup; after re-parenting they
-        become self-collision (own arm links 3/4/5 stay active) and other-arm
-        avoidance.
-
-        Returns: (added_names, skipped_names, adjacency_set)
-        Raises on any failure so the caller can report a red error.
-        """
+        """Treats a grasped cylinder as a moving link: adds its world pairs, excluding grasp-adjacent geometry."""
         own_ids = self.right_geom_ids if arm_side == 'right' else self.left_geom_ids
 
         # 1. Adjacency exclusion: own-arm geometry fused to / overlapping the grasp.
@@ -486,8 +375,7 @@ class CollisionManager:
             self.cmodel.addCollisionPair(pin.CollisionPair(cyl_id, t))
             added_names.append(self.cmodel.geometryObjects[t].name)
 
-        # 4. Rebuild cdata for the enlarged pair set and revalidate immediately so
-        #    the same control tick can query distances without a stale/empty array.
+        # 4. Rebuild cdata for the enlarged pair set so the same tick can query fresh distances.
         self.cdata = self.cmodel.createData()
         for req in self.cdata.distanceRequests:
             req.enable_nearest_points = True
@@ -497,24 +385,11 @@ class CollisionManager:
         return added_names, skipped_names, adjacency
 
     def detach_object(self, cyl_id, current_q, world_pos=None):
-        """Re-parent a previously-attached cylinder back to the world (inverse of attach).
-
-        Re-parents the cylinder geometry onto the universe joint (id 0). If
-        `world_pos` is given (the perfect-fall placement position computed by the
-        shared-autonomy node), the cylinder is placed UPRIGHT there; otherwise it
-        is frozen at its current live pose. The collision pairs created at attach
-        time are kept (all valid for a static obstacle); only the parentJoint and
-        placement change, mirroring attach_object_visually.
-
-        The caller is responsible for dropping the cylinder from the attached_*
-        bookkeeping and (optionally) restarting the barrier ramp for a smooth
-        re-engagement of the gripper<->cylinder pair.
-        """
-        # Make sure oMg reflects the current configuration before snapshotting.
+        """Re-parents a held cylinder back to the world, upright at world_pos or frozen at its live pose."""
+        # Refresh oMg so the snapshot reflects the current configuration.
         pin.updateGeometryPlacements(self.model, self.data, self.cmodel, self.cdata, current_q)
 
         if world_pos is not None:
-            # Upright cylinder resting at the placement location (perfect fall).
             world_pose = pin.SE3(np.eye(3), np.asarray(world_pos, dtype=float))
         else:
             world_pose = self.cdata.oMg[cyl_id].copy()
@@ -524,15 +399,8 @@ class CollisionManager:
         geom.placement = world_pose
         geom.parentJoint = 0
 
-        # Remove the cylinder↔table pair that was added during attach (the cylinder
-        # was a moving arm link then, so table collision made sense). Now that the
-        # cylinder is RESTING on the table, that pair fires at distance ~0 and
-        # explodes the SoftMin. The original pre-grasp world never had this pair
-        # (cylinders on the table are in workspace_obstacle_ids and only check vs
-        # the arms, not vs the table). Also remove cylinder↔ground for the same reason.
-        # Explicit, name/role-based reference (see build_collision_model's
-        # world_scene branch, which sets self.table_id from the obstacle whose
-        # role=="table" -- NOT assumed to be workspace_obstacle_ids[0]).
+        # A resting cylinder touches table/ground at distance ~0, which would explode the SoftMin:
+        # remove the attach-time pairs vs table, ground and body (a static obstacle checks only vs arms).
         table_id = getattr(self, 'table_id', None)
         pairs_to_remove = []
         for k in range(len(self.cmodel.collisionPairs)):
@@ -541,11 +409,8 @@ class CollisionManager:
             if cyl_id not in ids:
                 continue
             other = (ids - {cyl_id}).pop()
-            # Remove pairs vs table and ground (the cylinder rests on/touches these)
             if other == table_id or other == self.ground_id:
                 pairs_to_remove.append(k)
-            # Also remove pairs vs body (base, torso) that were added at attach —
-            # a static resting cylinder should only be checked vs the arms.
             if other in set(self.body_geom_ids):
                 pairs_to_remove.append(k)
 
@@ -553,8 +418,7 @@ class CollisionManager:
         for k in sorted(set(pairs_to_remove), reverse=True):
             self.cmodel.removeCollisionPair(self.cmodel.collisionPairs[k])
 
-        # Rebuild cdata for the (unchanged-size) pair set and revalidate so the
-        # same control tick can query distances without a stale array.
+        # Rebuild cdata so the same tick can query fresh distances.
         self.cdata = self.cmodel.createData()
         for req in self.cdata.distanceRequests:
             req.enable_nearest_points = True
@@ -562,25 +426,7 @@ class CollisionManager:
         pin.computeDistances(self.cmodel, self.cdata)
 
     def _arm_membership(self, geom_id, attached_object_arm=None):
-        """Classify a geometry id as belonging to 'right', 'left', 'both', or None.
-
-        Used to split the single SoftMin CBF into two INDEPENDENT per-arm
-        barriers (see compute_softmin_jacobian). A geometry belongs to an arm if:
-          * it is one of that arm's own capsules/gripper box (self.right_geom_ids
-            / self.left_geom_ids), OR
-          * it is a cylinder currently ATTACHED (grasped) by that arm
-            (attached_object_arm: {cyl_id: 'right'/'left'}) — a held object moves
-            with its owning arm, so it must count as part of that arm's "body"
-            for the purpose of collision-avoidance authority.
-
-        Static world geometry (table, ground, wall, body boxes, un-grasped
-        cylinders) belongs to NEITHER arm on its own — a pair between two such
-        geometries never occurs (they don't move relative to each other), but a
-        pair between an arm's geometry and a static object correctly attributes
-        to just that one arm.
-
-        Returns a set subset of {'right', 'left'} (empty set if neither).
-        """
+        """Returns which arms ({'right','left'} subset) own this geometry: own capsules/gripper or a held cylinder."""
         membership = set()
         if geom_id in self._right_geom_id_set:
             membership.add('right')
@@ -595,53 +441,19 @@ class CollisionManager:
                                  ignored_targets, publish_counter=0,
                                  attach_ramp_shifts=None, attached_object_arm=None,
                                  data=None, cdata=None):
-        """
-        Two independent per-arm SoftMin CBFs. A pair contributes to arm A's
-        aggregate iff one of its geometries belongs to arm A (_arm_membership,
-        including a held cylinder); a genuine inter-arm pair contributes to
-        both, everything else has an exactly-zero gradient in the other arm's
-        row. d_safe_dynamic is likewise computed per arm from only that arm's
-        own joint velocities, so a fast arm never tightens the other's margin.
-
-        Returns: (J_soft_R, h_soft_R, J_soft_L, h_soft_L, d_safe_dynamic_r,
-                  d_safe_dynamic_l, abs_min_distance, active_interaction_r,
-                  active_interaction_l, n_eff_r, n_eff_l)
-            J_soft_X / h_soft_X : SoftMin gradient/value for arm X (h_soft_X=1.0
-                is a safe QP sentinel when idle, not a real margin).
-            d_safe_dynamic_X : velocity-inflated margin for arm X's own row.
-            abs_min_distance : true closest distance over all pairs.
-            active_interaction_X : True iff arm X has an active pair this tick;
-                telemetry-only, use to publish NaN instead of the sentinel margin.
-            n_eff_X : unit Cartesian contact normal for arm X (softmax-aggregated
-                over the SAME pairs/weights as J_soft_X, world/base frame,
-                pointing away from the obstacle into arm X's geometry), or None
-                if active_interaction_X is False. Consumed only by the
-                stall-escape tangent in main_qp_controller.py.
-        """
-        # data/cdata default to self.* (shared main-thread pair). The real-
-        # hardware CBF worker passes its OWN private pin.Data / GeometryData
-        # (already refreshed via update_geometry on that same data) so this whole
-        # aggregation runs race-free off the main thread. model/cmodel are shared
-        # read-only structure and stay self.*. The self.witness_*/top_active_pairs
-        # writes below are read back SAME-THREAD by the caller right after this
-        # returns (never cross-thread), so they carry no race either.
+        """Computes the two per-arm SoftMin CBFs; returns (J_R, h_R, J_L, h_L, d_safe_r, d_safe_l,
+        abs_min_distance, active_r, active_l, n_eff_r, n_eff_l), h=1.0 being the idle sentinel."""
+        # The async worker passes private data/cdata; witness_*/top_active_pairs are read same-thread.
         data = self.data if data is None else data
         cdata = self.cdata if cdata is None else cdata
 
-        # --- Dynamic margin: thicken the barrier with EACH ARM'S OWN speed
-        # (computed FIRST, before the SoftMin shifts, so high velocity still
-        # correctly pushes that arm away from a grasp target -- but no longer
-        # leaks into the OTHER arm's margin). ---
+        # Per-arm dynamic margin: thickens with that arm's own speed only.
         v_norm_r = np.linalg.norm(current_v[idx_right]) if idx_right else 0.0
         v_norm_l = np.linalg.norm(current_v[idx_left]) if idx_left else 0.0
         d_safe_dynamic_r = cfg.D_SAFE_BASE + (cfg.K_V_SAFE * v_norm_r)
         d_safe_dynamic_l = cfg.D_SAFE_BASE + (cfg.K_V_SAFE * v_norm_l)
-        # The per-pair grasp-margin shift math below picks the correct scalar
-        # per pair (a gripper<->cylinder pair belongs to exactly one arm in
-        # practice, resolved via _arm_membership) -- see the shift computation.
 
-        # Collect candidate pairs within range, keep the K closest, and track
-        # the true global-closest pair in the same pass (for the RViz witness line).
+        # Keep the K closest in-range pairs; track the global-closest witness in the same pass.
         pair_distances = []
         witness_dist = float('inf')
         witness_res = None
@@ -652,12 +464,9 @@ class CollisionManager:
                 witness_res = res
             if d <= cfg.DISTANCE_FILTER_THRESHOLD:
                 pair_distances.append((d, k, res))
-        pair_distances.sort()   # tuples sort by [0] (distance) first -- no lambda needed
+        pair_distances.sort()   # tuples sort by distance first
         active_pairs = pair_distances[:cfg.K_MAX_PAIRS]
-        # NaN (not a fake 1.0) when NO pair is within DISTANCE_FILTER_THRESHOLD,
-        # so /qp_debug/min_distance stays truthful -- "no pair in range" instead
-        # of a spurious 1 m reading that plots as a discontinuous jump. Telemetry
-        # only (never consumed by the control law; h_soft carries the CBF value).
+        # NaN (not a fake value) when no pair is in range, so the min-distance telemetry stays truthful.
         abs_min_distance = float(pair_distances[0][0]) if pair_distances else float("nan")
 
         self.witness_min_distance = witness_dist if witness_res is not None else float('nan')
@@ -671,14 +480,8 @@ class CollisionManager:
         else:
             self.witness_min_points = None
 
-        # Per-pair "core math" (contact normal, distance-rate Jacobian, softmax
-        # weight) is collected here and processed in ONE vectorized batch AFTER
-        # the loop, instead of a separate small numpy call (exp, weighted-sum) on
-        # every single pair -- numpy's per-call overhead dominates at this array
-        # size (up to K_MAX_PAIRS), so batching M calls into 1-2 is a real saving.
-        # The per-pair HOOKS below (skip/margin/ramp logic) are UNCHANGED and
-        # still run per-pair exactly as before -- only the final weighting/
-        # summation step is batched.
+        # Per-pair math is collected here and softmax-weighted in one vectorized batch after the
+        # loop (numpy per-call overhead dominates at this size); the per-pair hooks stay per-pair.
         d_eff_list = []
         Jdist_list = []
         route_r_list = []
@@ -688,10 +491,7 @@ class CollisionManager:
         jacobian_cache = {}
         enabled_pairs = []   # (raw_distance, geom_id_first, geom_id_second) actually contributing
 
-        # Geometry set allowed to "touch" a cylinder during a grasp (boxes + wrist
-        # + fingers). STATIC for the node's lifetime (right_geom_ids/left_geom_ids
-        # never change after build_collision_model), so compute it ONCE and cache
-        # it instead of rebuilding it via string ops on every single tick.
+        # Geometry allowed to touch a cylinder during a grasp (boxes + wrist + fingers), cached once.
         if self._allowed_grasp_ids_cache is None:
             allowed_grasp_ids = set(self.gripper_box_ids.values())
             for gid in self.right_geom_ids + self.left_geom_ids:
@@ -738,11 +538,8 @@ class CollisionManager:
                 elif second in margin_targets and first in allowed_grasp_ids:
                     cyl_gid = second
                 if cyl_gid is not None:
-                    # Shift uses the DYNAMIC distance of the GRASPING arm (not a
-                    # combined value) -- the other geometry in this pair is the
-                    # gripper/wrist/finger, whose _arm_membership tells us which
-                    # arm's own margin applies. Falls back to the max of both
-                    # (safe/conservative) if membership is somehow ambiguous.
+                    # The shift uses the grasping arm's own dynamic margin; ambiguous membership
+                    # falls back to the conservative max of both.
                     other_gid = second if cyl_gid == first else first
                     grasp_arm = self._arm_membership(other_gid, attached_object_arm)
                     if 'right' in grasp_arm and 'left' not in grasp_arm:
@@ -798,50 +595,25 @@ class CollisionManager:
             J2_p2 = get_point_jacobian(second, p2)
             J_dist_k = np.dot(n, (J1_p1 - J2_p2))  # Scalar distance-rate Jacobian for this pair
 
-            # --- PER-ARM ROUTING (the coupling fix) ---
-            # A pair contributes to arm X's SoftMin aggregate iff at least one of
-            # its two geometries belongs to arm X (own links/gripper, or a
-            # cylinder that arm is currently holding). A pair touching BOTH arms
-            # (inter-arm contact, or two held cylinders) contributes to BOTH --
-            # correctly preserving "arm A may yield to help arm B" -- while a pair
-            # touching only ONE arm's geometry (e.g. that arm vs. the static
-            # table) NEVER pollutes the other arm's barrier.
+            # Per-arm routing: a pair feeds arm X's aggregate iff one of its geometries belongs to X;
+            # inter-arm pairs feed both rows, single-arm pairs never pollute the other barrier.
             mem_first = self._arm_membership(first, attached_object_arm)
             mem_second = self._arm_membership(second, attached_object_arm)
             touched = mem_first | mem_second
 
-            # Signed per-arm contact normal (n is p1-p2 normalized): flip it so
-            # it always points AWAY from the obstacle INTO that arm's own
-            # geometry, regardless of which side of the pair is "first".
-            # Ambiguous pairs (self-pairs, or touching both arms) default to
-            # +n -- only used by the stall-escape tangent below, never the
-            # barrier itself.
+            # Signed per-arm contact normal: always points away from the obstacle into that arm's
+            # geometry (stall-escape use only, never the barrier itself).
             n_for_r = -n if ('right' in mem_second and 'right' not in mem_first) else n
             n_for_l = -n if ('left' in mem_second and 'left' not in mem_first) else n
 
-            # --- EXPERIMENTAL: INTER-ARM CLOSING-MARGIN HOOK (see config.py's
-            # ENABLE_INTER_ARM_CLOSING_MARGIN) ---
-            # d_safe_dynamic_r/l (computed once above) already inflate each row's
-            # margin from THAT arm's own speed alone -- correct for a static
-            # obstacle, but for a pair touching BOTH arms this under-estimates the
-            # true closing rate (row R never "sees" the left arm's contribution,
-            # and vice versa). Shrink this pair's effective distance by the
-            # missing term, using the conservative max() since one shared d_eff
-            # feeds both rows' softmin sums below. Static-obstacle pairs (touched
-            # has only one arm) are completely unaffected.
+            # Optional inter-arm closing margin: a both-arms pair also accounts for the OTHER
+            # arm's speed (per-arm margins alone under-estimate the true closing rate there).
             if cfg.ENABLE_INTER_ARM_CLOSING_MARGIN and 'right' in touched and 'left' in touched:
                 shift -= cfg.K_V_SAFE * max(v_norm_r, v_norm_l)
 
-            # Effective (shifted) distance -- SoftMax weighting itself is now
-            # batched below, after the loop.
             d_eff = d + shift
 
-            # A non-finite distance/Jacobian for ONE pair (e.g. a NaN joint
-            # position/velocity corrupting forwardKinematics for whatever this
-            # pair's parent joint is -- head, gripper, anything) would otherwise
-            # poison the ENTIRE batched SoftMax sum below with zero indication of
-            # which pair was responsible. Skip just this pair and say so loudly;
-            # every other pair keeps contributing normally.
+            # Skip (loudly) any single non-finite pair: one NaN would silently poison the whole batch.
             if not (np.isfinite(d_eff) and np.isfinite(J_dist_k).all()):
                 if time.monotonic() - getattr(self, '_last_nan_pair_warn', 0.0) > 1.0:
                     self._last_nan_pair_warn = time.monotonic()
@@ -867,11 +639,8 @@ class CollisionManager:
             n2 = self.cmodel.geometryObjects[g2].name
             self.top_active_pairs.append((n1, n2, float(d_p)))
 
-        # --- Batched SoftMax weighting + per-arm accumulation --------------
-        # Mathematically identical to the old per-pair "weight = exp(...);
-        # sum_exp_X += weight; J_soft_sum_X += weight * J_dist_k" loop, just
-        # computed as 1-2 vectorized numpy calls over all collected pairs
-        # instead of up to K_MAX_PAIRS individual exp()/accumulate calls.
+        # Batched SoftMax weighting + per-arm accumulation (vectorized, mathematically
+        # identical to a per-pair accumulate loop).
         if d_eff_list:
             d_eff_arr = np.asarray(d_eff_list)
             weights = np.exp(-cfg.ALPHA_SOFTMIN * d_eff_arr)
@@ -886,10 +655,8 @@ class CollisionManager:
                            if active_interaction_r else np.zeros(self.model.nv))
             J_soft_sum_l = ((weights[mask_l, None] * Jdist_arr[mask_l]).sum(axis=0)
                            if active_interaction_l else np.zeros(self.model.nv))
-            # Same softmax weights, applied to the SIGNED Cartesian normals --
-            # the aggregate "which way is this arm blocked" direction, used
-            # only by the stall-escape tangent (main_qp_controller.py). Never
-            # feeds the barrier itself, so it can't affect safety margins.
+            # Same softmax weights on the signed normals: the aggregate "which way is this arm
+            # blocked" direction, stall-escape use only.
             n_r_arr = np.asarray(n_for_r_list)           # (M, 3)
             n_l_arr = np.asarray(n_for_l_list)
             n_eff_r = n_eff_l = None
@@ -908,8 +675,7 @@ class CollisionManager:
             J_soft_sum_l = np.zeros(self.model.nv)
             n_eff_r, n_eff_l = None, None
 
-        # No active interaction -> that arm's barrier is silent (open space).
-        # Each arm's SoftMin is computed and returned INDEPENDENTLY.
+        # No active interaction -> that arm's barrier is silent; each SoftMin is independent.
         if not active_interaction_r or sum_exp_r < 1e-6:
             J_soft_r, h_soft_r = np.zeros(self.model.nv), 1.0
         else:

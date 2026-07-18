@@ -242,6 +242,32 @@ class LookAtController:
         dq_posture = -cfg.POSTURE_GAIN * (q - cfg.HEAD_POSTURE_TARGET)
         g[:self.n] = H[:self.n, :self.n] @ dq_posture   # scale by H so it isn't drowned
 
+        # Soft roll-alignment ("up-righting", see config.py §4): keep image-right
+        # (camera +X) aligned with world-right so the horizon stays level, added
+        # AFTER the posture g above so it only shapes the LEFTOVER redundancy.
+        # Low-weight least-squares COST (subordinate to the pointing equality
+        # below, never competes with it) + DEADBAND so it is completely silent
+        # near level -- guaranteeing a settled dwell drops below
+        # INTEGRATE_VEL_THRESH and fusion proceeds. `wz` targets the camera roll
+        # rate (J_cam angular row about the optical +Z axis).
+        R_cam = np.asarray(T_cam_base.rotation)
+        d_roll = R_cam.T @ cfg.WORLD_RIGHT
+        in_plane = float(np.hypot(d_roll[0], d_roll[1]))
+        if in_plane > cfg.ROLL_ALIGN_EPS:
+            theta_roll = float(np.arctan2(d_roll[1], d_roll[0]))
+            gate = float(np.clip(1.0 - self.last_angle_deg / cfg.ROLL_GATE_ANGLE_DEG,
+                                 cfg.ROLL_GATE_FLOOR, 1.0))
+            # Fully silent (no H/g contribution at all) both within the deadband
+            # AND while slewing far off-target (gate==0) -- only shapes roll once
+            # aligned and meaningfully tilted, so it never stiffens a slew nor
+            # holds a dwell above the fusion velocity gate.
+            if abs(np.degrees(theta_roll)) > cfg.ROLL_DEADBAND_DEG and gate > 1e-3:
+                wz = float(np.clip(cfg.K_ROLL_ALIGN * theta_roll,
+                                   -cfg.ROLL_WZ_MAX, cfg.ROLL_WZ_MAX)) * gate
+                J_roll = J_cam[5, :]                  # roll rate about the optical (+Z) axis
+                H[:self.n, :self.n] += cfg.W_ROLL_ALIGN * np.outer(J_roll, J_roll)
+                g[:self.n] += cfg.W_ROLL_ALIGN * wz * J_roll
+
         # Equality: look-at task  (J_rot dq - slack = omega_des)
         J_rot = J_cam[3:, :]                     # angular rows
         A_eq = np.zeros((3, n_vars))

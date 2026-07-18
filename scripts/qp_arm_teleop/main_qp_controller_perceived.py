@@ -13,15 +13,10 @@ node publishes a confident, latched /perceived_world/snapshot, and builds the
 WorldScene from that (see qp_controller/perceived_world_builder.py). Everything
 downstream is inherited verbatim, so this file stays ~1 method + a main().
 
-Subclassing RealQPController (not SafetyQPController directly) matters on real
-hardware: without it, the SoftMin CBF ran synchronously in-line every tick --
-previously measured to exceed the ENTIRE control-loop budget on its own on this
-robot -- collapsing the actual publish rate for everything downstream (qp_debug/*
-topics, /collision_constraints) far below what plotter.py and
-main_shared_autonomy.py's collision-data-staleness watchdog expect. RealQPController
-moves that cost to a worker thread exactly as main_qp_controller_real.py does; this
-subclass is unaffected in sim (REAL_HARDWARE=False there, so RealQPController itself
-falls back to fully synchronous behavior).
+Subclassing RealQPController (not SafetyQPController directly) matters on real hardware:
+the in-line SoftMin CBF alone exceeds the control-loop budget there, collapsing the publish
+rate below what the plotters and the collision-staleness watchdog expect. RealQPController
+moves that cost to a worker thread; in sim it falls back to fully synchronous behavior.
 
 The world is built ONCE, statically, from the confident snapshot — no dynamic
 per-tick CBF updates (a moving obstacle set would make the barrier non-stationary,

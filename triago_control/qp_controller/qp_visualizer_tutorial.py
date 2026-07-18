@@ -26,18 +26,8 @@ class QPVisualizer:
         self.ee_pos_left = None
         self.ee_vel_left = None
 
-        # --- State variables to hold the COMMANDED/REFERENCE telemetry ---
-        # PER-ARM, INDEPENDENT (2026-07-01 redesign): each arm has its OWN
-        # reference pose and its OWN frozen flag, decoupled from any notion of
-        # a single global "active_arm". This is what lets BOTH grippers render
-        # BLUE simultaneously when both arms are actively driven (e.g. by
-        # trajectory_generator.py), while STILL rendering exactly one blue +
-        # one grey in the single-arm teleop paradigm (one arm frozen by the
-        # CLF hold, the other tracking live input) — the old design only ever
-        # tracked one arm's pose at a time (cmd_pos/frozen_pos + active_arm),
-        # so a second simultaneously-active arm's reference was silently
-        # routed to the "frozen" grey slot instead of getting its own blue
-        # gripper.
+        # Per-arm, independent reference pose + frozen flag: both grippers can render blue
+        # simultaneously when both arms are driven, one blue + one grey in single-arm teleop.
         self.ref_pos_right = None
         self.ref_rot_right = None
         self.ref_pos_left = None
@@ -280,11 +270,8 @@ class QPVisualizer:
         3. End Effector Desires vs Reality (Arrows)
         4. Commanded Target Gripper (Blue)
 
-        `witness_info` = (min_distance, (p1, p2) or None): the TRUE global
-        closest collision-pair distance/points, computed ONCE per tick by
-        CollisionManager.compute_softmin_jacobian (self.witness_min_distance/
-        points) -- this used to be recomputed here via a second full scan of
-        cdata.distanceResults, duplicating that same scan every telemetry tick.
+        witness_info = (min_distance, (p1, p2) or None): the global closest pair,
+        computed once per tick by CollisionManager.compute_softmin_jacobian.
         """
         markers = MarkerArray()
         idx = 0
@@ -365,28 +352,9 @@ class QPVisualizer:
         process_arm(self.ee_pos_right, self.ee_vel_right, target_right)
         process_arm(self.ee_pos_left, self.ee_vel_left, target_left)
 
-        # --- 4/5. PER-ARM GRIPPER VISUALIZATION (2026-07-01 redesign) ---
-        # Each arm gets its OWN gripper marker, colored independently by its
-        # OWN frozen flag (self.frozen_right / self.frozen_left, sourced from
-        # main_qp_controller's ground-truth right_frozen/left_frozen state):
-        #   frozen=False (actively tracking a live reference) -> BLUE, ns
-        #     "qp_debug_gripper_right"/"_left"
-        #   frozen=True  (CLF holding a fixed pose)            -> GREY, ns
-        #     "frozen_gripper_right"/"_left"
-        # This is what lets BOTH grippers render BLUE simultaneously when both
-        # arms are actively driven (e.g. trajectory_generator.py publishing to
-        # both /arm_right and /arm_left cartesian_reference at once), while
-        # STILL rendering exactly one blue + one grey in the classic
-        # single-arm teleop paradigm (the inactive arm is frozen by the CLF
-        # hold). Each arm ALWAYS occupies exactly one of the two mutually
-        # exclusive namespaces at a time; the other is explicitly DELETEd so
-        # switching states never leaves a stale marker on screen.
-        #
-        # Fixed ids (0..2) per namespace -- see the historical bug-fix note
-        # this replaced: a shifting id (from the shared conditional `idx`
-        # counter above) meant RViz never overwrote the previous marker,
-        # leaving permanent ghosts. Four DISTINCT namespaces here (two per
-        # arm) can never collide with each other or with "qp_debug".
+        # Per-arm gripper markers: frozen=False -> BLUE (tracking), frozen=True -> GREY (CLF hold).
+        # Each arm occupies exactly one of two namespaces; the other is DELETEd so no stale ghosts.
+        # Fixed ids per namespace: a shifting id would leave permanent ghosts in RViz.
         def render_arm_gripper(ref_pos, ref_rot, frozen, side):
             """Add the correct gripper markers (blue or grey) for one arm
             directly into the `markers` MarkerArray, plus DELETE markers for

@@ -5,7 +5,7 @@ in the head camera's cylinder-perception pipeline.
 
 WHY THIS SCRIPT EXISTS
     main_head.py reports ~2-3cm error on the two known cylinders (r=2cm,
-    h=15cm). The 2026-07-02 accuracy pass already pushed the *fitting*
+    h=15cm). The fitting pipeline already pushed the *fitting*
     algorithm's own bias down to ~1-4mm (rim extraction + Hyper circle fit,
     verified numerically against synthetic point clouds — see
     head_control/object_detector.py's module docstring and .kiro/context.md

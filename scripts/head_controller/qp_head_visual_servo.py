@@ -79,10 +79,10 @@ class VisualServoingHead(Node):
         self.pub_visual_err = self.create_publisher(Float64MultiArray, '/qp_debug/xdot_err', 10)
         self.pub_wall_marker = self.create_publisher(Marker, '/qp_debug/virtual_wall_marker', 10)
         
-        # NEW: Cartesian Command Debugger
+        # Cartesian Command Debugger
         self.pub_cartesian_cmd = self.create_publisher(TwistStamped, '/qp_debug/head_cartesian_cmd', 10)
 
-        # NEW: Automatically switch controllers on boot
+        # Automatically switch controllers on boot
         self.check_and_switch_controllers()
 
         # --- RViz Visualizers ---
@@ -239,7 +239,7 @@ class VisualServoingHead(Node):
     def joint_cb(self, msg):
         """Updates Pinocchio state with any incoming joints, handling split ROS 2 messages."""
         
-        # --- NEW: Race Condition Shield ---
+        # --- Race Condition Shield ---
         if not hasattr(self, 'model'):
             return  # Ignore messages until the URDF is downloaded and model is built!
         # ----------------------------------
@@ -519,7 +519,7 @@ class VisualServoingHead(Node):
         self.pub_visual_err.publish(Float64MultiArray(data=pub_error.tolist()))
         self.pub_qdot_err.publish(Float64MultiArray(data=dq_opt.tolist()))
 
-        # --- NEW: DEBUG CARTESIAN COMMAND ---
+        # --- DEBUG CARTESIAN COMMAND ---
         # Map the chosen joint velocities back to Cartesian space to see what the head is doing
         v_cam_cmd = J_cam_full[:, self.head_v_idx] @ dq_opt 
         

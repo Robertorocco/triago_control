@@ -1,18 +1,7 @@
 #!/usr/bin/env python3
-"""PlotManager: belief histogram + twist comparison (radar + scrolling diff) UI.
-
-Extracted from the ~90 lines of matplotlib setup in SharedControlNode.__init__
-plus the update_plot method, per shared_autonomy_analysis.md Section 1 ("The
-entire matplotlib setup belongs in a PlotManager class") and Section 4.
-
-Bug fix applied here: the original update_plot called `.remove()` then `fill()`
-on the radar's filled polygons every tick (10 Hz). matplotlib's PolyCollection
-artists created by `fill()` are never fully garbage-collected when repeatedly
-replaced this way -- the Axes' internal artist list and associated draw caches
-keep growing, leaking memory over a long session. This version creates the
-PolyCollection patches ONCE in __init__ and mutates their vertices in place via
-`set_xy(...)` on every update, exactly as recommended in the analysis.
-"""
+"""PlotManager: belief histogram + twist radar/deviation UI for shared autonomy.
+Radar fill patches are created once and mutated via set_xy(): re-creating fill() artists
+every tick leaks matplotlib draw caches over a long session."""
 
 import time
 import threading
@@ -110,11 +99,7 @@ class PlotManager:
         self._active_arm_plot = 'right'
 
     def _build_twist_figure(self):
-        # Layout: radar (spider) on the LEFT spanning the full height; on the
-        # RIGHT a vertical stack with the scrolling per-DoF deviation plot on TOP
-        # and the inference-frequency monitor directly UNDER it (previously the
-        # freq panel sat BESIDE the deviation plot in a 1x3 row and the radar
-        # legend bled into it — both fixed here).
+        # Layout: radar on the left (full height); deviation plot + frequency monitor stacked right.
         self.fig2 = plt.figure(figsize=(15, 7))
         self.fig2.patch.set_facecolor('#0f0f1a')
         self.fig2.canvas.manager.set_window_title('Twist Command Monitor')
@@ -155,8 +140,7 @@ class PlotManager:
         self._radar_fill_pi = self.ax_radar.fill(
             angles, empty, alpha=0.20, color='#4ecdc4')[0]
 
-        # Legend placed BELOW the radar (not to its upper-right, where it used to
-        # bleed into the deviation plot in the old side-by-side layout).
+        # Legend below the radar so it never bleeds into the deviation plot.
         self.ax_radar.legend(loc='upper center', bbox_to_anchor=(0.5, -0.06),
                               ncol=2, fontsize=8, framealpha=0.2, labelcolor='white')
 

@@ -22,36 +22,11 @@ WHY upright-cylinder instead of full 6-DOF RANSAC cylinder:
     so fixing the axis to +Z turns the fit into two trivial, robust 1-D
     estimates (radial spread + height). This is the right amount of prior.
 
-WHY RIM EXTRACTION BEFORE THE CIRCLE FIT (2026-07-02 accuracy pass):
-    A cylinder viewed from above is NOT just a ring of points — the camera
-    also sees the entire SOLID TOP FACE (a filled disk), and any circle fit
-    (Kasa or otherwise) run on a filled disk + a partial side-wall arc is
-    systematically biased toward a SMALLER radius: interior points, on
-    average, sit closer to the true centre than the boundary does, and they
-    heavily outnumber boundary points (a disk has O(r^2) interior points vs.
-    O(r) boundary points). This was verified numerically (synthetic point
-    clouds, realistic ~3mm depth noise): fitting Kasa directly on a
-    disk+arc cluster gives a radius bias of roughly -3 to -5mm — which
-    matches the "few cm error, systematically low" symptom this pass fixes.
-    Critically, ADDING MORE VIEWPOINTS (a longer scan) DOES NOT FIX THIS: it
-    just re-confirms the same biased fit with more points. The scan was
-    solving the wrong problem.
-
-    The fix is standard in range-image circle/ellipse fitting: before fitting,
-    reduce the cluster to an estimate of its OUTER BOUNDARY ONLY (the rim),
-    then fit the circle to that. `_extract_rim` bins points by angle about a
-    rough centre estimate and keeps, per angular bin, the points near the
-    LOCAL 90th-percentile radius (not the raw max, which is sensitive to
-    RGB-D "flying pixel" outliers at depth discontinuities — verified
-    numerically to be more robust than a per-bin max under simulated outlier
-    contamination). This collapses the interior of the disk away and leaves
-    an approximately uniform ring for the circle fit, closing nearly all of
-    the bias (~-4mm -> sub-mm in simulation) WITHOUT needing multiple views.
-
-    The circle fit itself was also switched from Kasa to the Hyper fit
-    (Al-Sharadqah & Chernov's algebraic fit, which corrects the small
-    residual outward-bias Kasa has even on a clean ring) — a secondary,
-    smaller correction on top of the rim fix.
+RIM EXTRACTION BEFORE THE CIRCLE FIT: a top-down cylinder view includes the SOLID top face,
+and any circle fit on disk+arc points is biased small (O(r^2) interior vs O(r) boundary points);
+more viewpoints only re-confirm the biased fit. _extract_rim keeps, per angular bin, points near
+the local 90th-percentile radius (robust to flying-pixel outliers), leaving a ring for the fit.
+The fit itself is the Hyper fit (Al-Sharadqah & Chernov), which corrects Kasa's residual bias.
 """
 
 from dataclasses import dataclass, field

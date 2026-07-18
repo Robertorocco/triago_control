@@ -24,7 +24,7 @@ def generate_launch_description():
     )
 
     # Measured mount transform (arm_head_tool_link -> the camera driver's own
-    # TF root) -- replaces the idealized CAD (0,0,0 / -90deg about Y) numbers.
+    # TF root) -- measured mount, not the idealized CAD (0,0,0 / -90deg about Y) numbers.
     static_tf = Node(
         package='tf2_ros',
         executable='static_transform_publisher',

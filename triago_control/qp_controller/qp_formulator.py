@@ -1,33 +1,5 @@
 # qp_formulator.py
-"""
-The Mathematical Core.
-
-Builds the strictly-convex Quadratic Program solved every control tick and
-hands it to `quadprog`. The decision vector is:
-
-    x = [ q_dot (nv) , delta_right , delta_left ]
-
-i.e. the full joint velocity plus one scalar CLF slack per arm. The QP is:
-
-    min  1/2 x' H x + g' x
-    s.t. C' x >= b
-
-Cost  H/g : joint regularization (damping) + posture-hold spring + slack penalty.
-Constraints C/b :
-    * Task   : Perfect Scalar Inequality CLF  (per arm, normalized or raw)
-    * Safety : SoftMin CBF collision avoidance (padded with zero slack)
-    * Limits : velocity-aware joint position limits (upper + lower)
-
-ADAPTIVE SCHEDULING (PRESERVED EXACTLY):
-    * Decoupled dynamic slack weighting:
-          alpha = exp(-beta * lambda^2)
-          w_slack = base_weight_slack + alpha * (max_weight_slack - base_weight_slack)
-      computed independently per arm from that arm's worst shadow price lambda.
-    * Dynamic gamma (CLF) scheduling, low-pass filtered:
-          target_gamma = gamma_min + exp(-beta_gamma * lambda_col) * (gamma_max - gamma_min)
-      so CLF tracking authority decays exponentially near obstacles, using the
-      Lagrange multipliers (shadow prices) carried over from the previous loop.
-"""
+"""CLF-CBF-QP core: builds min 1/2 x'Hx + g'x s.t. C'x >= b over x = [q_dot(nv), delta_R, delta_L] and solves with quadprog."""
 
 import numpy as np
 import quadprog
@@ -48,11 +20,7 @@ class QPFormulator:
         self.H = np.zeros((self.n_total, self.n_total))
         self.g = np.zeros(self.n_total)
 
-        # Lagrange multiplier memory (shadow prices fed back into scheduling).
-        # last_lambda_col is now the MAX of the two per-arm CBF shadow prices
-        # (kept for backward-compat with the slack scheduler, which wants "how
-        # hard is EITHER barrier pushing"); the two are also tracked separately
-        # for telemetry/plotting.
+        # Shadow-price memory fed back into scheduling; last_lambda_col = max of the two per-arm CBF prices.
         self.last_lambda_col = 0.0
         self.last_lambda_cbf_right = 0.0
         self.last_lambda_cbf_left = 0.0
@@ -62,34 +30,19 @@ class QPFormulator:
         # Lazy cache for the posture-field joint indexing (built on first solve).
         self._posture_cache = None
 
-        # Lazy active-arm mask for the rate-damping term (built on first solve;
-        # see build_and_solve §A for why this MUST be masked to the arm joints).
+        # Lazy active-arm mask for the rate-damping term (must stay masked to the arm joints).
         self._rate_mask = None
 
-        # Live scale on the posture-task weight (1.0 = nominal). Dropped toward
-        # POSTURE_GRASP_SCALE during autonomous precision phases (grasp/lift) so
-        # the QP devotes the redundancy to precise tracking instead of posture.
-        # This GLOBAL scale is shared by both arms (grasp phases are per-active-
-        # arm at the orchestrator level already).
+        # Global posture-weight scale, dropped toward POSTURE_GRASP_SCALE during precision phases.
         self.posture_scale = 1.0
 
-        # Previous tick's solved joint velocity -- reference point for the
-        # cfg.ENABLE_RATE_DAMPING ||dq - dq_prev||^2 cost term (see build_and_solve
-        # §A). Zero-initialized: the very first solve after startup is treated as
-        # if it followed a zero-velocity tick, same convention as a fresh start.
+        # Previous tick's solved joint velocity (rate-damping anchor fallback), zero at startup.
         self.last_dq_safe = np.zeros(self.n_joints)
 
-        # Soft-task cost decomposition at the last solution (telemetry), 12
-        # floats: [0:4] = combined-both-arm totals [E_damp, E_posture, E_slack,
-        # E_rate] (kept for the live plotter.py dashboard -- EXACTLY the sum of
-        # the two per-arm halves below, since idx_right/idx_left partition the
-        # actuated joints and every other joint contributes 0 to each term);
-        # [4:8] = Right-arm-only decomposition; [8:12] = Left-arm-only. See
-        # build_and_solve. E_rate is 0 whenever cfg.ENABLE_RATE_DAMPING is False.
+        # Telemetry: [0:4] combined [E_damp, E_posture, E_slack, E_rate], [4:8] right, [8:12] left.
         self.task_energies = np.zeros(12)
 
-        # Low-pass-filtered shadow prices for the slack scheduler, per arm so
-        # one arm's CBF pressure never leaks into the other's schedule.
+        # Per-arm LPF'd shadow prices so one arm's CBF pressure never leaks into the other's schedule.
         self._lam_col_r_f = 0.0
         self._lam_col_l_f = 0.0
         self._lam_jr_f = 0.0
@@ -99,8 +52,7 @@ class QPFormulator:
         self.gamma_clf_r = cfg.GAMMA_CLF_DEFAULT
         self.gamma_clf_l = cfg.GAMMA_CLF_DEFAULT
 
-        # weight_slack_r/l are what the QP cost actually uses (see the slack
-        # block in build_and_solve); weight_slack is their average, for telemetry.
+        # weight_slack_r/l are what the QP cost uses; weight_slack is their average (telemetry).
         self.weight_slack = cfg.BASE_WEIGHT_SLACK
         self.weight_slack_r = cfg.BASE_WEIGHT_SLACK
         self.weight_slack_l = cfg.BASE_WEIGHT_SLACK
@@ -160,27 +112,19 @@ class QPFormulator:
         return self._posture_cache
 
     def _schedule_weights(self, dt):
-        # Update per-arm slack weights AND per-arm CLF gamma from last loop's
-        # shadow prices. Smooth the (noisy) shadow prices with a first-order
-        # LPF before they drive either schedule — this is what removes the
-        # abrupt weight/gamma jumps.
+        """Updates per-arm slack weights and CLF gamma from the LPF'd shadow prices of the last solve."""
         filter_alpha = np.exp(-dt / cfg.SLACK_FILTER_TAU)
         self._lam_col_r_f = filter_alpha * self._lam_col_r_f + (1.0 - filter_alpha) * self.last_lambda_cbf_right
         self._lam_col_l_f = filter_alpha * self._lam_col_l_f + (1.0 - filter_alpha) * self.last_lambda_cbf_left
         self._lam_jr_f = filter_alpha * self._lam_jr_f + (1.0 - filter_alpha) * self.last_lambda_joints_right
         self._lam_jl_f = filter_alpha * self._lam_jl_f + (1.0 - filter_alpha) * self.last_lambda_joints_left
 
-        # Per-arm worst shadow price: that arm's own collision price OR its
-        # own joint limit, never the other arm's.
+        # Per-arm worst shadow price: that arm's own collision OR joint-limit price, never the other's.
         max_shadow_r = max(self._lam_col_r_f, self._lam_jr_f)
         max_shadow_l = max(self._lam_col_l_f, self._lam_jl_f)
 
-        # Decoupled dynamic slack weighting (per arm), driven by the SMOOTHED prices.
-        # BETA's squared-exponential is steep enough that even a filtered lambda
-        # still swings the weight sharply near its knee (lambda can spike to
-        # ~400 collision / ~40 joint-limit in one tick) -- so add a second LPF
-        # stage on the weight itself, exactly like gamma's own filter below,
-        # using self.weight_slack_r/l as the persistent filter state.
+        # Decoupled per-arm slack weighting; a second LPF on the weight itself smooths
+        # BETA's steep squared-exponential response to fast-rising lambdas.
         if cfg.DYNAMIC_SLACK_WEIGHT:
             alpha_r = np.exp(-cfg.BETA * (max_shadow_r ** 2))
             target_slack_r = cfg.BASE_WEIGHT_SLACK + alpha_r * (cfg.MAX_WEIGHT_SLACK - cfg.BASE_WEIGHT_SLACK)
@@ -196,8 +140,7 @@ class QPFormulator:
             self.weight_slack_l = cfg.BASE_WEIGHT_SLACK
         weight_slack_r, weight_slack_l = self.weight_slack_r, self.weight_slack_l
 
-        # Same quadratic-tolerance law as the slack weight above, per arm,
-        # reusing the existing GAMMA_MIN/GAMMA_MAX bounds.
+        # Same quadratic-tolerance law as the slack weight, per arm, over [GAMMA_MIN, GAMMA_MAX].
         if cfg.DYNAMIC_GAMMA_CLF:
             alpha_gamma_r = np.exp(-cfg.BETA_GAMMA * (max_shadow_r ** 2))
             target_gamma_r = cfg.GAMMA_MIN + alpha_gamma_r * (cfg.GAMMA_MAX - cfg.GAMMA_MIN)
@@ -214,18 +157,7 @@ class QPFormulator:
         return weight_slack_r, weight_slack_l
 
     def _joint_name_by_idx_v(self, idx_v):
-        """Human-readable joint name for a velocity index (lazily cached).
-
-        Goes name -> model.getJointId(name) -> joint, the SAME trusted
-        direction robot_kinematics.py already uses, rather than iterating
-        model.joints and reading .id back off the joint object -- that
-        reverse direction has been observed to hand pinocchio's C++ binding
-        an unusable id (OverflowError: Python int too large to convert to
-        C long), which crashed this diagnostic before it printed anything
-        useful. Any single bad entry is skipped (logged once), not fatal --
-        this is a best-effort label for a print statement, never allowed to
-        hide the actual infeasibility diagnosis below it.
-        """
+        """Best-effort joint name for a velocity index (cached); resolves name->id, never fatal."""
         if not hasattr(self, '_idx_v_name_map'):
             self._idx_v_name_map = {}
             for name in self.model.names:
@@ -244,19 +176,8 @@ class QPFormulator:
     def _diagnose_infeasibility(self, kin, C_final, b_final,
                                 J_soft_r, b_col_r, h_soft_r, d_safe_r,
                                 J_soft_l, b_col_l, h_soft_l, d_safe_l):
-        """Console post-mortem for an infeasible solve (throttled to 1/s).
-
-        The CLF task rows carry an unbounded slack variable, so they can NEVER
-        cause infeasibility -- only these can, each with a distinct fingerprint:
-          1. non-finite values anywhere in the QP arrays (upstream numerics),
-          2. an inverted per-joint velocity box (dq_min > dq_max),
-          3. a CBF row unreachable within the velocity box,
-          4. the two CBF rows jointly incompatible inside the box (arms pushed
-             in irreconcilable directions -- no per-row check can see this).
-        Also prints the LIVE config flags: if these differ from config.py on
-        disk, the running process never reloaded it (rebuild is not enough --
-        the node must be fully restarted; recurring lesson in this repo).
-        """
+        """Throttled console post-mortem for an infeasible solve (CLF rows have slack, so only
+        non-finite inputs, inverted velocity boxes, or unreachable/conflicting CBF rows can fail)."""
         import time as _time
         now = _time.monotonic()
         if now - getattr(self, '_last_infeas_diag', 0.0) < 1.0:
@@ -311,15 +232,8 @@ class QPFormulator:
                   "q/h values and inspect fig2/fig4 for this instant.")
 
     def _safe_zero_solution(self, b_col_r=0.0, b_col_l=0.0):
-        # Shared fallback for every solve failure mode (infeasible, non-finite
-        # inputs, non-finite output): halt motion, reset shadow-price memory.
-        # last_dq_safe is deliberately NOT touched -- anchoring the rate-damping
-        # term on a zeroed value turned single bad ticks into self-sustaining
-        # failure (see the comment where last_dq_safe is actually updated).
-        # b_col_r/l are still published on /collision_constraints for
-        # haption_teleoperation's force feedback even on a failed solve (matches
-        # the original infeasible-path behavior) -- sanitized here so a NaN CBF
-        # value never reaches that consumer either.
+        """Fallback for any failed solve: halt motion, reset shadow prices, sanitize the CBF telemetry."""
+        # last_dq_safe is deliberately NOT zeroed: anchoring on a zeroed value makes one bad tick self-sustain.
         b_col_r = float(b_col_r) if np.isfinite(b_col_r) else 0.0
         b_col_l = float(b_col_l) if np.isfinite(b_col_l) else 0.0
         self.last_lambda_col = 0.0
@@ -334,43 +248,28 @@ class QPFormulator:
                         right_motion, left_motion, xdot_r, xdot_l,
                         e_r, v_r, e_l, v_l, dt, right_frozen=False, left_frozen=False,
                         tracking_boost_arm=None, orient_boost_arms=()):
-        """
-        Build and solve the CLF-CBF-QP for this tick.
-
-        Returns: (q_dot_safe, slack_r, slack_l, (b_col_r, b_col_l), lambda_joints_total)
-        """
+        """Builds and solves this tick's QP; returns (q_dot_safe, slack_r, slack_l, (b_col_r, b_col_l), lambda_joints)."""
         self.H.fill(0.0)
         self.g.fill(0.0)
 
-        # --- Adaptive scheduling from previous loop's shadow prices ---
         weight_slack_r, weight_slack_l = self._schedule_weights(dt)
-        # COST DECOUPLING (single-arm teleop): an INACTIVE (frozen) arm gets a
-        # FIXED maximal slack weight (no dynamic update), a fixed GAMMA_MAX CLF
-        # convergence rate, and doubled joint damping — so its hold is rigid and
-        # its solution is independent of whatever the active arm is doing. When
-        # BOTH arms are active (neither frozen) nothing changes (kept dynamic).
+        # A frozen (inactive) arm is pinned to max slack weight, GAMMA_MAX and doubled damping,
+        # so its hold is rigid and decoupled from whatever the active arm is doing.
         if right_frozen:
             weight_slack_r = cfg.MAX_WEIGHT_SLACK
         if left_frozen:
             weight_slack_l = cfg.MAX_WEIGHT_SLACK
-        # Per-arm CLF convergence rate: frozen arm holds tight at GAMMA_MAX.
         gamma_r = cfg.GAMMA_MAX if right_frozen else self.gamma_clf_r
         gamma_l = cfg.GAMMA_MAX if left_frozen else self.gamma_clf_l
-        # GRASP TRACKING BOOST: during autonomous grasp execution the grasping
-        # (active) arm must converge tightly to the standoff/insertion reference,
-        # so it is pinned to the MAX dynamic values — highest slack weight (track
-        # hard, barely yield) and highest CLF gamma (fast error decay). This is
-        # what lets GRASP_ALIGN converge inside tolerance instead of timing out.
+        # Grasp tracking boost: the autonomously-grasping arm is pinned to the max dynamic values
+        # so alignment converges inside tolerance instead of timing out.
         if tracking_boost_arm == 'right':
             weight_slack_r = cfg.MAX_WEIGHT_SLACK
             gamma_r = cfg.GAMMA_MAX
         elif tracking_boost_arm == 'left':
             weight_slack_l = cfg.MAX_WEIGHT_SLACK
             gamma_l = cfg.GAMMA_MAX
-        # Telemetry: representative (averaged, legacy) + per-arm slack weights.
-        # weight_slack_r/l are the EXACT values used in the Hessian's slack
-        # block below (delta_r weighted by weight_slack_r alone, delta_l by
-        # weight_slack_l alone) -- see §A.
+        # Telemetry: per-arm slack weights are exactly what the Hessian's slack block uses.
         self.weight_slack = (weight_slack_r + weight_slack_l) / 2.0
         self.weight_slack_r = weight_slack_r
         self.weight_slack_l = weight_slack_l
@@ -378,9 +277,7 @@ class QPFormulator:
         # =========================================================
         # A. COST FUNCTION (damping + posture spring + slack penalty)
         # =========================================================
-        # Joint velocity regularization (damping). Per-arm: an INACTIVE (frozen)
-        # arm gets DOUBLE damping so its motion is heavily penalized and its QP
-        # solution is decoupled from the active arm's demands.
+        # Joint-velocity damping; a frozen arm gets double damping to stay decoupled.
         damp_vec = np.full(self.n_joints, cfg.DAMP)
         if right_frozen and kin.idx_right:
             damp_vec[kin.idx_right] = 2.0 * cfg.DAMP
@@ -388,27 +285,14 @@ class QPFormulator:
             damp_vec[kin.idx_left] = 2.0 * cfg.DAMP
         H_brake = np.diag(damp_vec)
 
-        # Posture / joint-limit avoidance: repulsive POTENTIAL-FIELD reference.
-        # ------------------------------------------------------------------
-        # Replaces the old q_neutral spring + Chan&Dubey piecewise ramp. The
-        # reference velocity is the negative gradient of a barrier potential that
-        # diverges at each joint limit, evaluated on the NORMALIZED position
-        # p = (q - mid)/half_range in [-1, 1] (range-independent, so every joint
-        # is defended equally at the same fraction of its travel):
-        #     H(p)       = 1/(1-p)^2 + 1/(1+p)^2
-        #     dH/dp      = 2/(1-p)^3 - 2/(1+p)^3
-        #     v_ref      = -K_GRADIENT * dH/dp        (clamped to +/- V_MAX_POSTURE)
-        # Near-zero in the comfortable mid-range (CLF keeps tracking priority) and
-        # explodes (clamped) only near a limit, reconfiguring the redundant DOF.
-        # COST-only: the hard CLF/CBF/limit constraints are untouched.
+        # Posture field: v_ref = -K_GRADIENT * dH/dp with H(p) = 1/(1-p)^2 + 1/(1+p)^2 on the
+        # normalized position p = (q-mid)/half_range -- near-zero mid-range, diverges at limits.
+        # Cost-only: the hard CLF/CBF/limit constraints are untouched.
         mask_center = np.zeros(self.n_joints)
         v_ref_center = np.zeros(self.n_joints)
         v_idx, q_idx, mids, half_ranges = self._posture_indices(kin)
         if v_idx.size > 0:
-            # Normalized position, GUARDED strictly inside (-1, 1). This guard is
-            # essential: at/over a limit the raw cube would flip sign and PUSH the
-            # joint further out (runaway). Clamping p keeps the gradient finite and
-            # correctly-signed; the output clamp below bounds the magnitude.
+            # Clamp p strictly inside (-1,1): at/over a limit the raw cube flips sign and pushes OUT.
             EPS = 1e-3
             p = (kin.current_q[q_idx] - mids) / half_ranges
             p = np.clip(p, -1.0 + EPS, 1.0 - EPS)
@@ -419,23 +303,14 @@ class QPFormulator:
             mask_center[v_idx] = 1.0
             v_ref_center[v_idx] = v
 
-        # Effective posture weight (scaled down during autonomous precision phases
-        # via self.posture_scale, set by the controller from the grasp state).
+        # Effective posture weight, scaled down during autonomous precision phases.
         w_center = cfg.W_CENTER * self.posture_scale
         H_center = np.diag(mask_center * w_center)
         g_center = -(mask_center * w_center) * v_ref_center
 
-        # RATE damping: ||dq - dq_prev||^2 (cfg.ENABLE_RATE_DAMPING, see config.py).
-        # dq_prev = the MEASURED velocity (kin.current_v) when
-        # cfg.RATE_DAMPING_VS_MEASURED; the last_dq_safe fallback (the QP's own
-        # previous output) is the rejected variant -- self-referential in-loop
-        # filter, made real motion worse.
-        # The term MUST stay masked to the 14 arm joints: locked joints are
-        # pinned to dq=0 by two OPPOSING box inequalities, and kin.current_v
-        # carries head motion + differentiation noise on them -- an unmasked
-        # g_rate contests that pin, forcing two exactly linearly dependent rows
-        # into quadprog's active set, which fails its dual method with
-        # "constraints are inconsistent" despite a satisfiable constraint set.
+        # Rate damping ||dq - dq_measured||^2, arm joints ONLY: locked joints are pinned to dq=0 by
+        # two opposing box rows, and an unmasked rate gradient contests that pin -- two linearly
+        # dependent rows enter quadprog's active set and the dual method fails outright.
         if self._rate_mask is None:
             self._rate_mask = np.zeros(self.n_joints)
             if kin.idx_right:
@@ -447,22 +322,30 @@ class QPFormulator:
                 dq_prev_rate = kin.current_v
             else:
                 dq_prev_rate = self.last_dq_safe
-            H_rate = np.diag(self._rate_mask * cfg.RATE_WEIGHT)
-            # Built by SELECTING at the arm indices, NOT by multiplying the
-            # (0/1) mask against the full dq_prev_rate: 0 * nan == nan, not 0,
-            # so masking-via-multiplication does NOT neutralize a non-finite
-            # entry elsewhere in dq_prev_rate (e.g. an unsensed mobile-base
-            # wheel joint) -- it silently plants a NaN into g at that index,
-            # which poisons quadprog's ENTIRE solution vector, including the
-            # arm DOFs, even though the wheels are otherwise fully locked by
-            # the box constraints (real-hardware incident, 2026-07-15). Direct
-            # index assignment never reads dq_prev_rate anywhere but the arm
-            # joints, so garbage at any other index literally cannot be seen.
+            # Relaxed RATE_WEIGHT_GRASP on the boosted arm and whenever tracking error is large:
+            # full RATE_WEIGHT anchored to a near-zero measured velocity self-reinforces a freeze
+            # (every command pulled back to ~zero); full anti-oscillation weight only matters near convergence.
+            err_r = float(np.linalg.norm(e_r[:3]))
+            err_l = float(np.linalg.norm(e_l[:3]))
+            rate_weight_r = (cfg.RATE_WEIGHT_GRASP
+                            if (tracking_boost_arm == 'right' or err_r > cfg.STALL_ERR_POS_THRESH)
+                            else cfg.RATE_WEIGHT)
+            rate_weight_l = (cfg.RATE_WEIGHT_GRASP
+                            if (tracking_boost_arm == 'left' or err_l > cfg.STALL_ERR_POS_THRESH)
+                            else cfg.RATE_WEIGHT)
+            rate_weight_vec = np.zeros(self.n_joints)
+            if kin.idx_right:
+                rate_weight_vec[kin.idx_right] = rate_weight_r
+            if kin.idx_left:
+                rate_weight_vec[kin.idx_left] = rate_weight_l
+            H_rate = np.diag(rate_weight_vec)
+            # Built by SELECTING at arm indices, never mask-multiplying: 0*nan == nan, so a non-finite
+            # entry elsewhere in dq_prev_rate (e.g. an unsensed wheel joint) would poison the whole solve.
             g_rate = np.zeros(self.n_joints)
             if kin.idx_right:
-                g_rate[kin.idx_right] = -cfg.RATE_WEIGHT * dq_prev_rate[kin.idx_right]
+                g_rate[kin.idx_right] = -rate_weight_r * dq_prev_rate[kin.idx_right]
             if kin.idx_left:
-                g_rate[kin.idx_left] = -cfg.RATE_WEIGHT * dq_prev_rate[kin.idx_left]
+                g_rate[kin.idx_left] = -rate_weight_l * dq_prev_rate[kin.idx_left]
         else:
             dq_prev_rate = self.last_dq_safe
             H_rate = 0.0
@@ -491,9 +374,7 @@ class QPFormulator:
             dim = len(e_vec)
             J_task = J_6D[:dim, :]
 
-            # Diagonal task weights. Nominally position-dominant (TASK_WEIGHTS_6D, 25:1);
-            # the arm under autonomous grasp/release control is passed the orientation-
-            # boosted TASK_WEIGHTS_6D_GRASP (2:1) so its approach-axis aligns tightly.
+            # Diagonal task weights: position-dominant nominally, orientation-boosted during grasp work.
             W = task_weights[:dim]
             e_w = e_vec * W  # element-wise == W @ e for a diagonal W
 
@@ -517,43 +398,27 @@ class QPFormulator:
                 # b = (W e)^T xdot_ref + gamma * V(e),  V(e) = 0.5 e^T W e
                 b_stack.append(np.dot(e_w, xdot_ref_vec) + 0.5 * gamma * np.dot(e_vec, e_w))
 
-        # Per-arm task weights: an arm doing precision work with the object
-        # (orient_boost_arms -- grasp/release execution OR carrying an attached
-        # object) uses the orientation-boosted grasp weights so its approach-axis /
-        # placement orientation aligns tightly; other arms keep the nominal
-        # position-dominant weights. STATIC per-phase swap, no continuous adaptation.
-        # (Decoupled from tracking_boost_arm, which drives only the slack/gamma boost.)
+        # Static per-phase weight swap: arms in orient_boost_arms (grasp work or carrying an
+        # object) use the orientation-boosted grasp weights; decoupled from tracking_boost_arm.
         W_task_r = cfg.TASK_WEIGHTS_6D_GRASP if 'right' in orient_boost_arms else cfg.TASK_WEIGHTS_6D
         W_task_l = cfg.TASK_WEIGHTS_6D_GRASP if 'left' in orient_boost_arms else cfg.TASK_WEIGHTS_6D
 
-        # Inject per-arm CLF rows only when that arm is tracking a reference.
-        # The frozen arm uses GAMMA_MAX (gamma_r / gamma_l set above) so it holds
-        # its pose tightly and independently of the active arm.
+        # Per-arm CLF rows are injected only when that arm tracks a reference.
         if right_motion or xdot_r is not None:
             add_perfect_scalar_clf(kin.ee_id_right, e_r, v_r, 0, gamma_r, W_task_r)
         if left_motion or xdot_l is not None:
             add_perfect_scalar_clf(kin.ee_id_left, e_l, v_l, 1, gamma_l, W_task_l)
 
         # =========================================================
-        # C. SAFETY CONSTRAINTS (TWO INDEPENDENT per-arm SoftMin CBFs)
-        #    J_soft_X dq >= -gamma_cbf * (h_soft_X - d_safe_dynamic_X)   for X in {R, L}
-        #
-        # Replaces the single combined SoftMin row. Each row's gradient only has
-        # nonzero columns in the joints of the pairs that actually contributed to
-        # IT (see CollisionManager.compute_softmin_jacobian): an inter-arm pair
-        # (or two held cylinders) appears in BOTH rows (preserves "arm A may
-        # yield to help arm B"), but a pair touching only arm A's geometry vs. a
-        # static obstacle NEVER appears in arm B's row (eliminates the spurious
-        # coupling/oscillation where an idle arm twitched because the OTHER arm
-        # neared an unrelated obstacle).
-        #
-        # d_safe_dynamic_X is also per-arm: each margin thickens only with
-        # that arm's own speed (CollisionManager.compute_softmin_jacobian).
+        # C. SAFETY CONSTRAINTS: two independent per-arm SoftMin CBF rows,
+        #    J_soft_X dq >= -gamma_cbf * (h_soft_X - d_safe_dynamic_X).
+        # An inter-arm pair contributes to BOTH rows (either arm may yield for the other);
+        # a pair touching only one arm never recruits the other arm's joints.
         # =========================================================
         C_col_r_padded = np.concatenate([J_soft_r, np.zeros(self.n_slacks)])
         C_col_l_padded = np.concatenate([J_soft_l, np.zeros(self.n_slacks)])
         if cfg.DISABLE_CBF:
-            b_col_r = -10000.0  # Practically infinite slack -> barrier never activates
+            b_col_r = -10000.0  # practically infinite slack: the barrier never activates
             b_col_l = -10000.0
         else:
             b_col_r = -cfg.GAMMA_CBF * (h_soft_r - d_safe_dynamic_r)
@@ -569,7 +434,7 @@ class QPFormulator:
             if joint.id == 0 or joint.nq != 1:
                 continue
             idx_v = joint.idx_v
-            if idx_v not in active_indices:  # Locked joints stay at zero (masked out)
+            if idx_v not in active_indices:  # locked joints stay pinned at zero
                 continue
             v_limit = self.model.velocityLimit[idx_v]
             self.dq_max_safe[idx_v] = v_limit
@@ -581,7 +446,7 @@ class QPFormulator:
             q_now = kin.current_q[idx_q]
             v_now = kin.current_v[idx_v]
 
-            # Velocity-aware buffer: dynamic_buffer = base + K_v * |v|
+            # Velocity-aware buffer: a fast joint starts braking earlier (base + K_v * |v|).
             dynamic_buffer = cfg.JOINT_LIMIT_BUFFER_BASE + (cfg.JOINT_LIMIT_K_V * abs(v_now))
             if q_u < 1e10:
                 self.dq_max_safe[idx_v] = min(self.dq_max_safe[idx_v],
@@ -589,9 +454,7 @@ class QPFormulator:
             if q_l > -1e10:
                 self.dq_min_safe[idx_v] = max(self.dq_min_safe[idx_v],
                                               -cfg.P_GAIN_LIMITS * (q_now - q_l - dynamic_buffer))
-            # Do not add a hard slew-rate box here: if the CBF row's required
-            # direction changes faster than the box allows, no q_dot satisfies
-            # both and the QP goes infeasible.
+            # No hard slew-rate box here: it cannot track a fast-turning CBF row and goes infeasible.
 
         # =========================================================
         # E. ASSEMBLE ALL CONSTRAINTS (collision x2, limits, task)
@@ -602,7 +465,7 @@ class QPFormulator:
         b_all.append(-self.dq_max_safe)
         C_all.append(self.C_min)
         b_all.append(self.dq_min_safe)
-        if C_stack:  # Task CLF rows (may be empty if no reference yet)
+        if C_stack:  # task CLF rows (empty until a reference arrives)
             C_all.append(np.vstack(C_stack))
             b_all.append(np.array(b_stack))
 
@@ -613,13 +476,8 @@ class QPFormulator:
         # =========================================================
         # F. SOLVE + SHADOW-PRICE EXTRACTION
         # =========================================================
-        # NaN/Inf guard BEFORE handing anything to quadprog: a single non-finite
-        # entry in H/g/C/b (a corrupted upstream sensor reading, a NaN CBF pair
-        # that slipped past collision_manager's own guard, etc.) does NOT reliably
-        # make quadprog raise -- it can silently return a NaN-filled "solution"
-        # instead, which then sails straight to the real hardware command with
-        # zero indication anything went wrong. Catch it HERE, before the solve,
-        # every tick (this check is cheap relative to the solve itself).
+        # NaN/Inf guard BEFORE the solve: quadprog does not reliably raise on non-finite input,
+        # it can silently return a NaN "solution" that would sail straight to the hardware command.
         if not (np.isfinite(self.H).all() and np.isfinite(self.g).all()
                 and np.isfinite(C_final).all() and np.isfinite(b_final).all()):
             print("\033[91m[QP Error] NON-FINITE H/g/C/b -- refusing to call quadprog "
@@ -631,18 +489,14 @@ class QPFormulator:
 
         sol, lagrangians = self._solve_qp(self.H, self.g, C_final, b_final)
         if sol is None:
-            # Infeasible: halt motion, reset shadow-price memory. last_dq_safe
-            # is NOT zeroed -- anchoring on a zeroed value turned single
-            # infeasible ticks into self-sustaining failure.
+            # Infeasible tick: safe halt (last_dq_safe intentionally kept, see _safe_zero_solution).
             self._diagnose_infeasibility(kin, C_final, b_final,
                                          J_soft_r, b_col_r, h_soft_r, d_safe_dynamic_r,
                                          J_soft_l, b_col_l, h_soft_l, d_safe_dynamic_l)
             return self._safe_zero_solution(b_col_r, b_col_l)
 
         if not np.isfinite(sol).all():
-            # Belt-and-suspenders: H/g/C/b were finite (checked above) yet
-            # quadprog itself returned a non-finite solution -- an ill-conditioned
-            # active set rather than a bad input. Same safe fallback either way.
+            # Finite inputs can still yield a non-finite solution (ill-conditioned active set).
             print("\033[91m[QP Error] quadprog returned a NON-FINITE solution from "
                   "finite inputs (numerical ill-conditioning) -- discarding it.\033[0m")
             return self._safe_zero_solution(b_col_r, b_col_l)
@@ -651,14 +505,12 @@ class QPFormulator:
         slack_r = sol[-2]
         slack_l = sol[-1]
 
-        # 1. Collision shadow prices (rows 0 = right CBF, 1 = left CBF)
+        # Collision shadow prices (row 0 = right CBF, row 1 = left CBF).
         self.last_lambda_cbf_right = float(lagrangians[0])
         self.last_lambda_cbf_left = float(lagrangians[1])
-        # Backward-compat scalar (used by the slack scheduler's "how hard is
-        # EITHER barrier pushing" logic): the max of the two per-arm prices.
+        # Backward-compat scalar for the slack scheduler: the worse of the two barriers.
         self.last_lambda_col = max(self.last_lambda_cbf_right, self.last_lambda_cbf_left)
-        # 2. Joint-limit shadow prices: upper rows then lower rows (offset by +2
-        #    now that there are TWO collision rows instead of one).
+        # Joint-limit shadow prices: upper rows then lower rows, offset by the 2 collision rows.
         lambda_upper = np.array(lagrangians[2:2 + self.n_joints])
         lambda_lower = np.array(lagrangians[2 + self.n_joints:2 + 2 * self.n_joints])
         lambda_joints_total = lambda_upper + lambda_lower
@@ -673,9 +525,7 @@ class QPFormulator:
         else:
             self.last_lambda_joints_left = 0.0
 
-        # Soft-task cost decomposition for telemetry, per arm: E_damp = DAMP *
-        # ||q_dot||^2, E_posture = W_CENTER * ||q_dot - v_ref||^2, E_slack =
-        # w * delta^2, E_rate = RATE_WEIGHT * ||q_dot - q_dot_prev||^2.
+        # Telemetry cost decomposition per arm: E_damp, E_posture, E_slack, E_rate.
         def _sum_sq(vec, idx):
             return float(np.sum(vec[idx] ** 2)) if idx else 0.0
 
@@ -687,11 +537,7 @@ class QPFormulator:
         e_posture_l = w_center * _sum_sq(dq_post, idx_l)
         e_slack_r = float(weight_slack_r * slack_r ** 2)
         e_slack_l = float(weight_slack_l * slack_l ** 2)
-        # Computed by SELECTING at the arm indices (same reasoning as g_rate
-        # above): a mask-multiply here would equally silently NaN-poison this
-        # telemetry from a non-finite dq_prev_rate entry elsewhere (e.g. a
-        # wheel joint), even though _sum_sq's own idx slicing happens to make
-        # it harmless today -- fixed at the source so that stays true.
+        # Selected at arm indices for the same NaN-poisoning reason as g_rate above.
         if cfg.ENABLE_RATE_DAMPING:
             def _rate_energy(idx):
                 if not idx:

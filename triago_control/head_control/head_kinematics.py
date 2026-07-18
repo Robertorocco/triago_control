@@ -252,8 +252,18 @@ class HeadKinematics:
 
         Runs on a LOCAL copy of q_real -- never mutates live state (self.data
         gets overwritten with the real q on the next forward() tick regardless).
-        Returns the solved head-joint vector (7,), or None if the final
-        residual exceeds `tol` (unreachable -- caller should not move there).
+
+        Returns (q_head, info): the BEST-EFFORT head-joint vector (7,) ALWAYS
+        (clipped to the soft joint limits -- the closest the head can get), plus
+        a diagnostic dict so the caller can drive there anyway and explain WHY a
+        view is only partially reached:
+            reachable   : bool  -- final residual within `tol`
+            residual_m  : float -- ‖target - achieved‖ (m)
+            err_base    : (3,)  -- target - achieved in base frame (which way it's short)
+            achieved    : (3,)  -- camera origin actually reached, base frame
+            target      : (3,)  -- the requested camera position
+            saturated   : list of (joint_name, side, value, limit) for head joints
+                          pinned at a soft limit -- the mechanical reason it's short.
         """
         q_full = self.q_real.copy()
         q_min, q_max = self.get_head_joint_limits()
@@ -262,6 +272,7 @@ class HeadKinematics:
         q_seed = np.array([q_full[i] for i in self.head_q_idx])
         q_head = q_seed.copy()
         err = np.zeros(3)
+        p = np.zeros(3)
 
         for _ in range(iters):
             for i, idx in enumerate(self.head_q_idx):
@@ -287,9 +298,25 @@ class HeadKinematics:
             dq = dq_task + N @ dq_null
             q_head = np.clip(q_head + np.clip(dq, -0.15, 0.15), lo, hi)
 
-        if np.linalg.norm(err) > tol:
-            return None
-        return q_head
+        # Which head joints ended pinned at a soft limit -- the joint(s) that
+        # physically block reaching the target (buf away from the raw limit).
+        saturated = []
+        for i, name in enumerate(cfg.HEAD_JOINTS):
+            if q_head[i] <= lo[i] + 1e-3:
+                saturated.append((name, "lower", float(q_head[i]), float(q_min[i])))
+            elif q_head[i] >= hi[i] - 1e-3:
+                saturated.append((name, "upper", float(q_head[i]), float(q_max[i])))
+
+        residual = float(np.linalg.norm(err))
+        info = {
+            "reachable": residual <= tol,
+            "residual_m": residual,
+            "err_base": np.asarray(err, dtype=float).copy(),
+            "achieved": np.asarray(p, dtype=float).copy(),
+            "target": np.asarray(target_pos, dtype=float).copy(),
+            "saturated": saturated,
+        }
+        return q_head, info
 
     def get_head_joint_positions(self):
         return np.array([self.q_real[i] for i in self.head_q_idx])

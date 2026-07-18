@@ -1,33 +1,8 @@
 #!/usr/bin/env python3
-"""GraspStateMachine: 4-state dict-dispatch grasp state machine.
-
-Extracted from the procedural if/elif/elif/else chain inside the original
-timer_callback, per shared_autonomy_analysis.md Section 3 (state machine
-critique) and Section 4 (class decomposition table).
-
-Design notes / fixes applied relative to the original:
-
-Problem A (conflated identity and transition): the original PRE_GRASP branch
-was an `elif self.PREDICTION and b_max > 0.90 and is_aligned:` condition, so
-staying in PRE_GRASP required b_max to remain above 0.90 on every single tick.
-A single noisy dip in a noisy EMA belief would drop the robot straight back to
-SHARED_AUTONOMY even though `is_aligned` already has its own hysteresis. This
-version adds the same kind of hysteresis to the belief gate: once *inside*
-PRE_GRASP, the belief threshold for *staying* is relaxed (BELIEF_ENTER vs
-BELIEF_STAY), exactly mirroring the existing is_aligned hysteresis pattern.
-
-Problem B (target_twist multiple definition sites / possible UnboundLocalError):
-every handler below is required to return a TickOutput with a concrete
-target_twist; there is no implicit fallthrough, so target_twist can never be
-left undefined.
-
-Problem C (hard to extend): new states are added by writing one handler method
-and one dict entry in _build_handlers; no existing handler needs to change.
-
-This module has no ROS or matplotlib dependencies and operates purely on the
-TickInput / TickOutput dataclasses, making each handler unit-testable in
-isolation.
-"""
+"""Dict-dispatch grasp state machine over TickInput/TickOutput dataclasses (no ROS/plot deps).
+Belief entry/stay hysteresis (BELIEF_ENTER vs BELIEF_STAY) keeps a noisy belief dip from dropping
+PRE_GRASP; every handler must return a concrete TickOutput, and new states are one handler + one
+dict entry."""
 
 import time
 from dataclasses import dataclass, field
@@ -78,7 +53,7 @@ class TickOutput:
     # CBF / margin side effects the node must publish this tick.
     ignore_cbf: Optional[str] = None          # None -> don't publish this tick
     # grasp_margin: float -> set that margin; "CLEAR" -> explicit _clear_grasp_margin();
-    # None -> leave the margin topic untouched this tick (matches the original,
+    # None -> leave the margin topic untouched this tick (matches the caller contract,
     # where PRE_GRASP never calls either _set_grasp_margin or _clear_grasp_margin).
     grasp_margin: Optional[object] = None
     gripper_cmd: Optional[str] = None         # e.g. "ORANGE_RIGHT_RED", "CLOSE_RIGHT_0.0150"
@@ -125,22 +100,21 @@ class GraspStateMachine:
     #     require deeper seating for a firmer, less slip-prone grasp.
     #   Both are reachable within the relaxed gripper<->cylinder CBF (GRASP_CBF_MARGIN=-0.08).
     #   Selected by grasp type via _contact_depth_threshold().
-    GRASP_CONTACT_DEPTH_TOP = -0.03
+    GRASP_CONTACT_DEPTH_TOP = -0.045
     GRASP_CONTACT_DEPTH_SIDE = -0.05
-    APPROACH_ANG_TOL = 0.135         # rad — approach-axis alignment at end of insertion (was 0.15, ~10% tighter)
-    APPROACH_POS_TOL = 0.009         # m — position-reached fallback (was 0.01, ~10% tighter)
+    APPROACH_ANG_TOL = 0.135         # rad -- approach-axis alignment at end of insertion
+    APPROACH_POS_TOL = 0.009         # m -- position-reached fallback
     # Straight-line advance from the standoff along the approach axis (the DEPTH knob),
     # PER GRASP TYPE. The gripper drives this far from the standoff toward/into the
     # cylinder before closing; selected via _insertion_travel().
     #   - TOP  (0.09): vertical insertion depth — works well, leave as-is.
-    #   - SIDE (0.0612): shallower than top. The deeper side insertion was shoving the
-    #     cylinder sideways before the fingers closed/lifted; a shallower reach still lets
-    #     the fingers bracket the wall but stops pushing the object into the mesh.
-    GRASP_INSERTION_TRAVEL_TOP = 0.09
-    GRASP_INSERTION_TRAVEL_SIDE = 0.0612
+    #   - SIDE: shallower than top -- deep enough for the fingers to bracket the wall
+    #     without shoving the cylinder sideways before they close.
+    GRASP_INSERTION_TRAVEL_TOP = 0.135
+    GRASP_INSERTION_TRAVEL_SIDE = 0.0918
     GRASP_FORCE_THRESHOLD = 2.0
     GRASP_CLOSE_HOLD_S = 4.0
-    GRASP_APPROACH_TIMEOUT_S = 30.0  # increased from 20s — approach can be slow with relaxed CBF
+    GRASP_APPROACH_TIMEOUT_S = 30.0  # approach can be slow with the relaxed CBF
 
     # Force-controlled closure parameters
     GRIP_CLOSE_VELOCITY = 0.01   # rad/s — very slow closure (~13s to close)
@@ -160,7 +134,7 @@ class GraspStateMachine:
                        pair naming during the grasp sequence.
             initial_state: starting state name.
             debug: if True, handlers populate verbose log_lines on every tick
-                   (mirrors the original GRASP_DEBUG flag).
+                   (mirrors the GRASP_DEBUG flag).
         """
         self._state = initial_state
         self.debug = debug
@@ -178,6 +152,8 @@ class GraspStateMachine:
         self._release_lift_start = None  # reset for RELEASE_LIFT (post-OPEN) phase
         self._abort_lift_start = None  # reset for ABORT_LIFT (failed grasp retreat) phase
         self._abort_lift_color = None  # color of the cylinder being retreated from
+        self._abort_start_pos = None  # EE position at retreat start (travel-distance gate)
+        self._recover_start = None  # reset for RECOVER (post-abort barrier-restore settle) phase
         self._align_start = None  # reset for GRASP_ALIGN timeout
         self._holding_entered = False  # latch so the HOLDING banner prints once per grasp
 
@@ -201,6 +177,7 @@ class GraspStateMachine:
             "HOLDING": self._holding,
             "RELEASE_LIFT": self._release_lift,
             "ABORT_RETREAT": self._abort_lift,
+            "RECOVER": self._recover,
         }
 
     def _transition(self, new_state):
@@ -261,13 +238,13 @@ class GraspStateMachine:
     def step(self, inp: TickInput) -> TickOutput:
         """Evaluates the active goal's transition guard, then dispatches to the handler.
 
-        Mirrors the original if/elif/elif/else ordering of priority: GRASP_CLOSE
+        Priority ordering: GRASP_CLOSE
         and GRASP_APPROACH are "sticky" (handled purely by their own internal
         logic since they must run to completion / timeout), whereas the choice
         between PRE_GRASP and SHARED_AUTONOMY is re-evaluated every tick based on
         belief + alignment.
         """
-        if self._state in ("GRASP_CLOSE", "GRASP_APPROACH", "LIFT", "HOLDING", "GRASP_ALIGN", "RELEASE_LIFT", "ABORT_RETREAT"):
+        if self._state in ("GRASP_CLOSE", "GRASP_APPROACH", "LIFT", "HOLDING", "GRASP_ALIGN", "RELEASE_LIFT", "ABORT_RETREAT", "RECOVER"):
             # GRASP_* and LIFT are pure run-to-completion phases. HOLDING is
             # special: while an object is in the gripper the PRE_GRASP branch is
             # deliberately UNREACHABLE (you cannot commit a second grasp with the
@@ -303,7 +280,7 @@ class GraspStateMachine:
             target_twist=inp.pi_max,
             new_state=self._state,
             ignore_cbf="None",
-            grasp_margin=CLEAR_MARGIN,   # matches original's explicit _clear_grasp_margin()
+            grasp_margin=CLEAR_MARGIN,   # explicit margin clear on this transition
             log_lines=log_lines,
         )
 
@@ -317,28 +294,13 @@ class GraspStateMachine:
 
         if entering:
             # Logged once, on the SHARED_AUTONOMY -> PRE_GRASP transition only.
-            # (Previously there was a second, unconditional copy of this same
-            # message logged on every tick while debug=True, which spammed the
-            # console at the full ~100 Hz control-loop rate. The original
-            # monolithic script throttled that second copy to 0.5s; here we
-            # remove it entirely instead, since per the request only state
-            # changes / unexpected events should be logged, not a periodic
-            # heartbeat.)
             log_lines.append(("info", "=== [PRE-GRASP READY] Alignment perfect! Type 'CLOSE' to execute. ==="))
             log_lines.append(
                 ("info", f"[GRASP-DBG] PRE_GRASP goal={inp.active_goal_key} b_max={inp.b_max:.3f} "
                          f"pos_err={inp.pos_error:.4f}m ang_err={inp.ang_error:.4f} (waiting for CLOSE)"))
 
-        # Fix applied here (root cause of the grasping oscillation, per
-        # shared_autonomy_analysis.md Section 2): the original computed
-        #     target_twist = self.compute_v_geo(self.current_T_EE, T_active_goal)
-        # i.e. the RAW geometric velocity, which has no knowledge of the CBF
-        # barrier. At the standoff (which sits right at the edge of the
-        # cylinder's safe zone) v_geo keeps pushing toward the goal, the CLF
-        # tracks it into the barrier, the CBF pushes back, and the cycle
-        # repeats. The fix is to use the QP-constrained policy (pi_max) here
-        # instead, since the QP already incorporates the CBF constraint and
-        # decelerates smoothly to zero as the barrier activates.
+        # QP-constrained policy (pi_max), NOT the raw v_geo: at the standoff the raw velocity
+        # fights the CBF (push-pushback oscillation); pi_max decelerates smoothly at the barrier.
         target_twist = inp.pi_max
 
         color = inp.active_goal_key.split('_')[0]
@@ -379,19 +341,15 @@ class GraspStateMachine:
     # ------------------------------------------------------------------
     # PHASE 1.5: GRASP_ALIGN (precise centering before the blind insertion)
     # ------------------------------------------------------------------
-    ALIGN_POS_TOL = 0.022   # m — within ~2.2 cm of the standoff (relaxed ~10%: grasp
-                            #   succeeds even from slightly looser alignment, per operator)
-    ALIGN_ANG_TOL = 0.143   # rad — approach-axis within ~8.2° of the goal (relaxed ~10%)
+    ALIGN_POS_TOL = 0.029   # m -- within ~2.9 cm of the standoff
+    ALIGN_ANG_TOL = 0.143   # rad -- approach-axis within ~8.2 deg of the goal
     # Lateral centering tolerance: the perpendicular distance from the cylinder
     # axis to the gripper's approach line must be within this. If not, the fingers
     # will hit one side of the cylinder and knock it over during the blind insertion.
     # Physically: gripper finger opening is ~7 cm, cylinder diameter is ~4 cm, so
     # up to ~1.5 cm lateral error still lets both fingers bracket the cylinder.
-    ALIGN_CENTERING_TOL = 0.025   # m — must be centered within 25 mm of the cylinder axis
-    ALIGN_TIMEOUT_S = 12.0  # if alignment doesn't converge in this time, abort
-                            #   (raised 6 -> 12s: the precise centring before the blind
-                            #    insertion can be slow, and a premature abort/approach is
-                            #    what was nudging the cylinder over with the fingertips)
+    ALIGN_CENTERING_TOL = 0.0288  # m -- centered within ~28.8 mm of the cylinder axis
+    ALIGN_TIMEOUT_S = 12.0  # s -- precise centring is slow; a premature abort nudges the cylinder
 
     def _grasp_align(self, inp: TickInput) -> TickOutput:
         """Drive precisely to the standoff pose before committing the blind insertion.
@@ -400,11 +358,8 @@ class GraspStateMachine:
         can trigger comfortably; but the straight-line insertion needs near-perfect
         centering on the cylinder axis, or the fingers shove the object sideways.
 
-        IMPORTANT: the gripper<->cylinder CBF is RELAXED here (same as in
-        GRASP_APPROACH). With the nominal barrier the gripper is held a few cm
-        short of the standoff, the position error can never reach ALIGN_POS_TOL,
-        and alignment always times out (the bug the operator hit). Relaxed, the
-        gripper can seat exactly on the standoff and converge.
+        The gripper<->cylinder CBF is RELAXED here (as in GRASP_APPROACH): with the nominal
+        barrier the gripper is held short of the standoff and alignment can never converge.
         """
         self._transition("GRASP_ALIGN")
         log_lines = []
@@ -423,13 +378,8 @@ class GraspStateMachine:
         # CYLINDER AXIS (a vertical line through the cylinder). This is what
         # decides whether the fingers will bracket the cylinder symmetrically.
         #
-        # IMPORTANT: the grasp HEIGHT is free (you may grasp anywhere along the
-        # cylinder) and the approach DEPTH is irrelevant here — so BOTH the
-        # along-cylinder-axis (vertical) component AND the along-approach
-        # component must be removed. Only the remaining "finger-opening" offset
-        # (perpendicular to both axes) can cause a finger to hit the cylinder.
-        # (The previous version removed only the approach component, so the
-        # EE-vs-cylinder-centre height difference inflated the error by tens of mm.)
+        # Grasp height is free and approach depth irrelevant: remove BOTH the vertical and the
+        # along-approach components -- only the finger-opening offset can hit the cylinder.
         color = inp.active_goal_key.split('_')[0]
         cyl_pos = self.cylinders[color]['pos']
         approach_axis = self._align_target[:3, :3][:, 0]   # gripper +X (unit)
@@ -504,7 +454,7 @@ class GraspStateMachine:
                 target_twist=np.zeros(6),
                 new_state=self._state,
                 ignore_cbf=f"+{cbf_name}",  # keep bypass active during retreat
-                grasp_margin=CLEAR_MARGIN,
+                grasp_margin=self.GRASP_CBF_MARGIN,  # relaxed -> contact keeps publishing, no barrier spike
                 gripper_cmd=f"OPEN_{inp.active_arm.upper()}",
                 reset_trigger=True,
                 log_lines=log_lines,
@@ -586,7 +536,7 @@ class GraspStateMachine:
                 target_twist=np.zeros(6),
                 new_state=self._state,
                 ignore_cbf=f"+{self.cylinders[color]['cbf_name']}",  # keep bypass active during retreat
-                grasp_margin=None,
+                grasp_margin=self.GRASP_CBF_MARGIN,  # relaxed -> contact keeps publishing, no barrier spike
                 gripper_cmd=f"OPEN_{inp.active_arm.upper()}",
                 reset_trigger=True,
                 log_lines=log_lines,
@@ -804,48 +754,119 @@ class GraspStateMachine:
     # ------------------------------------------------------------------
     # PHASE 7: ABORT_RETREAT (failed grasp — back out the way we came in)
     # ------------------------------------------------------------------
+    # Gate the retreat on ACTUAL EE travel, NOT the gripper<->cylinder gap: the
+    # fingers open on abort, which widens the gripper contact box so its overlap
+    # with the cylinder GROWS (gap reads more-negative) even as the arm backs
+    # out -- a useless retreat criterion. Back out a guaranteed physical distance
+    # instead, well clear before RECOVER restores the barrier.
+    ABORT_RETREAT_DISTANCE = 0.10    # m — guaranteed EE back-out before restoring the barrier
+    ABORT_RETREAT_VELOCITY = 0.05    # m/s — decisive (faster than a lift) so 10 cm clears quickly
+    ABORT_RETREAT_MAX_S = 6.0        # s — hard cap (covers 10 cm + tracking lag; joint-limited case)
+
     def _abort_lift(self, inp: TickInput) -> TickOutput:
         """Retreat after a failed grasp (approach/align timeout).
 
-        This is the EXACT OPPOSITE of the approach: the gripper backs out along
-        the NEGATIVE approach axis (its local +X), retracing the insertion path
-        away from the cylinder, with the fingers OPEN. The gripper<->cylinder CBF
-        bypass stays active DURING the retreat (so no barrier spike while still
-        overlapping); once clear, the CBF is restored (ignore_cbf="None") and
-        control returns to SHARED_AUTONOMY.
+        The EXACT OPPOSITE of the approach: the gripper backs out along the
+        NEGATIVE approach axis (its local +X), fingers OPEN, until the EE has
+        physically travelled ABORT_RETREAT_DISTANCE from where the retreat began
+        (or the retreat is capped at ABORT_RETREAT_MAX_S). The CBF bypass +
+        relaxed margin stay active DURING the retreat (no barrier spike while
+        still overlapping); once clear, control passes to RECOVER, which restores
+        the barrier smoothly -- never a one-tick snap to nominal.
         """
         self._transition("ABORT_RETREAT")
         log_lines = []
-
-        if self._abort_lift_start is None:
-            self._abort_lift_start = time.time()
-            log_lines.append(
-                ("info", f"[ABORT-RETREAT] Backing out ~{self.LIFT_HEIGHT * 100:.0f} cm along the "
-                         f"reverse approach axis (gripper open) before restoring CBF."))
-
-        elapsed = time.time() - self._abort_lift_start
         color = self._abort_lift_color or inp.active_goal_key.split('_')[0]
         cbf_name = self.cylinders[color]['cbf_name'] if color in self.cylinders else ""
 
-        if elapsed < self.LIFT_DURATION:
+        if self._abort_lift_start is None:
+            self._abort_lift_start = time.time()
+            self._abort_start_pos = inp.current_T_EE[:3, 3].copy()
+            log_lines.append(
+                ("info", f"[ABORT-RETREAT] Backing out ~{self.ABORT_RETREAT_DISTANCE * 100:.0f} cm along "
+                         f"the reverse approach axis (gripper open) before restoring the barrier."))
+
+        elapsed = time.time() - self._abort_lift_start
+        traveled = float(np.linalg.norm(inp.current_T_EE[:3, 3] - self._abort_start_pos))
+        done = traveled >= self.ABORT_RETREAT_DISTANCE
+
+        if not done and elapsed < self.ABORT_RETREAT_MAX_S:
             # Reverse approach: retreat along the gripper's local -X (approach axis
             # points +X into the object, so backing out is -X) in world frame.
             approach_axis = inp.current_T_EE[:3, :3][:, 0]
-            v_lin = -self.LIFT_VELOCITY * approach_axis
+            v_lin = -self.ABORT_RETREAT_VELOCITY * approach_axis
             target_twist = np.array([v_lin[0], v_lin[1], v_lin[2], 0.0, 0.0, 0.0])
             return TickOutput(
                 target_twist=target_twist,
                 new_state=self._state,
-                ignore_cbf=f"+{cbf_name}",  # keep bypass active while retreating
-                grasp_margin=None,
+                ignore_cbf=f"+{cbf_name}",           # keep bypass active while retreating
+                grasp_margin=self.GRASP_CBF_MARGIN,  # relaxed -> contact keeps publishing, no spike
                 log_lines=log_lines,
             )
 
-        # Retreat complete → safe to restore CBF and hand control back.
-        self._transition("SHARED_AUTONOMY")
+        # Cleared the distance (or capped) → hand to RECOVER for the smooth restore.
+        if not done:
+            log_lines.append(
+                ("warn", f"[ABORT-RETREAT] Retreat capped at {self.ABORT_RETREAT_MAX_S:.0f}s "
+                         f"(only {traveled * 100:.1f} cm — arm likely joint-limited). "
+                         f"Restoring barrier and settling."))
+        self._recover_start = None
+        self._transition("RECOVER")
+        return TickOutput(
+            target_twist=np.zeros(6),
+            new_state=self._state,
+            ignore_cbf=f"+{cbf_name}",           # bypass held one more tick; RECOVER drops it
+            grasp_margin=self.GRASP_CBF_MARGIN,
+            log_lines=log_lines,
+        )
+
+    # ------------------------------------------------------------------
+    # PHASE 8: RECOVER (post-abort: restore the barrier smoothly, then release)
+    # ------------------------------------------------------------------
+    RECOVER_RAMP_S = 1.5   # s — hold the arm still and ramp the margin to nominal
+
+    def _recover(self, inp: TickInput) -> TickOutput:
+        """Post-abort settle: hold still and smoothly restore the CBF before teleop.
+
+        The gripper is now clear of the cylinder. Drop the full CBF bypass and
+        ramp the relaxed grasp margin (GRASP_CBF_MARGIN -> 0) back to nominal
+        over RECOVER_RAMP_S with the arm FROZEN, so the barrier is continuous and
+        fully active by the time shared autonomy (pi_max) resumes -- fixing the
+        post-abort reference oscillation (policy drove back into a barrier that
+        had snapped from fully-bypassed to nominal in a single tick). Reached
+        ONLY from a failed grasp; the normal grasp/lift/hold/release path never
+        enters here.
+        """
+        self._transition("RECOVER")
+        log_lines = []
+
+        if self._recover_start is None:
+            self._recover_start = time.time()
+            log_lines.append(
+                ("info", f"[RECOVER] Clear of the cylinder. Restoring the collision barrier "
+                         f"smoothly over {self.RECOVER_RAMP_S:.1f}s (arm held)."))
+
+        elapsed = time.time() - self._recover_start
+        ramp = max(0.0, min(1.0, elapsed / self.RECOVER_RAMP_S))   # 0 -> 1
+        # Quantized to 1 cm steps: the node re-logs the margin only when the value
+        # changes, so a continuous ramp would spam ~150 lines over the window.
+        margin = round((1.0 - ramp) * self.GRASP_CBF_MARGIN, 2)    # -0.08 -> 0
+
+        if ramp < 1.0:
+            return TickOutput(
+                target_twist=np.zeros(6),   # arm frozen while the barrier ramps in
+                new_state=self._state,
+                ignore_cbf="None",          # bypass dropped: barrier ACTIVE (still relaxed via margin)
+                grasp_margin=margin,
+                log_lines=log_lines,
+            )
+
+        # Barrier fully restored → hand control back to shared autonomy.
+        self._recover_start = None
         self._abort_lift_start = None
         self._abort_lift_color = None
-        log_lines.append(("info", "[ABORT-RETREAT] Clear of the cylinder. CBF restored. Teleoperation resumed."))
+        self._transition("SHARED_AUTONOMY")
+        log_lines.append(("info", "[RECOVER] Barrier restored. Teleoperation resumed."))
         return TickOutput(
             target_twist=np.zeros(6),
             new_state=self._state,

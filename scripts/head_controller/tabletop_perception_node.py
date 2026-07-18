@@ -42,7 +42,7 @@ INPUT TOPIC — `/filtered_cloud` (overridable via the `cloud_topic` ROS param):
     the same interface (subscribe, don't produce, that cloud) so it can be
     launched against whatever provides `/filtered_cloud` in a given setup.
 
-FAITHFUL-PORT NOTE (intentional, not a bug fix): the original node's matching
+FAITHFUL-PORT NOTE (intentional): the reference node's matching
 loop searches ALL tracked objects for the nearest one within threshold for
 EVERY new cluster, without excluding tracks already matched earlier in the
 same frame — so two nearby clusters in one frame COULD both match the same

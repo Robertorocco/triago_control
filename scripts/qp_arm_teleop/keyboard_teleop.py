@@ -91,12 +91,12 @@ class DualArmTeleop(Node):
         self.pub_right = self.create_publisher(Float64MultiArray, '/arm_right/cartesian_reference', 10)
         self.pub_left  = self.create_publisher(Float64MultiArray, '/arm_left/cartesian_reference', 10)
         
-        # --- NEW: Publishers for the Dashboard ---
+        # --- Publishers for the Dashboard ---
         self.pub_dashboard = self.create_publisher(Float64MultiArray, '/trajectory/reference_state', 10)
         self.pub_phase = self.create_publisher(String, '/trajectory/phase', 10)
         self.pub_time_scale = self.create_publisher(Float64, '/trajectory/time_scale', 10)
         
-        # --- NEW: Publisher for RViz ---
+        # --- Publisher for RViz ---
         self.pub_markers = self.create_publisher(MarkerArray, '/teleop/target_markers', 10)
 
         # Subscriber to anchor the initial state
@@ -123,7 +123,7 @@ class DualArmTeleop(Node):
             self.ref_p_r = np.array(msg.data[0:3])
             self.ref_p_l = np.array(msg.data[6:9])
             
-            # --- NEW: Catch the true physical orientation ---
+            # --- Catch the true physical orientation ---
             if len(msg.data) >= 18:
                 self.ref_rpy_r = np.array(msg.data[12:15])
                 self.ref_rpy_l = np.array(msg.data[15:18])
@@ -221,7 +221,7 @@ def main():
                 y = moveBindings[key][1]
                 z = moveBindings[key][2]
             
-            # --- NEW: Process Orientation Keys ---
+            # --- Process Orientation Keys ---
             elif key in orientationBindings.keys():
                 dr, dp, dy = orientationBindings[key]
                 angular_step = node.angular_speed 

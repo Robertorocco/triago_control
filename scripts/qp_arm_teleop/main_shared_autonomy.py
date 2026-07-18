@@ -1,64 +1,8 @@
 #!/usr/bin/env python3
-"""SharedControlNode (refactored): thin ROS 2 glue around the extracted classes.
-
-This is the decomposed replacement for the monolithic shared_autonomy_haption_tutorial.py,
-following the plan in shared_autonomy_analysis.md Section 4:
-
-    GoalSet            -> goal_set.py
-    BeliefEstimator     -> belief_estimator.py
-    GraspStateMachine   -> grasp_state_machine.py
-    PlotManager         -> plot_manager.py
-    SharedControlNode   -> this file (pub/sub, timer, delegates everything else)
-
-All functionality of the original monolithic script is preserved. Every bug
-identified in shared_autonomy_analysis.md has been fixed; each fix is called
-out in a comment at its location, summarized here:
-
-  __init__:
-    - self.tf_broadcaster was assigned twice (lines 253, 277 in the original),
-      leaking one TransformBroadcaster. Now assigned exactly once.
-    - `import time` was duplicated at the top of the file. Now imported once.
-    - `self.grasp_in_progress` was set but never read anywhere. Removed entirely
-      (GraspStateMachine.state is the single source of truth for grasp progress).
-  collision_data_callback:
-    - `if len(msg.data) == 13` silently dropped valid extended messages if the
-      publisher ever grew the array. Changed to `>= 13`.
-  solve_local_policy:
-    - the `except ValueError` fallback returned the unconstrained v_geo on QP
-      infeasibility, driving the robot through the CBF barrier. Now returns a
-      safe zero-twist halt and logs an error.
-  update_belief / BeliefEstimator.update:
-    - the original accepted v_h but ignored it, reading the trajectory buffer
-      instead. BeliefEstimator.update now takes v_h_curr directly and is used
-      correctly (see belief_estimator.py docstring).
-  _apply_human_noise:
-    - dt was hardcoded as a literal 0.01 instead of derived from the control
-      frequency. Now computed from CONTROL_HZ (a class constant).
-  compute_alpha (joystick mode, 2026-07-06):
-    - the autonomy authority alpha is now derived purely from the ALIGNMENT
-      between the user twist and the optimal policy twist (see compute_alpha /
-      _twist_alignment): misaligned -> the operator keeps 80%; aligned or no
-      user input -> the autonomy leads. The old belief*distance-gated blend and
-      its F_sync force-feedback coupling (which formed an unstable loop) are
-      removed; the raw user twist now comes from the spring-centered
-      teleop_triago_joystick.py.
-  get_dynamic_goal_pose / pin.log3 singularity:
-    - moved into GoalSet, which now uses a Frobenius-norm fallback near the
-      pi-rotation singularity instead of calling pin.log3 unconditionally (see
-      goal_set.py docstring).
-  Grasping oscillation (root cause, analysis Section 2):
-    - PRE_GRASP now drives on the QP-constrained policy (pi_max) rather than
-      the raw, CBF-unaware v_geo (see grasp_state_machine.py _pre_grasp).
-  State machine (analysis Section 3, problems A/B/C):
-    - replaced with GraspStateMachine's dict-dispatch handler table, which adds
-      belief hysteresis (fix for Problem A), guarantees target_twist is always
-      defined (fix for Problem B), and makes new states a one-method addition
-      (fix for Problem C).
-  update_plot artist leak:
-    - moved into PlotManager, which mutates fill-polygon vertices in place via
-      set_xy() instead of remove()+fill() every tick (see plot_manager.py
-      docstring).
-"""
+"""SharedControlNode: intent inference (Bayesian belief over goals), per-goal QP policies,
+reference-level user<->policy blending, and the grasp state machine -- the shared-autonomy
+orchestrator. Thin ROS glue delegating to GoalSet / BeliefEstimator / GraspStateMachine /
+PlotManager; sole writer of /arm_*/cartesian_reference while ASSIST_BLENDING is on."""
 
 import threading
 import time
@@ -107,12 +51,12 @@ class SharedControlNode(Node):
         """Initializes flags, delegate objects, weighting matrices, and ROS2 infrastructure."""
         super().__init__('shared_control_node')
 
-        # --- WORLD SCENE (2026-07-04) -------------------------------------
+        # --- WORLD SCENE -------------------------------------
         # Same world_name parameter as main_qp_controller.py -- MUST be set to
         # the SAME value on both nodes (they must agree on where the red/blue
         # cylinders actually are). Drives GoalSet's cylinder geometry table
         # AND the Gazebo LinkAttacher model names below (self.cylinder_model),
-        # replacing what used to be two independent hard-coded copies of the
+        # replacing two independent hard-coded copies of the
         # same red/blue positions (goal_set.py's own default dict, and this
         # node's `{'red': 'red_cylinder', 'blue': 'blue_cylinder'}`). See
         # world_loader.py for the full schema / how to author a new world.
@@ -141,19 +85,16 @@ class SharedControlNode(Node):
 
         # --- Architecture Flags ---
         self.PREDICTION = True   # Update belief and evaluate all policies vs. just the active goal policy
-        # NOTE (2026-07-03): BLENDING is NO LONGER a local flag on this node.
-        # It is read directly from triago_control.qp_controller.config (cfg.BLENDING)
-        # -- the SAME flag teleop_triago_clutch.py reads to decide which topic it
-        # publishes on (/arm_*/cartesian_reference vs /arm_*/user_cartesian_reference).
-        # A single source of truth avoids the two nodes ever disagreeing about who
-        # owns /arm_*/cartesian_reference. See cfg.BLENDING's docstring for the
+        # BLENDING is read from cfg (same flag the teleop nodes read for topic routing):
+        # a single source of truth so no two nodes disagree about who owns
+        # /arm_*/cartesian_reference. See cfg.BLENDING's docstring for the
         # full topic-routing explanation. Use `cfg.BLENDING` everywhere below.
         self.TASK_DIM = 6        # 6 for full SE(3) tracking, 5 for S^2 grasping (align X-axis only)
         # Persistent LPF state for the alignment->alpha arbitration (see compute_alpha).
         self.alpha_lpf = 0.0
         self.last_alpha = 0.0   # most recent alpha actually applied (for telemetry)
 
-        # --- "still -> suspend blending" (2026-07-08) -------------------------
+        # --- "still -> suspend blending" -------------------------
         # In ANY blending cell (CLUTCH or JOYSTICK) the autonomy must NOT drive the
         # robot while the operator holds the handle still: whenever the commanded
         # user twist is below these thresholds, blending is suspended (alpha=0) and
@@ -168,7 +109,7 @@ class SharedControlNode(Node):
         self._ee_twist = np.zeros(6)
         self._prev_T_EE = None
 
-        # policy_belief_test (was a hardcoded flag -- now a ROS param so it can
+        # policy_belief_test (ROS param so it can
         # be enabled from the launch line without editing/rebuilding, since it
         # makes the arm drive itself):
         #   ros2 run triago_control main_shared_autonomy.py --ros-args \
@@ -219,8 +160,7 @@ class SharedControlNode(Node):
         self.active_arm = 'right'
 
         # --- Goal Set Definition (delegated to GoalSet) ---
-        # Cylinder geometry table built from the loaded world scene (2026-07-04)
-        # instead of GoalSet's own internal hard-coded Red/Blue defaults -- see
+        # Cylinder geometry table built from the loaded world scene # instead of GoalSet's own internal hard-coded Red/Blue defaults -- see
         # _cylinders_from_world_scene below. Falls back to GoalSet(None) (its
         # original hard-coded table) if the world scene is missing either role,
         # so behavior is unchanged for a world YAML that doesn't define them.
@@ -385,7 +325,7 @@ class SharedControlNode(Node):
             'left':  self.get_parameter('grasp_link_left').value,
         }
         # Gazebo model names for the LinkAttacher plugin -- resolved from the
-        # SAME world scene's grasp_roles (2026-07-04) instead of a second,
+        # SAME world scene's grasp_roles instead of a second,
         # independent hard-coded {'red': 'red_cylinder', ...} dict. The Gazebo
         # .world file's <model name="..."> MUST match these names exactly (see
         # world_loader.py's module docstring on keeping the YAML and the .world
@@ -444,7 +384,7 @@ class SharedControlNode(Node):
         # arm switch can re-anchor synchronously (see _switch_active_arm).
         self._T_EE = {"right": np.eye(4), "left": np.eye(4)}
         # Persistent latched reference for the BLENDING blend-hold path
-        # (2026-07-06): the blended twist is integrated into this stored pose so
+        # : the blended twist is integrated into this stored pose so
         # an idle user yields an ABSOLUTE hold instead of a reference that chases
         # the live EE (which never resists low-level sag -> the reported creep
         # toward the ground). Re-anchored to the real EE on startup and whenever
@@ -521,7 +461,7 @@ class SharedControlNode(Node):
         self.pub_active_goal_pose = self.create_publisher(
             Float64MultiArray, '/shared_autonomy/active_goal_pose', 10)
 
-        # --- Blending telemetry (2026-07-03) ---
+        # --- Blending telemetry ---
         # Single source of truth for "who is commanding what": published every
         # tick regardless of cfg.BLENDING (alpha=0 / v_policy=0 when disabled)
         # so the haptic force manager's Authority Share plot always reflects
@@ -532,7 +472,7 @@ class SharedControlNode(Node):
         self.pub_blend_debug = self.create_publisher(
             Float64MultiArray, '/shared_autonomy/blend_debug', 10)
 
-        self.sub_wrench_removed = None  # Force sensor removed — not used in this architecture.
+        self.sub_wrench_removed = None  # no force sensing in this architecture
 
         # --- Visualization Infrastructure ---
         self.pub_markers = self.create_publisher(MarkerArray, '/shared_policy_markers', 10)
@@ -546,7 +486,7 @@ class SharedControlNode(Node):
         # gripper, split out of /shared_policy_markers so it can be shown/hidden
         # independently in RViz, same rationale as the guidance marker above.
         self.pub_robot_policy_marker = self.create_publisher(MarkerArray, '/robot_policy_marker', 10)
-        # --- Blended-reference gripper (2026-07-03, TWIST BLENDING mode only) ---
+        # --- Blended-reference gripper (TWIST BLENDING mode only) ---
         # Shows the ACTUAL pose being integrated from the blended twist
         # (target_twist = (1-alpha)*v_user + alpha*pi_policy) and sent to the QP
         # CLF-CBF on /arm_*/cartesian_reference -- i.e. the literal reference the
@@ -557,7 +497,7 @@ class SharedControlNode(Node):
         # simultaneously (independently toggleable in RViz) so the operator can
         # switch between them to judge which is more intuitive.
         self.pub_blended_ref_marker = self.create_publisher(MarkerArray, '/blended_reference_marker', 10)
-        # Bug fix: this used to be assigned a second time later in __init__,
+        # Assigned exactly once,
         # silently leaking the first TransformBroadcaster. Assigned exactly once.
         self.tf_broadcaster = TransformBroadcaster(self)
 
@@ -1050,14 +990,12 @@ class SharedControlNode(Node):
 
     @staticmethod
     def _cylinders_from_world_scene(world_scene):
-        """Builds GoalSet's `cylinders` dict from a loaded WorldScene (2026-07-04).
+        """Builds GoalSet's `cylinders` dict from a loaded WorldScene .
 
         Resolves world_scene.grasp_roles['red'/'blue'] to their ObstacleSpec and
         maps each to GoalSet's expected {'pos', 'height', 'radius', 'cbf_name'}
-        shape (see goal_set.py's GoalSet.__init__ docstring). `pos` is taken
-        from the YAML's static pose -- exactly mirroring how GoalSet's OWN
-        hard-coded default table used to encode it, just sourced from the
-        world scene instead. `cbf_name` is the obstacle's YAML `name`, which
+        shape (see goal_set.py's GoalSet.__init__ docstring). `pos` is the
+        YAML's static pose. `cbf_name` is the obstacle's YAML `name`, which
         collision_manager.py's world_scene branch uses verbatim as the hppfcl
         GeometryObject name -- so this stays the correct CBF pair lookup key
         by construction, no matter what a new world calls its cylinders.
@@ -1066,7 +1004,7 @@ class SharedControlNode(Node):
         Red/Blue table) if the world scene doesn't define both roles, so an
         incomplete/legacy world YAML still produces a working node.
 
-        `grasp_types` (2026-07-04): derived from the obstacle's YAML `role`
+        `grasp_types` : derived from the obstacle's YAML `role`
         field, NOT a new schema field -- keeps world_loader.ObstacleSpec
         unchanged. `role: "reachable"` -> `['Front']` (pure reach/hover
         target, no physical object; see goal_set.GoalSet.get_dynamic_goal_pose's
@@ -1096,12 +1034,9 @@ class SharedControlNode(Node):
     def collision_data_callback(self, msg):
         """Extracts Cartesian collision Jacobian dynamically based on the active arm.
 
-        Layout (14 floats, per-arm CBF split): [b_col_r, b_col_l,
-        J_c_cart_R(6), J_c_cart_L(6)]. Each arm's h_c/J_c now comes from its OWN
-        independent SoftMin barrier (previously both used the single combined
-        b_col, so the wrong arm's barrier value leaked into whichever arm was
-        active here). Bug fix retained: `>= 14` (was `>= 13`) so backward-
-        compatible extensions still work.
+        Layout (14 floats, per-arm CBF split): [b_col_r, b_col_l, J_c_cart_R(6),
+        J_c_cart_L(6)] -- each arm's h_c/J_c comes from its own independent barrier.
+        `>= 14` keeps backward-compatible extensions working.
         """
         if len(msg.data) >= 14:
             self._ticks_since_collision = 0
@@ -1135,19 +1070,14 @@ class SharedControlNode(Node):
         # HOLDING is intentionally NOT here: it drives toward goals via the QP and
         # therefore needs fresh collision data, like SHARED_AUTONOMY / PRE_GRASP.
         in_grasp_state = self.grasp_sm.state in (
-            "PRE_GRASP", "GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT", "RELEASE_LIFT", "ABORT_RETREAT")
+            "PRE_GRASP", "GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT", "RELEASE_LIFT", "ABORT_RETREAT", "RECOVER")
 
         if not in_grasp_state:
             if self.J_c is None or self.h_c is None:
                 # No collision data has EVER arrived yet — nothing to draw/solve.
                 return
-            # Bug fix (green gripper marker disappearing): the old code did a hard
-            # `return` here whenever the collision data was older than max_stale_ticks,
-            # which halted the WHOLE callback — including marker publishing. With
-            # the 500 ms marker lifetime, any jitter in the QP's /collision_constraints
-            # rate then blinked the green policy gripper out of RViz. In teleop
-            # SHARED_AUTONOMY this node does not even command the arm, so halting
-            # viz is needless. Instead we just WARN here and let the loop continue:
+            # Stale collision data must only WARN, never hard-return: halting the whole
+            # callback also halts marker publishing and blinks the policy gripper out of RViz.
             # staleness is folded into `valid_matrices` below, so the policy QP is
             # skipped (policies -> 0, a safe halt that also stops the test-mode
             # command), but visualization keeps publishing and stays alive.
@@ -1252,7 +1182,7 @@ class SharedControlNode(Node):
             # twist is zeroed, and the belief should stay FROZEN until the grasp
             # ends — otherwise the distribution evolves on meaningless data.
             grasp_exec_now = self.grasp_sm.state in (
-                "GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT", "RELEASE_LIFT", "ABORT_RETREAT")
+                "GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT", "RELEASE_LIFT", "ABORT_RETREAT", "RECOVER")
             # Falling edge (grasp just finished) -> restart the warm-up so the
             # post-grasp navigation does not instantly lock onto a goal.
             if self._prev_grasp_exec and not grasp_exec_now:
@@ -1365,7 +1295,7 @@ class SharedControlNode(Node):
         # The Haption input is disconnected: the grasp state machine drives the
         # arm autonomously through approach, close and lift. Teleoperation
         # resumes automatically once HOLDING is reached.
-        if self.grasp_sm.state in ("GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT", "RELEASE_LIFT", "ABORT_RETREAT"):
+        if self.grasp_sm.state in ("GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT", "RELEASE_LIFT", "ABORT_RETREAT", "RECOVER"):
             self.current_v_h = np.zeros(6)
 
         # --- 4. THE GRASPING STATE MACHINE (delegated) ---
@@ -1418,7 +1348,11 @@ class SharedControlNode(Node):
                 parts = tick_output.gripper_cmd.split('_')
                 arm = parts[1].lower()
                 grasped = parts[2].lower()
-                self._plugin_attach(arm, grasped)
+                # No Gazebo on real hardware -- the plugin weld is meaningless
+                # there (see __init__), so skip the call instead of logging a
+                # scary "cannot attach" error for an expected condition.
+                if not self.real_hardware:
+                    self._plugin_attach(arm, grasped)
                 self._configure_post_grasp(grasped)
 
         if tick_output.reset_trigger:
@@ -1430,18 +1364,12 @@ class SharedControlNode(Node):
         if tick_output.release_object:
             self._release_object()
 
-        # Joystick teleop is blended in every USER-CONTROLLED state
-        # (SHARED_AUTONOMY, PRE_GRASP, HOLDING) -- i.e. everything EXCEPT the
-        # autonomous grasp-execution states (GRASP_*/LIFT/RELEASE_LIFT/
-        # ABORT_RETREAT), where grasp_active suspends the teleop and the state
-        # machine drives the arm to completion. Previously this was gated on
-        # SHARED_AUTONOMY only, which left the operator's joystick DEAD in
-        # PRE_GRASP (aligned/ready-to-grasp) and HOLDING (driving to place) --
-        # the user could only trigger the grasp, not keep steering.
+        # Blending is active in every USER-CONTROLLED state (SHARED_AUTONOMY, PRE_GRASP,
+        # HOLDING); the autonomous grasp-execution states suspend it and drive the arm.
         blend_active = cfg.BLENDING and tick_output.new_state in (
             "SHARED_AUTONOMY", "PRE_GRASP", "HOLDING")
         if blend_active:
-            # Reference-level arbitration (2026-07-06). The user twist arrives already
+            # Reference-level arbitration . The user twist arrives already
             # deadbanded to zero inside the joystick's home deadband (done in
             # teleop_triago_joystick.py), so residual handle noise can never creep
             # the arm. It is blended with the belief-weighted optimal policy by an
@@ -1494,7 +1422,7 @@ class SharedControlNode(Node):
         # During autonomous grasp execution (approach/close/lift) the node DRIVES
         # the arm directly (see section 6) and the Haption teleop must yield.
         grasp_exec = self.grasp_sm.state in (
-            "GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT", "RELEASE_LIFT", "ABORT_RETREAT")
+            "GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT", "RELEASE_LIFT", "ABORT_RETREAT", "RECOVER")
         self.pub_grasp_active.publish(Bool(data=grasp_exec))
         # Latched active-arm state: late-joining nodes (teleop, force manager)
         # always know which arm is being controlled.
@@ -1552,16 +1480,8 @@ class SharedControlNode(Node):
                         trajectory_data.append((sim_T_next, sim_twist))
                         sim_T_EE = sim_T_next
 
-                # (Diagnostic removed: offset < 5mm warning was spamming the console
-                # without actionable info — the green gripper simply overlaps the
-                # robot mesh when the policy twist is small/rotational-only.)
-
-                # --- SINGLE CONSOLIDATED MARKER PUBLISH ---
-                # All marker types are collected into ONE MarkerArray and published
-                # in a single call. This halves the message rate on the topic
-                # (was ~100 msg/s with separate publishes) and eliminates RViz
-                # subscriber queue starvation that caused the green gripper to
-                # appear non-updating while goal markers refreshed fine.
+                # Single consolidated marker publish: one MarkerArray per tick halves the
+                # message rate and avoids RViz subscriber queue starvation.
                 combined_markers = MarkerArray()
 
                 # Light-green robot-policy grippers (predictive trajectory) now
@@ -1655,24 +1575,17 @@ class SharedControlNode(Node):
             # instead of re-deriving the reference from the LIVE current_T_EE each
             # tick.
             #
-            # WHY this is the real fix (not a patch): the old "integrate a small
-            # lead off current_T_EE" reference is a FOLLOWER, not an ANCHOR. When
-            # the user is idle (target_twist=0) it collapses to exactly the live
-            # EE pose -- it tells the QP "your target is wherever you already
+            # A live-EE-anchored reference is a FOLLOWER, not an anchor: when the user is
+            # idle it collapses to the live EE pose -- "your target is wherever you already
             # are", which is satisfied no matter where the arm drifts, so it
             # exerts ZERO restoring authority. The soft CLF's residual slack + the
             # posture potential field then leak a sub-mm EE velocity toward the
             # lowest-cost joint config each tick, and because the reference
             # re-anchors on the drifted EE next tick, that drift is never opposed
-            # -- it integrates monotonically (the reported creep "toward the
-            # ground", with a single publisher and v_blend=0). A LATCHED pose
-            # fixes the position AND orientation hold in one stroke (it latches
-            # the full SE(3) pose): when idle the latch stays put, so EE drift now
-            # GROWS a real task error the CLF actively corrects. It also removes
-            # the mm-scale oscillation for free -- the reference no longer
-            # re-anchors to the jittering, still-settling live EE.
+            # -- so drift integrates into visible creep. A LATCHED full-SE(3) pose stays put
+            # when idle, turning EE drift into a real task error the CLF actively corrects.
             #
-            # Grasp execution / test mode keep the original virtual-cursor (a
+            # Grasp execution / test mode keep the virtual-cursor (a
             # short lead off the live EE): there, re-anchoring at the EE each tick
             # is exactly what's wanted. The latch is re-anchored to the EE on the
             # first blend tick and after any non-blend phase, so blending always
@@ -1945,14 +1858,8 @@ class SharedControlNode(Node):
     def _build_goal_pose_markers(self, beliefs, now=None):
         """Build every goal pose as a gripper marker whose opacity tracks its belief.
 
-        EXCLUDED goals (e.g. the just-grasped cylinder's own Top/Side goals) are
-        explicitly DELETEd rather than faded. Fading assumed the goal's manifold
-        point would still track something meaningful — but GoalSet.cylinders[..]
-        ['pos'] is the cylinder's ORIGINAL TABLE SPAWN position, only updated by
-        relocate_cylinder() at RELEASE time. While held, that position is stale
-        (the object has moved with the gripper), so drawing it — even faded —
-        showed a ghost gripper frozen at the old pick-up spot. Excluded means "not
-        currently reachable/meaningful", so it is correctly hidden, not faded.
+        EXCLUDED goals are DELETEd, never faded: a held cylinder's stored position is
+        stale until release, so a faded marker would be a ghost at the old pick-up spot.
 
         Returns a list of Marker objects (not a MarkerArray).
         """
@@ -1961,6 +1868,8 @@ class SharedControlNode(Node):
         excluded = self.belief_estimator.get_excluded_goals()
         markers = []
         for i, goal_key in enumerate(self.target_keys):
+            if goal_key in self.goal_set.platform_keys:
+                continue  # Platform goal marker suppressed in RViz (operator request)
             if goal_key in excluded:
                 markers.extend(self._delete_gripper_markers(i, now, ns="goal_poses"))
                 continue
@@ -2307,11 +2216,8 @@ class SharedControlNode(Node):
     def solve_local_policy(self, v_geo, J_c, h_c):
         """Solves the strictly convex QP min 1/2 v^T W v - v^T W v_geo s.t. J_c v >= h_c.
 
-        Bug fix: on QP infeasibility the original `except ValueError` fallback
-        returned v_geo -- the unconstrained geometric velocity -- which violates
-        the CBF constraint entirely (the robot would drive straight through the
-        obstacle barrier). This now returns a safe zero-twist halt instead and
-        logs an error so the infeasibility is visible rather than silently
+        On QP infeasibility this returns a safe zero-twist halt (never the unconstrained
+        v_geo, which would drive through the barrier) and logs the error rather than silently
         unsafe.
         """
         G = self.W.astype(np.float64)
@@ -2347,9 +2253,7 @@ class SharedControlNode(Node):
 
         Setting noise_snr_inv=0 and bias_sigma=0 recovers the noiseless case exactly.
 
-        Bug fix: dt was hardcoded as a bare literal 0.01 ("must match the 100 Hz
-        timer period" per a comment in the original). Now derived from
-        CONTROL_HZ so the two can never silently drift apart.
+        dt derives from CONTROL_HZ so it can never silently drift from the timer period.
         """
         dt = 1.0 / self.CONTROL_HZ
 
@@ -2396,9 +2300,7 @@ class SharedControlNode(Node):
         """Autonomy authority weight from user/policy twist ALIGNMENT (joystick mode).
 
         - User STILL (v_user == 0, handle inside the joystick deadband):
-              alpha = ALIGN_ALPHA_IDLE -- a GENTLE crawl toward the inferred goal.
-              (Previously the still case was treated as fully aligned and ran at
-              ALIGN_ALPHA_MAX, which felt too fast when the user wasn't driving.)
+              alpha = ALIGN_ALPHA_IDLE -- a gentle crawl toward the inferred goal.
         - User ACTIVE: a two-sided ramp in the alignment s in [-1, 1]
           (see _twist_alignment), continuous at s = 0 where alpha = ALIGN_ALPHA_MIN:
               s >= 0:  alpha = ALIGN_ALPHA_MIN + (ALIGN_ALPHA_MAX - ALIGN_ALPHA_MIN)*s
@@ -2408,9 +2310,7 @@ class SharedControlNode(Node):
                        policy: perpendicular (s=0) -> ALIGN_ALPHA_MIN, diagonally
                        opposed (s=-0.5) -> ALIGN_ALPHA_MIN/2, directly opposed
                        (s=-1) -> 0 (autonomy FULLY yields; the operator's counter-
-                       motion meets zero resistance). Previously the misaligned
-                       half was clipped flat at ALIGN_ALPHA_MIN (a permanent 20%
-                       counter-pull even when the user drove straight against it).
+                       motion meets zero resistance -- never a permanent counter-pull).
 
         LPF'd (ALIGN_ALPHA_LPF_COEFF) so the blended reference stays C0-continuous.
         Belief still selects WHICH goal's policy is v_policy; alpha only arbitrates

@@ -1,158 +1,9 @@
 #!/usr/bin/env python3
 # offline_plotter.py
-"""
-Static, publication-quality figures for the QP-CLF-CBF pipeline.
-
-Where plotter.py is a LIVE, ever-scrolling dashboard (rolling 50 s buffers,
-redrawn 10x/s, meant to be watched while the robot moves), this node records
-ONE COMPLETE TRIAL from t=0 and, once it ends, renders the same telemetry as
-a fixed set of formal figures (PDF + PNG, 300 dpi) suitable for inclusion in
-a paper. No live window is ever shown -- this script only ever WRITES files.
-
-Recording model (generic, source-agnostic trigger)
-----------------------------------------------------
-This node never decides what "a trial" is. It is driven entirely by a single
-boolean topic, `cfg.OFFLINE_RECORD_TRIGGER_TOPIC`
-(default: '/offline_plotter/record_trigger', std_msgs/Bool):
-
-    True  -> start (rising edge from idle) or continue recording. On a rising
-             edge, t=0 is anchored to THIS instant -- not node startup, not
-             the first data sample -- so the saved time axis always starts
-             exactly at 0 regardless of how long this node has been running.
-    False -> the commanded motion has concluded. Recording CONTINUES for a
-             further `cfg.OFFLINE_PLOT_POST_TRIGGER_S` seconds (captures the
-             settling/regulation phase on the SAME time axis as the tracking
-             motion) before the trial is finalized. A vertical dashed grey
-             line is drawn at the exact instant of the False edge on every
-             time-series subplot -- intentionally unlabeled (no legend entry)
-             so it reads as a visual cue, not a data series.
-
-`trajectory_generator.py` drives this topic today (True on WAITING->TRACKING,
-False on TRACKING->REGULATION -- see its `update_phase`). Nothing in THIS
-file is aware of trajectory_generator, quintic motions, or phases: any other
-node may publish on the exact same topic later -- e.g. a future
-teleoperation-side trigger such as "the operator is holding the handle and
-the clutch is released" -- and this script picks it up with ZERO changes.
-
-Ctrl-C: whatever has been recorded so far (even mid-trial, even before the
-post-trigger grace window elapses) is finalized and saved before the process
-exits.
-
-Figures produced (mirrors plotter.py's content, minus the two windows that
-are meaningless as a static artifact -- the live CBF-active-pairs debug view
-and the live joint-position slider GUI):
-    fig0_summary                   The 10+ headline metrics below, rendered as
-                                    a monospace text page (same numbers as
-                                    summary_metrics.json / trial_summary.txt,
-                                    just viewable as PDF/PNG alongside fig1..7)
-    fig1_joint_kinematics          Position / Velocity / QP solution, 3x2
-                                    (col 0 = Left arm, col 1 = Right arm)
-    fig2_qp_data                   Slacks, CBF/joint shadow prices, safety
-                                    margin, min distance (loop frequency moved
-                                    to fig4_adaptive_parameters below)
-    fig3_task_tracking_error       Cartesian position/velocity tracking error
-                                    PLUS angular tracking error (geodesic
-                                    SO(3) angle) and angular velocity tracking
-                                    error (see cb_real for how the latter is
-                                    estimated -- ee_real carries no measured
-                                    angular velocity directly)
-    fig4_adaptive_parameters       Slack weight, CLF convergence rate, dynamic
-                                    safety margin (all flat-if-disabled, see
-                                    that method's docstring) + loop frequency
-    fig5_task_authority            Soft-task QP cost decomposition (shares)
-    fig6_3d_trajectory              3D commanded vs. executed gripper path
-                                    (solid = commanded reference, dashed =
-                                    executed EE pose; red = Right, blue =
-                                    Left). Saved as PDF + PNG always; ALSO
-                                    saved as a browser-navigable HTML
-                                    (free rotate/zoom/pan) if the optional
-                                    `plotly` package is installed --
-                                    `pip install plotly` to enable it, no
-                                    other change needed.
-    fig7_reference_governor        Commanded ("raw") vs. governed reference
-                                    signal (linear/angular velocity, position/
-                                    orientation tracking error), per arm, with
-                                    a DASHED horizontal line marking the
-                                    governor's configured limit on each
-                                    quantity (cfg.GOV_V_MAX_LIN, GOV_V_MAX_ANG,
-                                    GOV_E_MAX_POS, GOV_E_MAX_ORI) -- makes it
-                                    immediately visible when/how much the
-                                    governor reshaped the input trajectory.
-                                    (only emitted if cfg.ENABLE_REFERENCE_GOVERNOR)
-    fig8_head_perception            Head camera perception: per-object (red/
-                                    blue) position/radius/height/confidence
-                                    over time, active-vision phase + rate-based
-                                    convergence progress + drift rate, cloud/
-                                    map size. Only emitted if main_head.py was
-                                    running this trial (data on
-                                    /head_perception/telemetry|markers). A
-                                    vertical marker line is drawn at the exact
-                                    instant /perceived_world/snapshot latched,
-                                    if it did during this trial.
-    fig9_head_kinematics            Head joint position / measured velocity /
-                                    QP-commanded velocity, 3x1 (single chain,
-                                    no left/right split). Only emitted if head
-                                    joints appeared on /joint_states this trial.
-    fig10_head_active_tracking      head_active_arm_tracking.py's camera-
-                                    framing performance: pixel centering error,
-                                    angular errors (pointing/roll/approach),
-                                    stand-off distance vs. target. Only emitted
-                                    if that node was running this trial (data
-                                    on /head_active_tracking/telemetry).
-    fig11_haption_device            Haption handle telemetry (position, speed,
-                                    clutch/grasp-trigger/deadman buttons,
-                                    force/torque wrench) from
-                                    haption_teleoperation. Only emitted if
-                                    that device was publishing this trial
-                                    (data on virtuose/pose or
-                                    virtuose/force_cmd).
-    fig12_shared_autonomy           main_shared_autonomy.py's belief/blend
-                                    telemetry: reference-blending authority
-                                    alpha, resulting user/policy action share,
-                                    per-goal belief probabilities, active-arm/
-                                    autonomous-grasp state. Only emitted if
-                                    that node was running this trial.
-
-    fig3/fig11/fig12 all shade, in green, the windows where virtuose/deadman
-    was held AND virtuose/button_right (clutch) was released -- i.e. the
-    operator was actually driving, as opposed to indexing or having let go
-    of the handle. This is a HIGHLIGHT, not a filter: every data series still
-    plots for the FULL trial regardless of grip state (robot motion doesn't
-    stop just because the operator let go), so nothing is ever silently
-    hidden. Shading is skipped entirely (no green anywhere) if
-    virtuose/deadman never published this trial -- an older
-    haption_teleoperation build, or no teleop device at all.
-
-    summary_metrics.json           Up to 10 headline numbers ("was this trial
-                                    smooth / accurate / safe") distilled from
-                                    the same buffers the figures above are
-                                    built from -- meant to be compared side by
-                                    side across runs (e.g. a CONTROL_FREQ_DEFAULT
-                                    300 vs 150 Hz A/B) without having to eyeball
-                                    six figures per trial. Also echoed to the
-                                    console at finalize time. See
-                                    _compute_summary_metrics for the exact
-                                    definitions; NaN means the source topic
-                                    never produced enough data this trial, not
-                                    an error.
-
-    bag/                        A `ros2 bag record` capture spanning the exact
-                                    same t=0..end window as the figures above
-                                    (cfg.OFFLINE_BAG_TOPICS -- QP-controller +
-                                    head-perception + haption/teleoperation +
-                                    shared-autonomy telemetry, the merged
-                                    superset of this script's own topics and
-                                    scripts/analysis/study_config.py's
-                                    allowlist), so any trial can be replayed
-                                    offline later. Off via
-                                    cfg.OFFLINE_BAG_ENABLE = False.
-    trial_summary.txt           Plain-text copy of the console block printed
-                                    at finalize time (reason, duration, figure
-                                    count, the 10 summary metrics) -- so the
-                                    "index" survives after the terminal scrolls
-                                    away, without having to re-parse
-                                    summary_metrics.json.
-"""
+"""Offline trial recorder: subscribes to the QP/teleop/head telemetry between the record-trigger
+edges (plus a settling window), then renders static publication-quality figures, writes
+summary_metrics.json + trial_summary.txt, and bags the trial for replay. Passive and sim-time
+aware (auto-detects /clock); never commands the robot."""
 import matplotlib
 matplotlib.use('Agg')  # headless: this script only ever SAVES figures
 
@@ -181,6 +32,7 @@ import numpy as np
 import pinocchio as pin
 import rclpy
 from rclpy.node import Node
+from rcl_interfaces.msg import ParameterDescriptor
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 from sensor_msgs.msg import JointState
 from std_msgs.msg import Float64MultiArray, Float64, String, Bool
@@ -316,6 +168,15 @@ class OfflinePlotter(Node):
         self.out_dir = None       # this trial's output folder (created at t0, not finalize)
         self.last_saved_dir = None  # out_dir of the last FINALIZED trial (survives the reset below, for the GUI)
         self.bag_proc = None      # subprocess.Popen for `ros2 bag record`, or None
+
+        # GUI mode only (see main()): ROS callbacks run on a background spin
+        # thread, but matplotlib figure rendering is NOT thread-safe and a
+        # a rendering exception there would corrupt Agg's C state and
+        # segfaulted the whole process. When True, _check_post_roll_deadline
+        # defers to _pending_finalize_reason instead of rendering in-callback;
+        # _RecorderGUI._tick() (main/Tk thread) does the actual finalize.
+        self._defer_finalize_to_main_thread = False
+        self._pending_finalize_reason = None
 
         # Latest real EE pose (position + RPY), kept for the governor figure's
         # tracking-error rows -- deliberately OUTSIDE _reset_buffers: this is
@@ -679,7 +540,13 @@ class OfflinePlotter(Node):
 
     def _check_post_roll_deadline(self):
         if self.state == self.STATE_POST_ROLL and self._now() >= self.post_roll_deadline:
-            self._finalize_and_save(reason='post_roll_elapsed')
+            if self._defer_finalize_to_main_thread:
+                # Runs on the background spin thread in GUI mode -- hand off
+                # to the main/Tk thread (_RecorderGUI._tick) instead of
+                # rendering matplotlib figures here (see __init__ comment).
+                self._pending_finalize_reason = 'post_roll_elapsed'
+            else:
+                self._finalize_and_save(reason='post_roll_elapsed')
 
     def _clock_watchdog_tick(self):
         """Loudly warn if self._now() hasn't moved in >1.5s of WALL time while
@@ -1227,7 +1094,26 @@ class OfflinePlotter(Node):
         out_dir = self.out_dir
         trial_name = os.path.basename(out_dir)
         bag_was_running = self.bag_proc is not None
+        # Printed BEFORE the (up to _BAG_STOP_GRACE_S) bag-stop wait and the
+        # figure rendering below: an impatient kill in that window leaves the
+        # bag/ directory intact (stopped first) but NO figures/summary at all
+        # -- this banner is the one signal that a save is still in flight.
+        print(f"\n[offline_plotter] SAVING TRIAL #{self.trial_index} ({reason}) -- "
+              f"DO NOT KILL until 'TRIAL SAVED' prints below...", flush=True)
         self._stop_bag_recording()
+
+        # Freeze the trial HERE, before any figure touches the buffers: in GUI
+        # mode the background ROS thread keeps spinning while the (multi-second,
+        # ~13-figure) render below runs, and every data callback is gated only
+        # on _recording_active(). Leaving state==POST_ROLL/RECORDING through the
+        # whole render let live messages keep appending to time_qdot_cmd/
+        # qdot_cmd_r/qdot_cmd_l etc. mid-conversion -- two lists that must stay
+        # in lockstep drift apart by however many samples arrive during the
+        # render, crashing matplotlib with an x/y shape mismatch. self.t_off is
+        # deliberately NOT cleared here -- the figures below still draw the
+        # trigger-line marker from it.
+        self.state = self.STATE_WAITING
+        self.t0 = None
 
         self.get_logger().info(
             f"[offline_plotter] Finalizing trial #{self.trial_index} ({reason}) -- saving to {out_dir}")
@@ -1330,11 +1216,11 @@ class OfflinePlotter(Node):
         with open(os.path.join(out_dir, 'trial_summary.txt'), 'w') as f:
             f.write("\n".join(lines) + "\n")
 
-        # Reset for the next trial.
+        # Reset for the next trial (state/t0 were already frozen at the top,
+        # before rendering -- just the buffers and the remaining fields left
+        # in use by the figures above, e.g. t_off's trigger-line marker).
         self.last_saved_dir = out_dir   # survives the reset below, for the GUI's "Last saved" line
         self._reset_buffers()
-        self.state = self.STATE_WAITING
-        self.t0 = None
         self.t_off = None
         self.out_dir = None
         self.post_roll_deadline = None
@@ -1469,6 +1355,18 @@ class OfflinePlotter(Node):
         if not self.time_deadman:
             return []
 
+        # np.searchsorted(a, v) converts `a` to an ndarray on EVERY call when
+        # `a` is a plain list -- with deadman/clutch published continuously at
+        # ~150 Hz, a several-minute trial gives tens of thousands of
+        # breakpoints x TWO re-conversions each, i.e. an accidentally
+        # quadratic O(breakpoints * len(list)) blowup that looked like a
+        # silent hang (no error, just never finished). Convert ONCE, outside
+        # the loop, so each lookup is the intended O(log n).
+        t_deadman = np.asarray(self.time_deadman)
+        v_deadman = np.asarray(self.deadman_buffer)
+        t_clutch = np.asarray(self.time_clutch)
+        v_clutch = np.asarray(self.clutch_buffer)
+
         def _last_at(times, values, t, default):
             idx = np.searchsorted(times, t, side='right') - 1
             return bool(values[idx]) if idx >= 0 else default
@@ -1479,8 +1377,8 @@ class OfflinePlotter(Node):
         for t in breakpoints:
             if t > end_t:
                 break
-            in_control = (_last_at(self.time_deadman, self.deadman_buffer, t, False)
-                         and not _last_at(self.time_clutch, self.clutch_buffer, t, False))
+            in_control = (_last_at(t_deadman, v_deadman, t, False)
+                         and not _last_at(t_clutch, v_clutch, t, False))
             if in_control and run_start is None:
                 run_start = t
             elif not in_control and run_start is not None:
@@ -1534,8 +1432,11 @@ class OfflinePlotter(Node):
         axs[0, 1].set_title('Right Arm -- Joint Position')
         axs[1, 0].set_title('Left Arm -- Joint Velocity')
         axs[1, 1].set_title('Right Arm -- Joint Velocity')
-        axs[2, 0].set_title('Left Arm -- QP Solution ($\\dot{q}_{safe}$)')
-        axs[2, 1].set_title('Right Arm -- QP Solution ($\\dot{q}_{safe}$)')
+        # Plain Unicode combining dot (U+0307), not mathtext '$\dot{...}$' --
+        # that symbol isn't in every matplotlib version's mathtext grammar and
+        # crashed rendering entirely on the real robot's (older) system install.
+        axs[2, 0].set_title('Left Arm -- QP Solution (q̇_safe)')
+        axs[2, 1].set_title('Right Arm -- QP Solution (q̇_safe)')
 
         # Row 0: Position (from /joint_states)
         if self.time_js:
@@ -1716,7 +1617,7 @@ class OfflinePlotter(Node):
         # cfg.DYNAMIC_* flags -- a flat line at the default when a flag is off
         # is itself useful information (confirms nothing is silently
         # adapting), and it makes a flag-on/off A/B a straight before/after
-        # comparison of the same figure. Previously d_safe_dynamic was gated
+        # comparison of the same figure. d_safe_dynamic must not be gated
         # on cfg.DYNAMIC_CBF -- the WRONG flag (that one controls pair
         # removal, not the margin formula) -- so this panel had never
         # actually appeared in any trial this project has run;
@@ -2428,6 +2329,15 @@ class _RecorderGUI:
         # bypassing _on_close) -- bail out rather than touch dead widgets.
         try:
             node = self.node
+            # Finalize (matplotlib rendering) ALWAYS runs here, on the main/Tk
+            # thread -- never on the background spin thread (see __init__ /
+            # _check_post_roll_deadline comments: matplotlib is not thread-safe
+            # where a rendering error can segfault the process).
+            if node._pending_finalize_reason is not None:
+                reason = node._pending_finalize_reason
+                node._pending_finalize_reason = None
+                node._finalize_and_save(reason=reason)
+
             state = node.state
             if state == node.STATE_RECORDING:
                 elapsed = node._now() - node.t0
@@ -2488,8 +2398,16 @@ def main(args=None):
     # Sim-vs-real clock source. 'auto' (default) detects it; pass
     # -p sim_time_mode:=false to force wall-clock on real hardware regardless
     # of what else is on the ROS graph (see _clock_is_actually_ticking).
-    node.declare_parameter('sim_time_mode', 'auto')
-    mode = node.get_parameter('sim_time_mode').get_parameter_value().string_value or 'auto'
+    # dynamic_typing=True: the ROS2 CLI parses a bare true/false as YAML BOOL,
+    # not the STRING this defaults to -- a fixed-type declare would reject that
+    # override outright. Normalize whichever type actually arrives, below.
+    node.declare_parameter('sim_time_mode', 'auto',
+                           ParameterDescriptor(dynamic_typing=True))
+    raw_mode = node.get_parameter('sim_time_mode').value
+    if isinstance(raw_mode, bool):
+        mode = 'true' if raw_mode else 'false'
+    else:
+        mode = str(raw_mode).strip().lower() or 'auto'
     topic_names = [name for name, _ in node.get_topic_names_and_types()]
     if mode == 'true':
         use_sim = True
@@ -2532,6 +2450,8 @@ def main(args=None):
     # background thread via the same spin_once-loop pattern already used by
     # every real-time entrypoint in this repo (see main_qp_controller.py) --
     # a single thread calling spin_once, never spin() and spin_once() at once.
+    # Matplotlib rendering never happens on it -- see _defer_finalize_to_main_thread.
+    node._defer_finalize_to_main_thread = True
     stop_spin = threading.Event()
 
     def _spin_loop():
@@ -2550,10 +2470,22 @@ def main(args=None):
 
     root.mainloop()
 
-    print("\n[offline_plotter] GUI closed -- saving whatever was recorded so far...", flush=True)
+    print("\n[offline_plotter] GUI closed -- stopping the background ROS thread...", flush=True)
     stop_spin.set()
-    spin_thread.join(timeout=2.0)   # ROS context still alive here -- logger/finalize below are safe
-    if node.t0 is not None:
+    # Generous and race-free: the spin thread never renders matplotlib
+    # itself anymore (see _defer_finalize_to_main_thread), so it only needs to
+    # notice stop_spin between spin_once(timeout_sec=0.1) calls -- near-instant.
+    spin_thread.join(timeout=5.0)
+    if spin_thread.is_alive():
+        print("[offline_plotter] Background thread did not stop in 5s -- proceeding anyway.",
+              flush=True)
+
+    # A post-roll deadline could have fired (and set this) right at the
+    # shutdown boundary, after _RecorderGUI._tick stopped polling for it.
+    if node._pending_finalize_reason is not None:
+        reason, node._pending_finalize_reason = node._pending_finalize_reason, None
+        node._finalize_and_save(reason=reason)
+    elif node.t0 is not None:
         node._finalize_and_save(reason='gui_closed')
     else:
         print("[offline_plotter] No trial was in progress -- nothing to save.", flush=True)

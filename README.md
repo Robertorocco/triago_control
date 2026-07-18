@@ -158,16 +158,18 @@ ros2 run haption_teleoperation haptic_force_manager_CF.py
 
 > The active force-feedback node above is `haptic_force_manager_CF.py`. It consumes `/shared_autonomy/{goal_names, goal_probabilities, user_policy, active_goal_pose, grasp_active}` published by `main_shared_autonomy.py` to compute the guidance wrench sent to the Haption device.
 >
-> **Force-manager naming convention.** Every force manager is `haptic_force_manager_<CELL>`, where `<CELL>` encodes the active study condition as letters: **C** = CLUTCH or **J** = JOYSTICK (the control mode, always first), then **F** if `ASSIST_FEEDBACK` is on, then **B** if `ASSIST_BLENDING` is on. The no-assist baseline is just the mode letter. The six study cells are therefore:
+> **Force-manager naming convention.** Every force manager is `haptic_force_manager_<CELL>`, where `<CELL>` encodes the active study condition as letters: **C** = CLUTCH or **J** = JOYSTICK (the control mode, always first), then **F** if `ASSIST_FEEDBACK` is on, then **B** if `ASSIST_BLENDING` is on. The no-assist baseline is just the mode letter. The full 2x2x2 factorial (8 study cells):
 >
 > | File | CONTROL_MODE | ASSIST_FEEDBACK | ASSIST_BLENDING | Condition |
 > |---|---|---|---|---|
 > | `haptic_force_manager_C` | CLUTCH | False | False | Sync only (baseline) |
 > | `haptic_force_manager_CF` | CLUTCH | True | False | Guided feedback (VF) |
+> | `haptic_force_manager_CB` | CLUTCH | False | True | Guided blending |
 > | `haptic_force_manager_CFB` | CLUTCH | True | True | Full guidance |
 > | `haptic_force_manager_J` | JOYSTICK | False | False | Sync only (baseline) |
+> | `haptic_force_manager_JF` | JOYSTICK | True | False | Guided feedback |
 > | `haptic_force_manager_JB` | JOYSTICK | False | True | Guided blending |
-> | `haptic_force_manager_JFB` | JOYSTICK | True | True | Full guidance *(not yet implemented)* |
+> | `haptic_force_manager_JFB` | JOYSTICK | True | True | Full guidance |
 
 ### QP Safety Controller (bimanual arms)
 
@@ -213,20 +215,20 @@ All tunable parameters live in `triago_control/qp_controller/config.py`:
 
 ## Simulation vs. Real Hardware (Auto-Detection)
 
-The system **automatically detects** whether it is running on real hardware or in Gazebo simulation — no manual flag or configuration change required.
+The QP controller **automatically detects** whether it is running on real hardware or in Gazebo simulation. Two nodes still need a manual flag on the real robot: `main_shared_autonomy.py` (`-p real_hardware:=true`, else it tries the Gazebo LinkAttacher plugin) and `main_head.py` (`-p real_hardware_head:=true`, or launch it via `launch/head_real.launch.py`).
 
 **Detection method**: At startup, `main_qp_controller.py` fetches the URDF from `robot_state_publisher` and checks for the presence of `gripper_right_grasping_link` and `gripper_left_grasping_link`:
 
 | Condition | Environment | `REAL_HARDWARE` |
 |-----------|-------------|-----------------|
 | Both frames present in URDF | Gazebo simulation | `False` |
-| One or both frames missing | Real TIAGo Pro | `True` |
+| One or both frames missing | Real TRIAGo | `True` |
 
 **Behavioral differences when `REAL_HARDWARE = True`**:
 
 1. **Grasping frame injection**: The missing `gripper_*_grasping_link` frames are injected into the Pinocchio model at runtime (offset: `[0, 0, 0.157]`, Ry(-90°) from `gripper_*_base_link`) and broadcast as static TFs for RViz and other nodes.
 
-2. **Direct joint velocity**: Joint velocities are read directly from `/joint_states` `msg.velocity` instead of being reconstructed via position differentiation + EMA filtering. The real TIAGo Pro velocity sensors are reliable (unlike Gazebo's corrupted encoder simulation).
+2. **Derived joint velocity everywhere**: On both sim and real hardware, joint velocity is reconstructed from position differences + EMA filtering rather than read from `/joint_states` `msg.velocity` — the raw sensor velocity is noisy and gets amplified by the QP's rate-damping term.
 
 A colored startup banner in the console announces the detected environment:
 ```

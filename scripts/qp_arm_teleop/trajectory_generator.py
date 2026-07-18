@@ -1,55 +1,9 @@
 #!/usr/bin/env python3
 # trajectory_generator.py
-"""
-Open-loop cartesian trajectory generator for QP-CLF-CBF robustness testing.
-
-This node feeds `main_qp_controller.py` with smooth, repeatable quintic
-trajectories so the safety controller can be stress-tested in a controlled way:
-slow free-space motions first, then bimanual motions, then deliberately
-collision- or workspace-violating targets that the CBF must arbitrate.
-
-Design contract (why the QP controller stays untouched)
--------------------------------------------------------
-The generator ONLY publishes on the standard cartesian-reference topics:
-
-    /arm_right/cartesian_reference   Float64MultiArray
-    /arm_left/cartesian_reference    Float64MultiArray
-        layout: [x, y, z, roll, pitch, yaw, xdot, ydot, zdot, wx, wy, wz, (task_dim)]
-
-This is exactly the protocol `main_qp_controller.ref_cb_right/left` already
-parses (>=12 floats -> 6-DOF, optional 13th float -> task dimension, 6-float ->
-position only). The controller cannot tell this source apart from the keyboard
-teleop or the shared-autonomy node, so it requires NO modification.
-
-Everything that defines a test -- endpoints, categories, the DYNAMIC_TRAJECTORY
-flag, timing -- lives in `config/trajectory_endpoints.yaml`. Editing that file
-is all that is needed to change behaviour.
-
-Two spatial-path modes are supported for the active arm(s):
-  - 2-point (absolute/swap/swap_perturbed): straight line, start -> target.
-  - 'path' (waypoints_right/waypoints_left in the preset): a smooth cubic
-    spline threaded through the sampled start + every listed waypoint, still
-    driven by the SAME quintic tau(t) timing profile -- see
-    `_build_path_spline`/timer_callback. Lets a preset define a curved,
-    multi-point shape (e.g. an 'S' around workspace obstacles) instead of
-    only a start/end pair.
-
-Pipeline
---------
-1. WAITING  : sample the real start pose from /qp_debug/ee_real for `delay_start`
-              seconds (position + orientation per hand).
-2. TRACKING : interpolate start -> target with a quintic (zero vel/acc at the
-              ends). If `dynamic_trajectory` is on, a virtual clock integrates
-              dt * sigma, where sigma shrinks with the CBF shadow price
-              (/qp_debug/lambda_cbf) so the reference yields to the safety filter.
-3. REGULATION: hold the final target with zero feed-forward velocity.
-
-Telemetry mirrors the legacy generator so the existing dashboard keeps working:
-    /trajectory/phase           (String  : 'S' / 'T' / 'R')
-    /trajectory/phase_marker    (Marker  : RViz text)
-    /trajectory/reference_state (Float64MultiArray, 12: [x_r,xdot_r,x_l,xdot_l])
-    /trajectory/time_scale      (Float64 : sigma)
-"""
+"""Open-loop quintic reference source for controller testing: named presets from
+config/trajectory_endpoints.yaml (2-point lines or multi-waypoint cubic-spline paths on the
+same quintic timing), WAITING -> TRACKING -> REGULATION state machine, and the offline-plotter
+record trigger (rising edge at t=0, falling edge at REGULATION). Wall-clock by design."""
 
 import os
 

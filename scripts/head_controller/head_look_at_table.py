@@ -31,7 +31,7 @@ RUN (three terminals, see cloud_relay_node.py for why the relay is needed):
     ros2 run triago_control head_look_at_table.py
     ros2 run triago_control tabletop_perception_node.py
 
-TABLE POSITION -- WORLD MISMATCH WARNING (found 2026-07-06):
+TABLE POSITION -- WORLD MISMATCH WARNING:
     cfg.TABLE_TOP_CENTER_BASE is hardcoded from THIS repo's own
     `movement_tutorial.world` (table centre x=1.00, top z=0.70). If you are
     instead running the sibling Triago_Project stack's `handover` world (its

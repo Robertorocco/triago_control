@@ -18,7 +18,7 @@ Panels:
         - /QP_Debug_Markers3/Namespaces1
         - /Marker4
       Splitter Ratio: 0.4910941421985626
-    Tree Height: 1014
+    Tree Height: 294
   - Class: rviz_common/Views
     Expanded:
       - /Current View1
@@ -411,7 +411,7 @@ Visualization Manager:
         Value: /desired_pose
       Value: true
     - Class: rviz_default_plugins/MarkerArray
-      Enabled: true
+      Enabled: false
       Name: QP_Debug_Markers
       Namespaces:
         {}
@@ -421,12 +421,12 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Best Effort
         Value: /qp_debug_visualization
-      Value: true
+      Value: false
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
       Name: Blended_Reference
       Namespaces:
-        {}
+        blended_reference: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -448,13 +448,13 @@ Visualization Manager:
         Value: /gripper_head_camera_rgbd/color/image_raw
       Value: false
       Visibility:
-        "": true
         Blended_Reference: true
         Grid: true
         Image: true
         Marker: true
         PointCloud2: true
         QP_Debug_Markers: true
+        Real World Snapshot: true
         RobotModel: true
         TF: true
         Value: true
@@ -537,7 +537,7 @@ Visualization Manager:
       Enabled: true
       Name: QP_Debug_Markers
       Namespaces:
-        {}
+        goal_poses: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -549,7 +549,7 @@ Visualization Manager:
       Enabled: true
       Name: Marker
       Namespaces:
-        {}
+        workspace: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -562,7 +562,7 @@ Visualization Manager:
       Enabled: true
       Name: QP_Debug_Markers
       Namespaces:
-        {}
+        guidance_policy: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -616,117 +616,117 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 2.3502800464630127
+      Distance: 1.0198894739151
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 0.5188421010971069
-        Y: -0.30993691086769104
-        Z: 0.7733913064002991
+        X: 0.9006324410438538
+        Y: -0.00267803855240345
+        Z: 0.7584340572357178
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.0750003308057785
+      Pitch: 1.1549994945526123
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 4.673164367675781
+      Yaw: 4.728169918060303
     Saved:
       - Class: rviz_default_plugins/Orbit
-        Distance: 2.7850325107574463
+        Distance: 1.0063155889511108
         Enable Stereo Rendering:
           Stereo Eye Separation: 0.05999999865889549
           Stereo Focal Distance: 1
           Swap Stereo Eyes: false
           Value: false
         Focal Point:
-          X: 0.28132832050323486
-          Y: 0.015382912009954453
-          Z: 0.6245812773704529
-        Focal Shape Fixed Size: true
-        Focal Shape Size: 0.05000000074505806
-        Invert Z Axis: false
-        Name: Front-High View
-        Near Clip Distance: 0.009999999776482582
-        Pitch: 0.9349996447563171
-        Target Frame: <Fixed Frame>
-        Value: Orbit (rviz)
-        Yaw: 6.273187160491943
-      - Class: rviz_default_plugins/Orbit
-        Distance: 2.560181140899658
-        Enable Stereo Rendering:
-          Stereo Eye Separation: 0.05999999865889549
-          Stereo Focal Distance: 1
-          Swap Stereo Eyes: false
-          Value: false
-        Focal Point:
-          X: 0.4566611349582672
-          Y: -0.012142353691160679
-          Z: 0.6707018613815308
-        Focal Shape Fixed Size: true
-        Focal Shape Size: 0.05000000074505806
-        Invert Z Axis: false
-        Name: Left-Side View
-        Near Clip Distance: 0.009999999776482582
-        Pitch: 0.4300001263618469
-        Target Frame: <Fixed Frame>
-        Value: Orbit (rviz)
-        Yaw: 1.5200003385543823
-      - Class: rviz_default_plugins/Orbit
-        Distance: 2.560181140899658
-        Enable Stereo Rendering:
-          Stereo Eye Separation: 0.05999999865889549
-          Stereo Focal Distance: 1
-          Swap Stereo Eyes: false
-          Value: false
-        Focal Point:
-          X: 0.45253613591194153
-          Y: -0.012351983226835728
-          Z: 0.6707018613815308
-        Focal Shape Fixed Size: true
-        Focal Shape Size: 0.05000000074505806
-        Invert Z Axis: false
-        Name: Right-Side View
-        Near Clip Distance: 0.009999999776482582
-        Pitch: 0.13500040769577026
-        Target Frame: <Fixed Frame>
-        Value: Orbit (rviz)
-        Yaw: 4.648161888122559
-      - Class: rviz_default_plugins/Orbit
-        Distance: 2.1319644451141357
-        Enable Stereo Rendering:
-          Stereo Eye Separation: 0.05999999865889549
-          Stereo Focal Distance: 1
-          Swap Stereo Eyes: false
-          Value: false
-        Focal Point:
-          X: 0.4280591905117035
-          Y: -0.26451316475868225
-          Z: 0.7502451539039612
+          X: 0.828021764755249
+          Y: 0.025216657668352127
+          Z: 0.5354718565940857
         Focal Shape Fixed Size: true
         Focal Shape Size: 0.05000000074505806
         Invert Z Axis: false
         Name: Teleop
         Near Clip Distance: 0.009999999776482582
-        Pitch: 0.8149998188018799
+        Pitch: 0.5699999928474426
         Target Frame: <Fixed Frame>
         Value: Orbit (rviz)
-        Yaw: 3.1231374740600586
+        Yaw: 3.1431360244750977
+      - Class: rviz_default_plugins/Orbit
+        Distance: 1.0198894739151
+        Enable Stereo Rendering:
+          Stereo Eye Separation: 0.05999999865889549
+          Stereo Focal Distance: 1
+          Swap Stereo Eyes: false
+          Value: false
+        Focal Point:
+          X: 0.9006324410438538
+          Y: -0.00267803855240345
+          Z: 0.7584340572357178
+        Focal Shape Fixed Size: true
+        Focal Shape Size: 0.05000000074505806
+        Invert Z Axis: false
+        Name: Teleop_Top
+        Near Clip Distance: 0.009999999776482582
+        Pitch: 1.1549994945526123
+        Target Frame: <Fixed Frame>
+        Value: Orbit (rviz)
+        Yaw: 4.728169918060303
+      - Class: rviz_default_plugins/Orbit
+        Distance: 1.0198894739151
+        Enable Stereo Rendering:
+          Stereo Eye Separation: 0.05999999865889549
+          Stereo Focal Distance: 1
+          Swap Stereo Eyes: false
+          Value: false
+        Focal Point:
+          X: 0.8823496103286743
+          Y: -0.017711695283651352
+          Z: 0.6967486143112183
+        Focal Shape Fixed Size: true
+        Focal Shape Size: 0.05000000074505806
+        Invert Z Axis: false
+        Name: Teleop_R
+        Near Clip Distance: 0.009999999776482582
+        Pitch: 0.350000262260437
+        Target Frame: <Fixed Frame>
+        Value: Orbit (rviz)
+        Yaw: 4.1431565284729
+      - Class: rviz_default_plugins/Orbit
+        Distance: 1.0826332569122314
+        Enable Stereo Rendering:
+          Stereo Eye Separation: 0.05999999865889549
+          Stereo Focal Distance: 1
+          Swap Stereo Eyes: false
+          Value: false
+        Focal Point:
+          X: 0.9003008604049683
+          Y: -0.006861984264105558
+          Z: 0.7136014699935913
+        Focal Shape Fixed Size: true
+        Focal Shape Size: 0.05000000074505806
+        Invert Z Axis: false
+        Name: Teleop_L
+        Near Clip Distance: 0.009999999776482582
+        Pitch: 0.3400002717971802
+        Target Frame: <Fixed Frame>
+        Value: Orbit (rviz)
+        Yaw: 2.2931196689605713
 Window Geometry:
   Camera:
     collapsed: false
   Displays:
     collapsed: true
-  Height: 1403
+  Height: 683
   Hide Left Dock: true
   Hide Right Dock: false
   Image:
     collapsed: false
-  QMainWindow State: 000000ff00000000fd00000002000000000000018b00000525fc0200000003fb000000100044006900730070006c006100790073000000003b0000047f000000c700fffffffb0000000a0056006900650077007300000004c0000000a0000000a000fffffffb0000000c00430061006d00650072006100000003c30000008d0000002800ffffff000000020000050000000106fc0100000001fb0000000a0049006d0061006700650300000ad900000038000001a60000014c000005000000052500000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd00000002000000000000018b00000255fc0200000003fb000000100044006900730070006c006100790073000000003b000001af000000c700fffffffb0000000a0056006900650077007300000001f0000000a0000000a000fffffffb0000000c00430061006d00650072006100000003c30000008d0000002800ffffff000000020000050000000106fc0100000001fb0000000a0049006d0061006700650300000ad900000038000001a60000014c000005000000025500000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Views:
     collapsed: true
   Width: 1280

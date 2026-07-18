@@ -185,6 +185,10 @@ class HeadPerceptionNode(Node):
         self._real_phase2_active = False
         self._real_phase2_target = None
         self._real_retry_t = 0.0
+        # Phase-1 look target is LATCHED (not the live, drifting table_center) so
+        # the head settles and the velocity gate opens -- fusion only accumulates
+        # while the head is still. See _real_hardware_target.
+        self._phase1_target = None
 
         # Real hardware: the world is loaded MANUALLY (press ENTER), not on auto-
         # convergence -- a safety gate so the operator decides when the estimate
@@ -583,6 +587,7 @@ class HeadPerceptionNode(Node):
         self._real_phase2_active = False
         self._real_phase2_target = None
         self._real_retry_t = 0.0
+        self._phase1_target = None   # re-latch Phase-1 aim on the next estimate
         self.get_logger().info(
             "[PerceivedWorld] Re-arm requested — re-observing; will re-publish "
             "the snapshot once the estimate re-converges.")
@@ -836,8 +841,18 @@ class HeadPerceptionNode(Node):
                 self.controller.phase = 2
                 return self._real_phase2_target
 
+        # Latch the look target once, then hold it FIXED: fusion only accumulates
+        # while the head is still (velocity gate). Chasing the live, drifting
+        # table_center kept the head in perpetual micro-motion -- good exploration,
+        # but the head never settles long enough to actually fuse a frame, so no
+        # knowledge is built. Aim at the static prior until the first estimate
+        # arrives, latch that, and hold (the look target only needs the table in
+        # frame; the estimate itself keeps refining via fusion once settled).
+        if self._phase1_target is not None:
+            return self._phase1_target
         if result is not None and result.table_center is not None:
-            return np.asarray(result.table_center, dtype=float)
+            self._phase1_target = np.asarray(result.table_center, dtype=float).copy()
+            return self._phase1_target
         return cfg.TABLE_TOP_CENTER_BASE.copy()
 
     def _try_enter_real_phase2(self, result):
@@ -858,7 +873,23 @@ class HeadPerceptionNode(Node):
         direction_unit = np.array([-np.cos(elev), 0.0, np.sin(elev)])
         standoff = cfg.CLOSE_INSPECT_MAX_STANDOFF_M
 
-        half_extent = 0.5 * float(np.linalg.norm(c1 - c0)) + cfg.CLOSE_INSPECT_OVERHANG_MARGIN_M
+        # Frame the FULL physical extent of BOTH cylinders: each reaches
+        # +/-radius horizontally and spans its whole height vertically. Bound
+        # both by a sphere about the midpoint (radius = farthest surface point
+        # from the midpoint); a sphere projects identically from any viewing
+        # azimuth, so this is robust to the fixed frontal approach not being
+        # square to the pair.
+        bound_r = 0.0
+        m_xy = midpoint[:2]
+        for o in (objs[0], objs[1]):
+            c = np.asarray(o.center, dtype=float)
+            r = float(o.radius)
+            half_h = 0.5 * float(o.height)
+            d_horiz = float(np.linalg.norm(c[:2] - m_xy)) + r
+            d_vert = max(abs(c[2] + half_h - midpoint[2]),
+                         abs(c[2] - half_h - midpoint[2]))
+            bound_r = max(bound_r, float(np.hypot(d_horiz, d_vert)))
+        half_extent = bound_r + cfg.CLOSE_INSPECT_OVERHANG_MARGIN_M
         intr = self.camera.get_scaled_intrinsics()
         dbg = self.camera.get_intrinsics_debug()
         depth_wh = dbg.get("depth_wh") if dbg is not None else None
@@ -874,22 +905,67 @@ class HeadPerceptionNode(Node):
             needed = max(d_x, d_y)
             standoff = float(np.clip(needed, cfg.CLOSE_INSPECT_MIN_STANDOFF_M,
                                      cfg.CLOSE_INSPECT_MAX_STANDOFF_M))
+            if needed > cfg.CLOSE_INSPECT_MAX_STANDOFF_M + 1e-3:
+                self.get_logger().warn(
+                    f"[PHASE2] Framing both cylinders needs standoff {needed:.2f} m "
+                    f"but max is {cfg.CLOSE_INSPECT_MAX_STANDOFF_M:.2f} m -- the view "
+                    "may clip. Raise CLOSE_INSPECT_MAX_STANDOFF_M or lower the elevation.")
         else:
             self.get_logger().warn(
                 "[PHASE2] Camera intrinsics unavailable -- using the max standoff.")
 
+        # Flat back-off, applied AFTER the computed/clamped value above so it
+        # takes effect regardless of which branch set standoff (operator
+        # report: Phase 2 was sitting too close to the table).
+        standoff += cfg.CLOSE_INSPECT_STANDOFF_BACKOFF_M
+
         cand = midpoint + direction_unit * standoff
-        q = self.kin.solve_posture_for_position(cand)
-        if q is None:
-            self.get_logger().warn("[PHASE2] Closer view unreachable -- will retry.")
-            return
+        # Best-effort: solve_posture_for_position always returns the closest
+        # reachable posture (clamped to joint limits). If it can't fully reach
+        # the requested camera position, we STILL commit to the best-effort
+        # posture (the look-at QP keeps the camera aimed) and print WHY it fell
+        # short -- which direction and which joint(s) are at their limits.
+        q, info = self.kin.solve_posture_for_position(cand)
+        if not info["reachable"]:
+            e = info["err_base"]
+            sat = info["saturated"]
+            sat_txt = ("; ".join(f"{n} @ {side} limit ({v:+.2f} rad, limit {lim:+.2f})"
+                                 for (n, side, v, lim) in sat)
+                       if sat else "none at a limit (IK residual / geometry, not a joint stop)")
+            self.get_logger().warn(
+                f"\n[PHASE2] Requested view only PARTIALLY reachable -- camera falls "
+                f"{info['residual_m']*100:.1f} cm short. Committing best-effort posture anyway.\n"
+                f"          target cam   = {np.round(info['target'], 2)}\n"
+                f"          best-effort  = {np.round(info['achieved'], 2)}\n"
+                f"          shortfall(base) = [{e[0]:+.2f}, {e[1]:+.2f}, {e[2]:+.2f}] m "
+                f"(+x fwd / +y left / +z up)\n"
+                f"          joints at limit: {sat_txt}")
+
+        # Aim at the ANGULAR bisector from the actual camera position `cand`,
+        # not the raw 3D midpoint: the midpoint centers in the image only if
+        # both cylinders are equidistant from `cand`. If one is closer, its
+        # same physical offset subtends a LARGER angle, pushing it toward/past
+        # the frame edge while the farther one sits centred -- observed as a
+        # shifted/asymmetric view. Summing the two UNIT direction vectors
+        # gives the direction equidistant in ANGLE (not just space) from both.
+        dir0 = c0 - cand
+        dir1 = c1 - cand
+        n0 = float(np.linalg.norm(dir0))
+        n1 = float(np.linalg.norm(dir1))
+        fixation_target = midpoint
+        if n0 > 1e-6 and n1 > 1e-6:
+            bisector = dir0 / n0 + dir1 / n1
+            bn = float(np.linalg.norm(bisector))
+            if bn > 1e-6:
+                fixation_target = cand + (bisector / bn) * (0.5 * (n0 + n1))
 
         cfg.HEAD_POSTURE_TARGET = q
-        self._real_phase2_target = midpoint
+        self._real_phase2_target = fixation_target
         self._real_phase2_active = True
         self.get_logger().info(
-            f"\n[PHASE2] LOCKED -- fixating the midpoint between the 2 "
-            f"cylinders @{np.round(midpoint, 2)}, elevation="
+            f"\n[PHASE2] LOCKED -- fixating the depth-corrected bisector "
+            f"@{np.round(fixation_target, 2)} (3D midpoint was "
+            f"{np.round(midpoint, 2)}), elevation="
             f"{cfg.CLOSE_INSPECT_ELEVATION_DEG:.0f}deg, standoff={standoff:.2f}m, "
             f"cam target={np.round(cand, 2)}.\n"
             "          Staying here permanently -- re-arm with a rescan to "

@@ -14,9 +14,12 @@ It is Claude's responsibility to keep `.kiro/context.md` accurate and up to date
 
 ## Code Comment Style
 
-- Max **2 lines per comment**. State the constraint or the why, not the history.
-- No story: no dates, no "previously X now Y", no reference to past bugs, commits, or sessions. That belongs in the commit message, not the file.
-- Comment only the non-obvious (a hidden invariant, a subtle workaround, a surprising constraint) — well-named code doesn't need a comment restating what it does.
+- Comments are **1 line only**: short, explicative, minimal.
+- No history: no dates, no "previously X now Y", no references to past bugs, tuning steps, commits, or sessions. That belongs in the commit message, not the file.
+- Each method gets exactly 1 explanatory line before/as its docstring.
+- Comment only the non-obvious: hidden invariants, subtle workarounds, hard-to-read formulas, load-bearing observations. Well-named code needs no comment restating what it does.
+- Write for a reader new to the project: comments must convey the fundamental meaning of the architecture, not internal narrative.
+- The platform is **TRIAGo** — use that name in comments even where files/Docker say TIAGO.
 
 ## Sibling repo: haption_teleoperation
 

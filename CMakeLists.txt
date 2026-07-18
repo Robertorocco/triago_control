@@ -33,6 +33,7 @@ install(PROGRAMS
   scripts/qp_arm_teleop/capsule_alignment_audit.py
   scripts/head_controller/main_head.py
   scripts/head_controller/head_debug_plotter.py
+  scripts/head_controller/head_estimation_report.py
   scripts/head_controller/head_april_main.py
   scripts/head_controller/head_plotter.py
   scripts/head_controller/calibration_audit.py

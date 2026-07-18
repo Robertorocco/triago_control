@@ -20,24 +20,9 @@ DEPROJECTION (pinhole model, optical frame):
         Z =  Z                        (+Z forward, out of the lens)
     All vectorised over a strided pixel grid for CPU speed.
 
-INTRINSIC CALIBRATION / DISTORTION (2026-07-02 accuracy pass):
-    Previously the `CameraInfo.d` distortion coefficients were received on
-    the info topic and silently discarded — deprojection assumed an ideal
-    pinhole with no distortion correction at all. In practice, RealSense
-    D-series DEPTH streams are firmware-rectified and typically report
-    D=[0,0,0,0,0] (confirmed from Intel's own documentation and multiple
-    RealSense user reports), so this was likely a no-op for THIS specific
-    camera/topic in practice, not the dominant source of the reported
-    centimetre-level error (that was the circle-fit bias in
-    object_detector.py — see its module docstring). It was nonetheless a
-    real correctness gap: nothing verified the zero-distortion assumption,
-    so it would have silently produced wrong 3D points on any camera/config
-    where D is non-zero (e.g. the COLOR stream, or a different camera model).
-    Fixed properly here: if `D` is non-negligible, pixels are undistorted
-    (inverse Brown-Conrady, iterative fixed-point solve — verified
-    numerically to converge to machine precision in <=5 iterations even for
-    aggressive distortion magnitudes) before back-projection; a one-time
-    warning is logged so a non-zero-D camera is never silently mishandled.
+DISTORTION: if CameraInfo.d is non-negligible, pixels are undistorted (inverse Brown-Conrady,
+iterative fixed-point) before back-projection -- RealSense depth streams are usually
+firmware-rectified (D=0), but that is verified, never assumed.
 """
 
 import numpy as np
@@ -114,10 +99,7 @@ class CameraInterface:
     def _info_cb(self, msg: CameraInfo):
         # Pinhole intrinsics live in the 3x3 K matrix: [fx 0 cx; 0 fy cy; 0 0 1]
         K = msg.k
-        # Distortion coefficients (plumb_bob / Brown-Conrady convention:
-        # [k1, k2, p1, p2, k3]). RealSense depth streams are typically
-        # firmware-rectified (D == [0]*5), but we no longer ASSUME that — see
-        # the module docstring. Pad/truncate defensively to exactly 5 values.
+        # Brown-Conrady coefficients [k1,k2,p1,p2,k3]; padded/truncated defensively to 5 values.
         d = list(msg.d) if msg.d else []
         d = (d + [0.0] * 5)[:5]
         with self._lock:

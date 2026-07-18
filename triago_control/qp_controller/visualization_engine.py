@@ -1,22 +1,7 @@
 # visualization_engine.py
-"""
-The UI / Telemetry engine.
-
-Owns all NON-critical rendering so the real-time control loop never blocks on it:
-    * builds and serves the Meshcat web visualizer (collision + visual models),
-    * publishes RViz markers for the workspace obstacles and the virtual wall,
-    * applies grasp-intent coloring (orange) on demand.
-
-----------------------------------------------------------------------------
-THREAD-SAFETY RULE (PRESERVED EXACTLY):
-    Meshcat's WebSocket state machine is NOT thread-safe. ROS callbacks must
-    NEVER touch the viewer directly. They only mutate pure-Python data
-    (`meshColor`, `overrideMaterial`) under `meshcat_lock` and raise the
-    `meshcat_reload_pending` flag. The dedicated `_run_viz` thread is the SINGLE
-    owner of every Meshcat WebSocket call (loadViewerModel / display) and is the
-    only place the viewer is reloaded / displayed.
-----------------------------------------------------------------------------
-"""
+"""Non-critical rendering (Meshcat + RViz markers + grasp coloring). Meshcat is NOT thread-safe:
+callbacks only mutate colors under meshcat_lock and set a reload flag; the _run_viz thread is the
+sole owner of every WebSocket call."""
 
 import threading
 import time
@@ -48,10 +33,7 @@ class VisualizationEngine:
         self.model = model
         self.cmodel = cmodel
         self.urdf_path = urdf_path
-        # Loaded world scene (world_loader.WorldScene, optional) -- drives
-        # publish_obstacle_marker/publish_wall_marker/color_collision_model
-        # generically. None falls back to the legacy cfg.TABLE_POS/etc.
-        # constants everywhere below, so an older caller keeps working as-is.
+        # Optional WorldScene driving the marker/color methods; None falls back to the legacy cfg constants.
         self.world_scene = world_scene
 
         # Build the visual ("skin") model from the URDF, tinted as a green ghost
@@ -79,58 +61,14 @@ class VisualizationEngine:
         self.pub_wall_marker = self.node.create_publisher(Marker, '/qp_debug/virtual_wall_marker', 10)
         self.pub_cyl_obs_marker = self.node.create_publisher(Marker, '/cylinder_obstacle_marker', 10)
 
-    # Padding added to every dimension of the visual gripper box relative to
-    # the COLLISION gripper box it mirrors (see add_gripper_visual_boxes).
-    # Both boxes share the exact same parent joint + placement (same frame,
-    # same [0,0,0.05] offset) -- if they also share the exact same SIZE, the
-    # two hppfcl.Box surfaces are perfectly coincident. Meshcat renders BOTH
-    # (displayCollisions(True) AND displayVisuals(True)), so two coincident,
-    # alpha-blended surfaces z-fight: the GPU depth test has no stable winner
-    # at identical depth, so it flips pixel-to-pixel / frame-to-frame -- the
-    # reported "blinking" / meshes "fusing". This is independent of grasp
-    # state: it happens whenever the collision box is visible (default state
-    # and the 'opaque' attach state both leave it red/blue-visible -- see
-    # paint_grasp_intent/restore_object_color), simultaneously with the
-    # always-present orange visual box. Inflating the visual box by a small,
-    # symmetric margin (same center, strictly larger half-extents on every
-    # axis) makes its surface strictly farther from the shared center than
-    # the collision box's on all 6 sides -- guaranteeing zero coincident
-    # geometry, in EVERY grasp state, without touching any color-transition
-    # logic. Visually: a barely-perceptible ~5mm orange halo around the
-    # collision box, instead of a flicker.
+    # Visual gripper box inflated vs its coincident collision box: identical surfaces z-fight
+    # in the GPU depth test (pixel flicker), a strict size margin guarantees zero coincidence.
     GRIPPER_VISUAL_BOX_PADDING = 0.005  # [m] per-dimension
 
     def add_gripper_visual_boxes(self, col_manager):
-        # Mirror the collision gripper boxes into the visual model, padded
-        # slightly larger (see GRIPPER_VISUAL_BOX_PADDING above) so its
-        # surface never exactly coincides with the collision box's.
-        #
-        # BUGFIX #2 (2026-07-04, deeper root cause than the padding alone):
-        # this box is a GRASP-INTENT INDICATOR -- paint_grasp_intent turns it
-        # opaque orange to signal "a grasp is in progress" (see that method).
-        # The original code set it to a TRANSLUCENT orange (alpha=0.4) HERE,
-        # unconditionally, at creation time -- i.e. permanently visible in
-        # the DEFAULT (no grasp) state too, not just during an actual grasp
-        # signal. Since it sits at (almost) the same place as the ALWAYS
-        # visible red/blue collision box, this created a permanent overlap
-        # of two semi-transparent meshes. WebGL/three.js (what Meshcat draws
-        # with) does not reliably depth-sort multiple overlapping
-        # TRANSPARENT objects -- draw order between two near-coincident
-        # translucent meshes can flip frame-to-frame regardless of a small
-        # padding gap -- which is what actually produced the reported
-        # "blinking" (orange over the red right gripper, purple/magenta over
-        # the blue left gripper -- red+blue channels blending under the
-        # translucent orange overlay). The padding fix alone only prevented
-        # EXACT surface coincidence; it did not stop this transparency
-        # z-fight, since fully opaque objects (alpha=1.0) DO depth-sort
-        # correctly in WebGL -- only translucent ones have this instability.
-        #
-        # Fix: start fully TRANSPARENT (alpha=0.0, i.e. invisible) instead of
-        # translucent. paint_grasp_intent already sets alpha=1.0 (fully
-        # OPAQUE) when it wants this box shown -- an opaque box depth-sorts
-        # correctly against the collision box, so no flicker during an
-        # actual grasp signal either. See restore_object_color for the
-        # matching "set back to invisible" half of this fix.
+        """Mirrors the gripper collision boxes as grasp-intent indicators, padded and invisible by default."""
+        # Invisible (alpha=0) until a grasp is signaled: WebGL cannot depth-sort two overlapping
+        # TRANSLUCENT meshes, so translucent-over-translucent flickers; invisible/opaque never does.
         pad = self.GRIPPER_VISUAL_BOX_PADDING
         for side in ('right', 'left'):
             base_link = f'gripper_{side}_base_link'
@@ -145,24 +83,8 @@ class VisualizationEngine:
                 self.vmodel.addGeometryObject(vis_obj)
 
     def color_collision_model(self, col_manager):
-        # Tint the collision capsules/obstacles: right=red, left=blue, head=yellow
-        # (quasi-static CBF obstacle, 2026-07-01), ground=grey, workspace.
-        #
-        # BUGFIX (2026-07-04): every color below is now FULLY OPAQUE
-        # (alpha=1.0), not translucent (was 0.8 / 0.5). Root cause, same
-        # mechanism as the gripper-box flicker fixed earlier: these capsules
-        # (right_geom_ids/left_geom_ids -- visually cylinder-like, rounded-cap
-        # tubes) sit directly under the ALWAYS-rendered green "ghost" skin
-        # mesh (self.vmodel, alpha=0.3 -- the real URDF visual geometry,
-        # see __init__). Two overlapping TRANSLUCENT surfaces at nearly the
-        # same depth (capsule vs skin) is exactly the WebGL/three.js
-        # draw-order instability that caused the earlier gripper-box flicker
-        # -- reported here as the arm capsules "blinking red and blue"
-        # (right arm = red, left arm = blue). An OPAQUE surface against a
-        # translucent one sorts deterministically via the standard depth
-        # test (only one of the two is ambiguous, not both), so there is no
-        # flicker -- this is the SAME fix pattern as the gripper visual box
-        # (invisible/opaque, never translucent-over-translucent).
+        """Tints the collision geometry: right=red, left=blue, head=yellow, ground=grey, plus obstacles."""
+        # All colors fully opaque: a translucent capsule under the translucent skin mesh z-fights in WebGL.
         for geom_id in col_manager.right_geom_ids:
             if geom_id < len(self.cmodel.geometryObjects):
                 self.cmodel.geometryObjects[geom_id].meshColor = np.array([1.0, 0.0, 0.0, 1.0])
@@ -171,10 +93,7 @@ class VisualizationEngine:
             if geom_id < len(self.cmodel.geometryObjects):
                 self.cmodel.geometryObjects[geom_id].meshColor = np.array([0.0, 0.0, 1.0, 1.0])
                 self.cmodel.geometryObjects[geom_id].overrideMaterial = True
-        # Head capsules: distinct yellow so they're visually identifiable as the
-        # NEW quasi-static obstacle (neither arm's own color), matching the
-        # SAME dominant-axis capsule geometry the arms use (see
-        # CollisionManager.build_collision_model's head_offsets branch).
+        # Head capsules in distinct yellow: identifiable as the quasi-static obstacle.
         for geom_id in getattr(col_manager, 'head_geom_ids', []):
             if geom_id < len(self.cmodel.geometryObjects):
                 self.cmodel.geometryObjects[geom_id].meshColor = np.array([1.0, 1.0, 0.0, 1.0])
@@ -186,14 +105,7 @@ class VisualizationEngine:
             if obs_id >= len(self.cmodel.geometryObjects):
                 continue
             name = self.cmodel.geometryObjects[obs_id].name
-            # World-scene-driven color (2026-07-04): read straight from the
-            # loaded YAML's `color` field for this named obstacle -- replaces
-            # the old "red"/"blue" string-matching on the geometry name, which
-            # only ever worked because those two literal names happened to be
-            # hard-coded. A world_scene obstacle can now be named/colored
-            # however the new world requires. Falls back to the legacy
-            # string-match heuristic when no world_scene is available (older
-            # caller / legacy cfg-constants path in build_collision_model).
+            # Color from the YAML's own field; legacy name-string heuristic only without a world_scene.
             color = None
             if self.world_scene is not None:
                 spec = self.world_scene.get_obstacle(name)
@@ -206,11 +118,7 @@ class VisualizationEngine:
                     color = [0.0, 0.0, 1.0, 1.0]
                 else:  # table
                     color = [0.6, 0.4, 0.2, 1.0]
-            # Force full opacity regardless of source (YAML or fallback) --
-            # same anti-flicker rationale as above; a table/cylinder is far
-            # less likely to overlap the ghost skin than the arm capsules,
-            # but forcing alpha=1.0 here removes the possibility entirely and
-            # keeps every collision-model color consistently opaque.
+            # Force full opacity regardless of source (anti-flicker: keep every color opaque).
             color = [color[0], color[1], color[2], 1.0]
             self.cmodel.geometryObjects[obs_id].meshColor = np.array(color)
             self.cmodel.geometryObjects[obs_id].overrideMaterial = True
@@ -278,9 +186,7 @@ class VisualizationEngine:
                 default = np.array([float(c) for c in spec.color])
         if default is None:
             default = np.array([1.0, 0.0, 0.0, 1.0]) if color == "red" else np.array([0.0, 0.0, 1.0, 1.0])
-        # Force full opacity (anti-flicker, see color_collision_model's
-        # bugfix note) regardless of whether it came from the YAML or the
-        # hard-coded fallback above.
+        # Force full opacity (anti-flicker) regardless of the color source.
         default = np.array([default[0], default[1], default[2], 1.0])
 
         with self.meshcat_lock:
@@ -289,15 +195,8 @@ class VisualizationEngine:
                 self.cmodel.geometryObjects[cyl_id].overrideMaterial = False
             for geom in self.vmodel.geometryObjects:
                 if f"gripper_{arm_side}_visual_box" == geom.name:
-                    # BUGFIX (2026-07-04): the grasp-intent visual box must go
-                    # back to fully INVISIBLE (alpha=0.0), not just have its
-                    # overrideMaterial flag dropped -- overrideMaterial=False
-                    # has no effect on a synthetic (non-URDF) box, which has
-                    # no "default material" to fall back to. Without this,
-                    # the box stayed stuck fully-opaque orange forever after
-                    # the first grasp+release of a session (see
-                    # add_gripper_visual_boxes for the other half of this fix
-                    # -- it now starts invisible instead of translucent).
+                    # Must go back to invisible explicitly: a synthetic box has no default material,
+                    # so overrideMaterial=False alone would leave it stuck opaque orange.
                     geom.meshColor = np.array([1.0, 0.5, 0.0, 0.0])
                     geom.overrideMaterial = True
                 elif f"gripper_{arm_side}" in geom.name:
@@ -326,11 +225,7 @@ class VisualizationEngine:
             time.sleep(0.2)
 
     def publish_obstacle_marker(self, hri=None):
-        # Publish the workspace obstacles (table + cylinders + any future extra
-        # obstacles) to RViz, with grasp coloring. Iterates `self.world_scene`
-        # generically (2026-07-04) -- replaces the old two-cylinders-hard-coded
-        # version; falls back to the legacy fixed table+red+blue triple when no
-        # world_scene was loaded, so behavior is unchanged for that path.
+        """Publishes the workspace obstacles to RViz with grasp coloring, iterating world_scene generically."""
         header = Marker()
         header.header.frame_id = "base_footprint"
         header.header.stamp = self.node.get_clock().now().to_msg()
@@ -420,10 +315,7 @@ class VisualizationEngine:
             self.pub_cyl_obs_marker.publish(create_marker(2, legacy_blue, blue_id))
 
     def publish_wall_marker(self):
-        # Publish the virtual wall as a transparent cube in RViz. Reads pose/
-        # size/color from the loaded world_scene's role=="wall" obstacle when
-        # available (2026-07-04); falls back to the legacy cfg.WALL_POS/
-        # WALL_SIZE constants otherwise, so behavior is unchanged for that path.
+        """Publishes the virtual wall cube in RViz from the world_scene (fallback: legacy cfg constants)."""
         wall = self.world_scene.get_obstacle_by_role('wall') if self.world_scene is not None else None
         if wall is not None:
             pos, size, color = wall.position, wall.size, wall.color

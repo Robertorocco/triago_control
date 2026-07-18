@@ -1,93 +1,12 @@
 # world_loader.py
-"""
-World scene loading: the SINGLE place a new Gazebo world's obstacle layout is
-described to the QP-CLF-CBF stack.
+"""Declarative world loading: parses config/worlds/<name>.yaml into a WorldScene consumed
+generically by CollisionManager, VisualizationEngine and GoalSet -- one file per world, no
+hard-coded obstacle numbers. No Gazebo connection: it mirrors the layout the matching .world
+file spawns (keeping the two in sync is a manual, single-file step via gazebo_world_file).
 
-WHY this module exists
------------------------------------------------------------------------------
-Before this module, the workspace obstacles (table + red/blue cylinders +
-optional wall) were hard-coded as numeric constants in config.py (TABLE_POS,
-RED_CYLINDER_POS, BLUE_CYLINDER_POS, CYLINDER_SIZE, TABLE_SIZE, WALL_POS,
-WALL_SIZE) and read DIRECTLY by collision_manager.py and
-visualization_engine.py. Testing a new Gazebo world (different table pose,
-different cylinder size, an extra obstacle for a harder task) meant hand-
-editing config.py -- and, separately, head_control/config.py's OWN duplicated
-copy of the same numbers (GT_RED_CENTER, TABLE_CENTER_WORLD, ...) -- with no
-guarantee the two ever agreed, and no way to keep several world variants
-around at once.
-
-This module introduces ONE interchange format -- a small YAML file under
-config/worlds/<name>.yaml -- that fully describes a world's static obstacle
-layout (shape/pose/size/color) plus which named obstacle plays the "red"/
-"blue" grasp role (see WorldScene.grasp_roles). `load_world(world_name)`
-parses it into a plain, dependency-free WorldScene object that every
-downstream module (CollisionManager, VisualizationEngine, GoalSet,
-head_control/config.py) consumes generically -- no per-obstacle bespoke code,
-no duplicated numbers.
-
-WHAT THIS DOES NOT CHANGE
------------------------------------------------------------------------------
-* The Gazebo launch command is UNCHANGED IN STRUCTURE (`ros2 launch
-  triago_gazebo ... world_name:=<name>`, only the `<name>` argument itself
-  changes per world -- see config/worlds/no_obstacle.yaml's header for the
-  full rename history). This module has NO connection to Gazebo -- it only
-  describes, on the Pinocchio/hppfcl/RViz side, the SAME obstacle layout that
-  the chosen Gazebo .world file already spawns. Keeping the two in sync when
-  authoring a NEW world is a manual (but now single-file, single-place)
-  bookkeeping step -- see the `gazebo_world_file` field below.
-* No CBF/CLF math changes. CollisionManager still builds the exact same
-  hppfcl geometry types (Box, Cylinder) at the exact same poses; only WHERE
-  those numbers come from changed (YAML instead of Python constants).
-* `trajectory_endpoints.yaml` (test presets) is untouched, per instruction --
-  these worlds are teleoperation-driven, not open-loop-preset-driven.
-
-SCHEMA (see config/worlds/no_obstacle.yaml for a full worked example)
------------------------------------------------------------------------------
-world_name: str                     -- must match the YAML's own file, informational
-gazebo_world_file: str               -- bookkeeping pointer to the matching .world file
-static_obstacles: list of:
-    name: str                        -- unique geometry name (also the hppfcl GeometryObject name)
-    role: "table" | "graspable" | "wall" | "obstacle"   -- informational + drives default RViz color
-    shape: "box" | "cylinder"
-    pose: [x, y, z, roll, pitch, yaw]  -- roll/pitch/yaw currently unused (all current
-                                          obstacles are axis-aligned); kept for forward
-                                          compatibility, see _pose_to_se3 below.
-    size: box -> [sx, sy, sz]; cylinder -> [radius, length]
-    color: [r, g, b, a]               -- used by RViz + Meshcat; NOT physics
-    collision: bool                   -- if False, geometry is created but not added to
-                                          workspace_obstacle_ids (mirrors WALL_COLLIDER's
-                                          old on/off behavior, generalized)
-grasp_roles: {red: <name>, blue: <name>}   -- resolves today's grasp state machine's
-                                          hard-coded "red"/"blue" concepts to whichever
-                                          named obstacle plays that role in THIS world.
-platform: (optional)                -- NOT an obstacle (no collision geometry, never
-                                          added to CollisionManager's cmodel) -- purely
-                                          the reference pose for shared_autonomy's
-                                          Platform_Place goal, and a visual aid the
-                                          operator sees directly in Gazebo (e.g. the
-                                          yellow `placement_area` disk). Deliberately
-                                          a SEPARATE top-level field from
-                                          `static_obstacles`, not another entry in that
-                                          list, to keep that list's semantics ("things
-                                          the collision model builds geometry for")
-                                          unambiguous.
-    pose: [x, y, z]                  -- world center
-    radius: float                    -- [m] disk radius
-    thickness: float                 -- [m] disk thickness
-    place_margin: float (optional, default 0.03)  -- [m] keep the placed
-                                          footprint this far inside the rim
-    name: str (optional, default "Place")  -- goal-key suffix; the single
-                                          `platform:` form defaults to "Place"
-                                          -> the legacy 'Platform_Place' goal.
-platforms: (optional, MULTI-platform)  -- a LIST of the same mapping as
-                                          `platform:` above, one per placement
-                                          disk; each SHOULD set a unique `name`
-                                          (-> goal keys 'Platform_<name>'). Use
-                                          EITHER `platform:` (one disk) OR
-                                          `platforms:` (many). Both feed
-                                          WorldScene.platforms; `platform:` also
-                                          feeds WorldScene.platform (the first).
-"""
+Schema: world_name, gazebo_world_file, static_obstacles (name/role/shape/pose/size/color/
+collision), grasp_roles {red,blue}, and optional platform(s) (placement disks: pure goal
+references, never collision geometry)."""
 
 import os
 from dataclasses import dataclass, field
@@ -147,7 +66,7 @@ class WorldScene:
     grasp_roles: Dict[str, str] = field(default_factory=dict)
     # `platform` = the FIRST placement disk (kept for legacy readers / single-
     # platform worlds); `platforms` = the full list (one entry per disk). A world
-    # that declares the old single `platform:` mapping yields platforms=[that one].
+    # A single `platform:` mapping yields platforms=[that one].
     platform: Optional[PlatformSpec] = None
     platforms: List[PlatformSpec] = field(default_factory=list)
 

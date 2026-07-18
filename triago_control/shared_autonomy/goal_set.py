@@ -1,12 +1,5 @@
 #!/usr/bin/env python3
-"""GoalSet: cylinder geometry definitions and dynamic SE(3) grasp-goal computation.
-
-Extracted from the monolithic SharedControlNode per the refactor plan in
-shared_autonomy_analysis.md (Section 4 - Proposed class decomposition).
-
-This module has NO ROS or matplotlib dependencies: it is pure geometry and is
-trivially unit-testable.
-"""
+"""GoalSet: cylinder geometry and dynamic SE(3) grasp-goal manifolds (pure geometry, no ROS deps)."""
 
 import numpy as np
 from scipy.spatial.transform import Rotation as R
@@ -115,7 +108,7 @@ class GoalSet:
                        table with no 'grasp_types' override still produces
                        exactly ['Red_Top', 'Red_Side', 'Blue_Top', 'Blue_Side',
                        'Platform_Place'], unchanged from before this feature.
-            platform: optional world_loader.PlatformSpec (2026-07-04) --
+            platform: optional world_loader.PlatformSpec --
                        overrides the class-level PLATFORM_POSE/PLATFORM_RADIUS/
                        PLATFORM_THICKNESS/PLATFORM_PLACE_MARGIN defaults below
                        with the loaded world's placement disk (e.g. Gazebo's
@@ -449,11 +442,8 @@ class GoalSet:
         relative to T_anchor (current EE or user pose), using a singularity-safe
         rotation distance (see _rotation_distance) with hysteresis against chatter.
 
-        Top grasp: orientation is also anchored, matching the Side grasp's
-        adaptive behavior so switching goals does not cause unnecessary wrist
-        flips (this fixes the inconsistency noted in the analysis: the original
-        Top grasp ignored R_anchor entirely and always returned a fixed
-        R.from_euler('y', 90 deg)).
+        Top grasp: orientation is anchored like the Side grasp, so switching goals
+        never causes an unnecessary wrist flip.
         """
         if goal_key.startswith('Platform'):
             # Placement goal is a perpendicularity manifold over the disk, not a

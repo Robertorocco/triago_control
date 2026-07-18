@@ -1,25 +1,8 @@
 #!/usr/bin/env python3
 # main_qp_controller.py
-"""
-The Orchestrator (ROS 2 Node).
-
-Wires together the five specialized modules and drives the safety-critical
-control loop:
-
-    RobotKinematics  -> FK / Jacobians / filtered velocity / digital twin
-    CollisionManager -> SoftMin CBF gradient + dynamic safety margin
-    SharedAutonomyHandler -> grasp / CBF-bypass / attachment commands
-    QPFormulator     -> the CLF-CBF-QP that produces safe joint velocities
-    VisualizationEngine -> Meshcat + RViz telemetry (off the critical path)
-
-Responsibilities:
-    * fetch the URDF and initialize every sub-module,
-    * own the cartesian-reference and joint-state callbacks + motion watchdogs,
-    * run `solve_and_publish` on a CONFIGURABLE-frequency timer (see
-      `set_control_frequency`, which replaces the original hard-coded 1/300 dt),
-    * keep the TSID JS velocity controllers active,
-    * publish joint velocity commands and all dashboard telemetry.
-"""
+"""Safety-controller orchestrator: wires RobotKinematics + CollisionManager +
+SharedAutonomyHandler + QPFormulator + VisualizationEngine and drives the wall-clock
+control loop (references in, safe joint velocities + telemetry out)."""
 
 import rclpy
 from rclpy.signals import SignalHandlerOptions
@@ -542,13 +525,9 @@ class SafetyQPController(Node):
             # joint in this same message still updates normally. Rejecting the
             # WHOLE message here would be worse: if the same joint is always
             # bad (a permanent characteristic, not a one-off fault), current_q/
-            # current_v would freeze forever and the arms would never update
-            # again. This does not, by itself, make the bad joint harmless
-            # downstream -- see qp_formulator.build_and_solve's rate-damping
-            # term, which must SELECT at the actuated arm indices rather than
-            # multiply-by-mask against the full current_v (0 * nan == nan, not
-            # 0 -- this exact mechanism is what poisoned quadprog's entire
-            # solution from a single unrelated wheel joint on 2026-07-15).
+            # current_v would freeze forever and the arms would never update again.
+            # Downstream, the rate-damping term must still SELECT at arm indices
+            # (0 * nan == nan: a mask-multiply would poison the whole solve).
             self.get_logger().error(
                 f"[SENSOR] Non-finite /joint_states entr{'y' if len(bad_fields)==1 else 'ies'} "
                 f"(that joint only; all others updated normally -- a bad position holds at "

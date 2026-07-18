@@ -124,6 +124,27 @@ JOINT_LIMIT_BUFFER = 0.15    # rad safety buffer from the hard limit
 # Consider the head "aligned" (pointing at the table) below this angular error.
 LOOKAT_ALIGNED_DEG = 4.0
 
+# --- Soft roll-alignment ("up-righting", keep the horizon level) ------------
+# The look-at task constrains only the optical-axis DIRECTION (2 DOF); roll
+# ABOUT that axis is left to the redundant chain, which drifts toward a rolled
+# (near-vertical) image as the head slews between scan targets -- the "starts
+# level then rotates to vertical" the operator sees. We regulate the ACTUAL
+# roll angle (image-right = camera +X kept aligned with world-right WORLD_RIGHT)
+# as a LOW-WEIGHT least-squares COST (never a 3rd hard equality -- that fought
+# pointing) resolved in the null space of pointing. Two hard-won safety knobs:
+#   * DEADBAND: within ROLL_DEADBAND_DEG of level the term is completely silent, so it
+#     never holds head velocity above INTEGRATE_VEL_THRESH during a dwell (would block fusion).
+#   * GATE_FLOOR=0: zero roll authority while the pointing error is large, so it
+#     never fights an in-progress slew; authority ramps in only as it aligns.
+WORLD_RIGHT = np.array([0.0, -1.0, 0.0])   # robot's right in the FK root frame
+K_ROLL_ALIGN = 0.8          # roll servo gain [1/s] (target roll rate = K*theta)
+W_ROLL_ALIGN = 10.0         # least-squares cost weight (subordinate to pointing)
+ROLL_WZ_MAX = 0.15          # [rad/s] clamp on the requested roll-rate target
+ROLL_ALIGN_EPS = 0.1        # gimbal guard: skip when world-right ~parallel to the optical axis
+ROLL_GATE_ANGLE_DEG = 30.0  # authority fades from full (aligned) to floor at this look-at error
+ROLL_GATE_FLOOR = 0.0       # ...to ZERO -- no roll correction while slewing far off-target
+ROLL_DEADBAND_DEG = 5.0     # silent within this of level, so a settled dwell can fuse
+
 # =============================================================================
 # 5. SCAN MOTION  (gentle sweep around the look-at target to improve coverage)
 # =============================================================================
@@ -143,8 +164,8 @@ SCAN_WAYPOINTS = [
 # =============================================================================
 # 5c. ACTIVE VISION  (perception-driven head motion — supersedes the fixed scan)
 # =============================================================================
-# When ENABLE_ACTIVE_VISION is True, the head is no longer driven by wall-clock
-# time (ENABLE_SCAN / SCAN_DWELL_S). Instead look_at_controller.active_vision_target
+# When ENABLE_ACTIVE_VISION is True, head motion is led by what the camera sees, not
+# wall-clock dwells: look_at_controller.active_vision_target
 # runs a two-phase policy that is LED BY WHAT THE CAMERA SEES:
 #   Phase 0 SWEEP  : cycle the SCAN_WAYPOINTS offsets to discover the plane + every
 #                    expected object, advancing off a waypoint once its incremental
@@ -256,7 +277,8 @@ CYL_RIM_PERCENTILE = 93      # per-bin radius percentile defining the rim
 CYL_RIM_BAND = 0.0015        # [m] band width around the percentile radius
                               # averaged to form each bin's rim point
 
-# Height uses the top slice's median (z_max alone is a biased-high statistic).
+# Height uses the top slice's median (z_max alone is a biased-high statistic); the accuracy
+# lever here is POV distance/angle, not this width.
 CYL_TOP_SLICE = 0.020        # [m] take points within this of the cluster's z_max
 
 # Conservative radius inflation for collision use (0 = report raw estimate).
@@ -307,10 +329,20 @@ REAL_VERT_COVERAGE_MIN = 0.40  # [0..1] min fraction of height slices with point
                                # (relaxed: a steep view sees less of the side wall)
 REAL_VERT_COVERAGE_BINS = 10
 
-# Top-face height reference: use a high percentile (not the raw z-max, which
-# chases flying-pixel depth spikes above the true top -- the noise seen on the
-# real cloud) as the top-slice anchor. Real hardware only; sim keeps z-max.
+# Top-face anchor: a high percentile, not raw z-max (which chases flying-pixel depth spikes).
+# Real hardware only; sim keeps z-max.
 CYL_TOP_PERCENTILE_REAL = 98
+
+# Quality-gated height fusion (object_tracker.fuse): height is the fragile
+# VERTICAL measurement -- an oblique/foreshortened POV sees only a top disc and
+# reports a biased height. With a blind EMA every frame moves height equally, so
+# a long dwell at a poor POV drags a good close-view height back toward its bias.
+# When enabled, a frame updates height ONLY if its vertical_coverage is within
+# HEIGHT_FUSE_VCOV_MARGIN of the best coverage seen for that object, so the best
+# view sets height and later worse views can't undo it. False = plain EMA (the
+# previous behaviour, exact revert). Radius/position always use the plain EMA.
+ENABLE_HEIGHT_QUALITY_GATE = True
+HEIGHT_FUSE_VCOV_MARGIN = 0.15   # accept height from frames within this of best vcov
 
 # Force exactly the expected object count (WORLD_EXPECTED_CYLINDERS): keep only
 # the N highest-confidence tracks, drop the rest as spurious. See
@@ -353,11 +385,8 @@ ACTIVE_VISION_TIME_BUDGET_S_REAL = 90.0    # slower scan needs a bigger budget
 HEAD_POSTURE_TARGET_REAL = np.array([-0.2925, -0.3324, -0.4587, -0.7678, -0.8386, -1.5055, 0.1549])
 
 # =============================================================================
-# REAL HARDWARE HEAD MOTION (2026-07-16 simplification): EXACTLY two fixed
-# dwell postures. No scanning, no per-object SWEEP/REFINE/HOLD state machine --
-# main_head.py bypasses LookAtController.active_vision_target()/scan_target()
-# entirely on real hardware (sim is completely untouched, still uses the full
-# active-vision system). See main_head.py::_real_hardware_target.
+# REAL HARDWARE HEAD MOTION: exactly two fixed dwell postures -- no scanning, no
+# SWEEP/REFINE/HOLD state machine; sim keeps the full active-vision system.
 #
 #   Phase 1 (t < REAL_PHASE1_DURATION_S): standard framing (HEAD_POSTURE_TARGET
 #     _REAL), aimed at the live table centroid -- roughly localizes the table
@@ -378,21 +407,32 @@ REAL_PHASE2_RETRY_COOLDOWN_S = 5.0   # [s] retry interval if not enough cylinder
 # view. The standard framing posture is a steep ~63deg near-top-down view
 # (good for the table's XY footprint, poor for cylinder radius/height --
 # barely any side wall visible). A shallower elevation shows more of the
-# cylinder's curved SIDE surface -- better arc/height fit. Range tried:
-# 30-60deg; 45 is the default middle choice, easy to retune.
-CLOSE_INSPECT_ELEVATION_DEG = 45.0
+# cylinder's curved SIDE surface -- better arc/height fit.
+# Lowered 45->28: head_estimation_report.py showed the off-axis cylinder in a
+# 2-cylinder pair badly under-observed (height -4.2cm) at 45deg/0.63m standoff
+# -- more side-on + closer (below) directly increases points-on-object.
+CLOSE_INSPECT_ELEVATION_DEG = 28.0
 # Fraction of the frame's half-width/half-height the cylinder pair is allowed
 # to fill (< 1.0 leaves a border margin so nothing clips at frame edge from
-# estimate noise/motion).
-CLOSE_INSPECT_FOV_MARGIN_FRAC = 0.85
-# Extra radius beyond half the cylinder-to-cylinder separation, budgeting for
-# each cylinder's own radius so neither is clipped at the frame edge.
-CLOSE_INSPECT_OVERHANG_MARGIN_M = 0.05
+# estimate noise/motion). Raised 0.85->0.92 alongside the elevation drop above
+# (more resolution on each object); with the sphere-bound + bisector-aim fix
+# (main_head.py _try_enter_real_phase2) 0.92 gave height/radius/spread all
+# excellent (inter-object spread 0.8cm). Backing off to 0.89 to "zoom slightly
+# less" regressed one cylinder badly (-5.5cm) -- kept at the known-good 0.92.
+CLOSE_INSPECT_FOV_MARGIN_FRAC = 0.92
+# Extra buffer added to the sphere radius bounding both cylinders' full extent
+# (main_head.py _try_enter_real_phase2), so neither is clipped at the frame
+# edge. Reduced 0.05->0.03 alongside FOV_MARGIN_FRAC above (come closer).
+CLOSE_INSPECT_OVERHANG_MARGIN_M = 0.03
 # Standoff bounds: never closer than this (sanity floor against a degenerate
 # estimate) and never farther than the standard framing's own distance
 # (already known-good -- Phase 2 only ever moves CLOSER than Phase 1).
 CLOSE_INSPECT_MIN_STANDOFF_M = 0.35
 CLOSE_INSPECT_MAX_STANDOFF_M = 0.78
+# Flat back-off applied AFTER the computed/clamped standoff above (operator
+# report: Phase 2 sits too close to the table) -- unconditional, applies
+# whether standoff came from the FOV-framing calc or the MAX fallback.
+CLOSE_INSPECT_STANDOFF_BACKOFF_M = 0.07
 
 # Wider fixation-point offsets than the sim sweep -> the closer camera inspects
 # the table from noticeably different angulations (better rim/side coverage for
@@ -423,7 +463,7 @@ TRACK_MATCH_DIST = 0.15      # [m] associate a detection to a track within this
 TRACK_MAX_UNSEEN = 15        # frames an unmatched track survives (~3s @5Hz)
 TRACK_POS_ALPHA = 0.30       # EMA on position AND dimensions (0..1, higher = more responsive)
 
-# (legacy single-frame EMA association — no longer used, kept for reference)
+# Legacy single-frame EMA association (unused, kept for reference).
 DETECTION_EMA_ALPHA = 0.40
 DETECTION_MATCH_DIST = 0.10
 

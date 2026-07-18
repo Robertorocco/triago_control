@@ -60,7 +60,7 @@ USAGE
     (some ROS distros prefix the output with "String value is:" -- strip
     that line if present) then pass --urdf /tmp/live.urdf.
 
-    --suggest-fix (2026-07-04): for every flagged (protrusion > 0) link,
+    --suggest-fix: for every flagged (protrusion > 0) link,
     computes the CLOSED-FORM optimal correction -- a lateral offset
     (perpendicular re-centering) plus an axial extension on whichever
     end(s) the mesh overshoots the joint-to-joint segment -- and prints it
@@ -281,7 +281,7 @@ def audit_chain(model, data, vmodel, chain, tool_link_name, capsule_radius, appl
     # Reuse the REAL production functions -- zero drift vs. what
     # main_qp_controller.py actually builds into the collision model.
     #
-    # BUGFIX (2026-07-04): this used to call ONLY calculate_offsets() and
+    # Must apply the SAME override path the controller uses: this calls calculate_offsets() and
     # then check against the raw global `capsule_radius` -- i.e. it audited
     # the PRE-override geometry even after CAPSULE_OFFSET_OVERRIDES was
     # added and wired into build_collision_model via
@@ -411,7 +411,7 @@ def main():
             if 'error' in r:
                 print(f"{r['link']:<20} {'--':>10} {'--':>10}  ERROR: {r['error']}")
                 continue
-            # BUGFIX (2026-07-04): --flag-threshold-mm used to default to 0.0
+            # --flag-threshold-mm must not default to 0.0
             # and this comparison silently SKIPPED (never printed) any link
             # whose protrusion was below the threshold -- including negative
             # ("fully fine") ones, contradicting the documented default of

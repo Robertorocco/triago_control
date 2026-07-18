@@ -159,14 +159,7 @@ class BeliefEstimator:
             }
 
     def blend_policies(self, policies):
-        """Continuous belief-weighted convex blend of the per-goal policies.
-
-        Note on the fix applied here: the original `_blend_policies` silently
-        returned a partial (effectively zero-weighted) blend whenever a key from
-        `target_keys` was missing in `policies`, degrading intent without warning.
-        This version raises immediately so a missing policy is caught at the
-        source rather than silently corrupting the blended command.
-        """
+        """Belief-weighted convex blend of the per-goal policies; raises on any missing policy key."""
         active = [k for k in self.target_keys if k not in self._excluded]
         missing = [k for k in active if k not in policies]
         if missing:

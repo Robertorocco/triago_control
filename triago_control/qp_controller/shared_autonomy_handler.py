@@ -1,20 +1,6 @@
 # shared_autonomy_handler.py
-"""
-The Human-Robot-Interaction (HRI) interface.
-
-Processes commands coming from the high-level shared-control node and turns
-them into safe, topological changes to the collision world:
-
-    * /shared_autonomy/gripper_cmd   -> CLOSE_/ORANGE_/ATTACH_ commands
-    * /shared_autonomy/target_ignore -> dynamic CBF bypass set (+/- protocol)
-    * /shared_autonomy/grasp_margin  -> per-pair negative CBF margins
-    * /shared_autonomy/grasp_contact -> published signed gripper<->cylinder distance
-
-The crown jewel here is `attach_object_visually`: it re-parents a grasped
-cylinder from the world to the gripper wrist joint WITHOUT any geometric
-teleport, so every collision distance, nearest point and the collision-pair
-SET stay continuous across the topology change.
-"""
+"""HRI interface: turns shared-autonomy commands (gripper_cmd, target_ignore, grasp_margin) into safe
+collision-world topology changes; attach re-parents a grasped cylinder with zero geometric teleport."""
 
 from std_msgs.msg import String, Float64MultiArray
 from trajectory_msgs.msg import JointTrajectoryPoint
@@ -26,20 +12,14 @@ import time
 class SharedAutonomyHandler:
     """Parses shared-autonomy commands and mutates grasp / CBF-exclusion state."""
 
-    # Smooth barrier engagement for a freshly-attached payload: pairs involving
-    # the cylinder start fully relaxed (invisible to the SoftMin) and the true
-    # safety margin is restored linearly over ATTACH_RAMP_S seconds. This
-    # prevents the instantaneous constraint jump that explodes the arm when a
-    # table-resting cylinder suddenly becomes a collision-checked arm link.
+    # Fresh-payload barrier ramp: pairs start relaxed and the true margin returns linearly,
+    # avoiding the instantaneous constraint jump when a resting cylinder becomes an arm link.
     ATTACH_RAMP_S = 3.0            # seconds to ramp the barrier in
     ATTACH_RAMP_SHIFT_MAX = 0.30   # initial distance shift [m] (silences the pair)
 
-    # Real gripper firm-grasp reference (rad, REAL-gripper convention: 0=open,
-    # ~0.7=fully closed). The sim closure target fully closes the fingers, which
-    # on the real hardware drives PAST the real cylinder's wall. This is the
-    # measured value that firmly holds the real cylinder, so on real hardware the
-    # closure is never commanded past it. REAL HARDWARE ONLY.
-    REAL_GRASP_FIRM_CLOSE = 0.22
+    # Measured firm-grasp closure for the REAL gripper (rad, real convention 0=open ~0.7=closed);
+    # commanding past it would drive through the physical cylinder's wall.
+    REAL_GRASP_FIRM_CLOSE = 0.33
 
     def __init__(self, node, col_manager, kinematics, viz_engine):
         self.node = node
@@ -71,20 +51,11 @@ class SharedAutonomyHandler:
         self.gripper_left_client = ActionClient(self.node, FollowJointTrajectory, '/gripper_left_controller/follow_joint_trajectory')
 
     def close_gripper(self, side="right", position=0.0):
-        # Send a FollowJointTrajectory goal to close one gripper to `position` (rad).
-        # (Per-command INFO log removed: it fired on every CLOSE_ command — including
-        # the open-to-0.7 resets on startup/arm-switch — and spammed the console.)
+        """Sends a FollowJointTrajectory goal driving one gripper to `position` (rad)."""
         if self.node.REAL_HARDWARE:
-            # This codebase's convention (0.0=closed, ~0.7=open, see below) is
-            # tuned for sim; the real gripper's joint direction is inverted
-            # (0.0=open, ~0.7=closed) -- flip so the SAME high-level command
-            # still means the same physical grip state on both.
+            # The real gripper's joint direction is inverted vs sim; flip so the same
+            # command means the same physical grip, then hard-cap at the firm-grasp reference.
             position = 0.7 - position
-            # Firm-grasp hardcap: the sim closure fully closes the fingers, which
-            # here would drive PAST the real cylinder's wall (over-close). Never
-            # command the real gripper past the measured firm-grasp reference.
-            # Opens (real 0.0) sit below the cap and pass through untouched; the
-            # 2 s trajectory below still makes the approach to the cap smooth/slow.
             position = min(position, self.REAL_GRASP_FIRM_CLOSE)
         goal_msg = FollowJointTrajectory.Goal()
         goal_msg.trajectory.joint_names = [f'gripper_{side}_finger_joint']
@@ -93,12 +64,8 @@ class SharedAutonomyHandler:
         point.time_from_start.sec = 2
         goal_msg.trajectory.points = [point]
         client = self.gripper_right_client if side == "right" else self.gripper_left_client
-        # NEVER block the (single-threaded) executor here. A no-timeout
-        # wait_for_server() hangs the ENTIRE safety loop -- timer, CBF,
-        # publishing -- indefinitely if the gripper action server is even
-        # momentarily unavailable (silent freeze, no error). Non-blocking
-        # readiness check instead; drop this command if the server isn't up
-        # (the grasp state machine re-issues gripper commands every tick).
+        # Never block the single-threaded executor: a no-timeout wait_for_server() would silently
+        # freeze the whole safety loop; drop the command instead (the grasp FSM re-issues it).
         if not client.server_is_ready():
             self.node.get_logger().warn(
                 f"[GRIPPER] {side} action server not ready -- dropping command "
@@ -107,26 +74,22 @@ class SharedAutonomyHandler:
         client.send_goal_async(goal_msg)
 
     def gripper_cmd_callback(self, msg):
-        # Parse high-level shared-autonomy gripper commands (CLOSE / ORANGE / ATTACH).
+        """Parses CLOSE_/ORANGE_/ATTACH_/DETACH_ commands; attach/detach defer to the QP loop for fresh FK."""
         cmd = msg.data
         if cmd.startswith("CLOSE_"):
             parts = cmd.split('_')
             side = parts[1].lower()
-            position = float(parts[2]) if len(parts) > 2 else 0.0  # Optional CLOSE_RIGHT_0.0200
+            position = float(parts[2]) if len(parts) > 2 else 0.0  # optional CLOSE_RIGHT_0.0200
             self.close_gripper(side, position=position)
         elif cmd.startswith("ORANGE_"):
             parts = cmd.split('_')
             self.viz.paint_grasp_intent(parts[1].lower(), parts[2].lower(), self.col)
         elif cmd.startswith("ATTACH_"):
             parts = cmd.split('_')
-            # Defer to the QP loop: re-parenting needs the freshly-updated kinematics
             self.pending_attach = (parts[1].lower(), parts[2].lower())
         elif cmd.startswith("DETACH_"):
             parts = cmd.split('_')
-            # Defer to the QP loop: reading the cylinder's live world pose needs
-            # the freshly-updated kinematics (same reason as ATTACH).
-            # Optional trailing floats carry the perfect-fall placement pose:
-            #   DETACH_<ARM>_<COLOR>_<x>_<y>_<z>
+            # Optional trailing floats carry the placement pose: DETACH_<ARM>_<COLOR>_<x>_<y>_<z>.
             arm = parts[1].lower()
             color = parts[2].lower()
             world_pos = None
@@ -138,7 +101,7 @@ class SharedAutonomyHandler:
             self.pending_detach = (arm, color, world_pos)
 
     def ignore_col_callback(self, msg):
-        # Dynamically add/remove targets from the CBF bypass set (+/-/CLEAR protocol).
+        """Adds/removes targets from the CBF bypass set (+name / -name / CLEAR protocol)."""
         command = msg.data
         if command in ("None", "CLEAR"):
             if self.ignored_targets:
@@ -156,7 +119,7 @@ class SharedAutonomyHandler:
                 self.node.get_logger().info(f"[CBF RESTORED] Removed {target} from permitted contacts.")
 
     def grasp_margin_callback(self, msg):
-        # Set/clear the per-pair negative CBF margin for a gripper<->cylinder pair.
+        """Sets/clears the per-pair negative CBF margin ('name:margin' or CLEAR)."""
         command = msg.data.strip()
         if command in ("None", "clear", "CLEAR", ""):
             if self.grasp_margin_targets:
@@ -171,7 +134,7 @@ class SharedAutonomyHandler:
             self.node.get_logger().warn(f"[CBF MARGIN] Malformed grasp_margin '{command}'. Expected 'name:margin'.")
             return
 
-        # Look the id up directly in cmodel so the math-engine id always matches
+        # Resolve the id directly in cmodel so the math-engine id always matches.
         gid = None
         for i, obj in enumerate(self.col.cmodel.geometryObjects):
             if obj.name == name:
@@ -187,7 +150,7 @@ class SharedAutonomyHandler:
             self.node.get_logger().error(f"[CBF MARGIN] CRITICAL: '{name}' not found in cmodel geometry objects!")
 
     def attach_object_visually(self, arm_side, color):
-        # Rigidly re-parent a grasped cylinder onto the gripper wrist (no geometric teleport).
+        """Rigidly re-parents a grasped cylinder onto the gripper wrist joint (no geometric teleport)."""
         self.node.get_logger().info(f"\033[93m[TOPOLOGY] Attaching {color} cylinder to {arm_side} gripper.\033[0m")
         cyl_id = self.col.red_cyl_id if color == "red" else self.col.blue_cyl_id
 
@@ -201,25 +164,18 @@ class SharedAutonomyHandler:
         if self.kin.model.existFrame(tcp_frame) and cyl_id < len(self.col.cmodel.geometryObjects):
             wrist_joint_id = self.kin.model.frames[self.kin.model.getFrameId(tcp_frame)].parentJoint
 
-            # Relative transform captured from the LIVE kinematics at the pick instant:
-            #   jMc = oMj^-1 * oMc
-            # Reading the current oMj/oMc keeps the cylinder's WORLD pose bit-for-bit
-            # preserved (oMj * jMc == oMc), so distances, nearest points and the pair
-            # set are continuous; only the parentJoint (hence the Jacobian) changes.
+            # jMc = oMj^-1 * oMc from LIVE kinematics keeps the world pose bit-for-bit preserved:
+            # distances, nearest points and the pair set stay continuous, only the Jacobian changes.
             oMj = self.kin.data.oMi[wrist_joint_id]
             oMc = self.col.cdata.oMg[cyl_id]
             jMc = oMj.actInv(oMc)
 
             geom = self.col.cmodel.geometryObjects[cyl_id]
-            geom.placement = jMc            # set relative pose first ...
+            geom.placement = jMc            # relative pose first ...
             geom.parentJoint = wrist_joint_id  # ... then re-parent
             self.attached_relative_transforms[cyl_id] = jMc.copy()
 
-            # Treat the cylinder as a moving arm link: build adjacency exclusion
-            # (own links 6/7/gripper/fingers) and CREATE the new collision pairs
-            # (vs base, torso, ground, wall, table, other cylinder). Pairs vs
-            # both arms already exist; own links 3/4/5 stay active (self-collision),
-            # the other arm stays active (avoidance).
+            # Build the adjacency exclusion and create the cylinder's new world collision pairs.
             try:
                 added, skipped, adjacency = self.col.add_attached_object_pairs(
                     cyl_id, arm_side, self.kin.current_q)
@@ -248,7 +204,7 @@ class SharedAutonomyHandler:
         self.viz.paint_grasp_intent(arm_side, color, self.col, opaque=True)
 
     def detach_object_visually(self, arm_side, color, world_pos=None):
-        # Inverse of attach: release a carried cylinder back into the world.
+        """Inverse of attach: releases a carried cylinder back into the world (upright at world_pos if given)."""
         self.node.get_logger().info(
             f"\033[93m[TOPOLOGY] Detaching {color} cylinder from {arm_side} gripper.\033[0m")
         cyl_id = self.col.red_cyl_id if color == "red" else self.col.blue_cyl_id
@@ -258,22 +214,17 @@ class SharedAutonomyHandler:
                 f"[TOPOLOGY] {color} cylinder is not attached — nothing to detach.")
             return
 
-        # 1. RE-PARENT GEOMETRY BACK TO THE WORLD. If a perfect-fall placement
-        #    pose was provided, the cylinder is set down UPRIGHT there; otherwise
-        #    it is frozen at its current pose. Only parentJoint/placement change.
+        # 1. Re-parent geometry back to the world (only parentJoint/placement change).
         self.col.detach_object(cyl_id, self.kin.current_q, world_pos=world_pos)
 
-        # 2. Drop the payload bookkeeping so the SoftMin stops treating the
-        #    cylinder as a fused arm link (adjacency exclusion no longer applies).
+        # 2. Drop the payload bookkeeping so the SoftMin stops treating it as a fused arm link.
         self.attached_objects.discard(cyl_id)
         self.attached_object_arm.pop(cyl_id, None)
         self.attached_relative_transforms.pop(cyl_id, None)
         self.attached_adjacency.pop(cyl_id, None)
 
-        # 3. SMOOTH RE-ENGAGEMENT: the gripper is still overlapping the just-released
-        #    cylinder, so re-arm the barrier ramp (same machinery as attach). The
-        #    gripper<->cylinder pair starts relaxed and the true safety margin is
-        #    restored linearly over ATTACH_RAMP_S as the arm retreats — no spike.
+        # 3. Re-arm the barrier ramp: the gripper still overlaps the released cylinder,
+        # so the pair re-engages smoothly instead of spiking.
         self.attached_time[cyl_id] = time.time()
 
         # 4. Restore the original Meshcat colors (un-orange cylinder + gripper).
@@ -283,13 +234,7 @@ class SharedAutonomyHandler:
             f"barrier re-engaging smoothly over {self.ATTACH_RAMP_S:.1f}s.\033[0m")
 
     def get_attach_ramp_shifts(self):
-        """Per-attached-cylinder distance shift for the smooth barrier ramp.
-
-        Returns {cyl_id: shift_m}. The shift starts at ATTACH_RAMP_SHIFT_MAX
-        (pair invisible to the SoftMin -> no repulsion) right after attach and
-        decays linearly to 0 over ATTACH_RAMP_S seconds (full nominal safety).
-        Cylinders whose ramp has completed are omitted (shift == 0).
-        """
+        """Returns {cyl_id: shift_m} decaying from ATTACH_RAMP_SHIFT_MAX to 0 over ATTACH_RAMP_S."""
         shifts = {}
         now = time.time()
         for cyl_id, t0 in self.attached_time.items():
@@ -300,8 +245,7 @@ class SharedAutonomyHandler:
         return shifts
 
     def publish_contact_distances(self):
-        # Publish signed gripper<->cylinder distance [red, blue] for grasp confirmation.
-        # Only meaningful during an active grasp (margin set or cylinder attached).
+        """Publishes the signed gripper<->cylinder distance [red, blue] for geometric grasp confirmation."""
         if not (self.col.gripper_box_ids and (self.grasp_margin_targets or self.attached_objects)):
             return
         box_ids = set(self.col.gripper_box_ids.values())

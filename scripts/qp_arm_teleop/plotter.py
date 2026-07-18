@@ -92,14 +92,14 @@ class TriagoDashboard(Node):
         self.time_scale_buffer = deque(maxlen=self.history_len)  # Stores sigma
         self.time_scale_time = deque(maxlen=self.history_len)
 
-        # --- NEW: Lagrangian (Shadow Price) Buffers ---
+        # --- Lagrangian (Shadow Price) Buffers ---
         self.lambda_cbf_buffer = deque(maxlen=self.history_len)
         self.lambda_cbf_time = deque(maxlen=self.history_len)
         
         self.lambda_joints_buffer = deque(maxlen=self.history_len)
         self.lambda_joints_time = deque(maxlen=self.history_len)
 
-        # --- NEW: Task-authority buffers (soft-task QP cost decomposition) ---
+        # --- Task-authority buffers (soft-task QP cost decomposition) ---
         # Each entry is [E_damp, E_posture, E_slack] — the weighted squared
         # energies the QP actually spent on each soft objective at the solution.
         self.task_auth_buffer = deque(maxlen=self.history_len)
@@ -110,7 +110,7 @@ class TriagoDashboard(Node):
         self.qdot_cmd_r_buffer = deque(maxlen=self.history_len)
         self.qdot_cmd_l_buffer = deque(maxlen=self.history_len)
 
-        # --- NEW: DUAL TRACKING ERROR BUFFERS ---
+        # --- DUAL TRACKING ERROR BUFFERS ---
         self.qdot_err_time = deque(maxlen=self.history_len)
         self.qdot_err_r_buffer = deque(maxlen=self.history_len)
         self.qdot_err_l_buffer = deque(maxlen=self.history_len)
@@ -173,7 +173,7 @@ class TriagoDashboard(Node):
         self.top_pairs_names = ["", "", ""]
         self.create_subscription(String, '/qp_debug/top_pairs', self._counted('/qp_debug/top_pairs', self.top_pairs_callback), qos_profile)
 
-        # --- NEW: TRACKING ERROR SUBSCRIBERS ---
+        # --- TRACKING ERROR SUBSCRIBERS ---
         self.sub_qdot_err = self.create_subscription(
             Float64MultiArray, '/qp_debug/qdot_err', self._counted('/qp_debug/qdot_err', self.qdot_err_callback), 10)
         self.sub_xdot_err = self.create_subscription(
@@ -188,10 +188,10 @@ class TriagoDashboard(Node):
         )
         self.get_logger().info('Dashboard Initialized. Waiting for 14-DoF stream...')
 
-        # --- NEW: Lagrangian Subscribers ---
+        # --- Lagrangian Subscribers ---
         self.create_subscription(Float64MultiArray, '/qp_debug/lambda_cbf', self._counted('/qp_debug/lambda_cbf', self.lambda_cbf_callback), qos_profile)
         self.create_subscription(Float64MultiArray, '/qp_debug/lambda_joints', self._counted('/qp_debug/lambda_joints', self.lambda_joints_callback), qos_profile)
-        # --- NEW: Task-authority (soft-task cost decomposition) ---
+        # --- Task-authority (soft-task cost decomposition) ---
         self.create_subscription(Float64MultiArray, '/qp_debug/task_authority', self._counted('/qp_debug/task_authority', self.task_authority_callback), qos_profile)
 
         self.sub_qdot_cmd = self.create_subscription(
@@ -366,7 +366,7 @@ class TriagoDashboard(Node):
             self.qdot_cmd_l_buffer.append(list(msg.data[7:14]))
 
 
-    # --- NEW: Adaptive Controller Callbacks ---
+    # --- Adaptive Controller Callbacks ---
     def dyn_weights_callback(self, msg):
         """[weight_slack_r, weight_slack_l, gamma_clf]: weight_slack_r weights
         only delta_r, weight_slack_l only delta_l (build_and_solve's slack block)."""
@@ -383,9 +383,7 @@ class TriagoDashboard(Node):
         self.time_scale_buffer.append(msg.data)
 
     def d_safe_callback(self, msg):
-        """[d_safe_dynamic_R, d_safe_dynamic_L] -- per-arm dynamic CBF margins
-        (replaces the old single shared scalar; see collision_manager's
-        coupling-audit note for why the split was necessary)."""
+        """[d_safe_dynamic_R, d_safe_dynamic_L] -- the two per-arm dynamic CBF margins."""
         t = self.get_time()
         data = list(msg.data)
         if len(data) < 2:
@@ -501,10 +499,9 @@ class TriagoDashboard(Node):
         self.slack_buffer.append(data)
 
 
-    # --- NEW: Lagrangian Callbacks ---
+    # --- Lagrangian Callbacks ---
     def lambda_cbf_callback(self, msg):
-        """[lambda_cbf_R, lambda_cbf_L] -- the two INDEPENDENT per-arm CBF shadow
-        prices (replaces the old single combined scalar)."""
+        """[lambda_cbf_R, lambda_cbf_L] -- the two independent per-arm CBF shadow prices."""
         t = self.get_time()
         self.lambda_cbf_time.append(t)
         data = list(msg.data)
@@ -921,8 +918,7 @@ def main(args=None):
     # elsewhere on the network, falsely flipping this to sim-time on a real-
     # hardware run -- exactly the frozen-dashboard failure mode described
     # above. An explicit --ros-args -p use_sim_time:=... MUST win over the
-    # heuristic (previously it didn't: this call unconditionally overwrote
-    # whatever the CLI had already set).
+    # heuristic.
     explicit_override = any(a.startswith('use_sim_time:=') for a in sys.argv)
     if explicit_override:
         use_sim = node.get_parameter('use_sim_time').value

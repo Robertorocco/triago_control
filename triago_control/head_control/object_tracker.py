@@ -1,50 +1,8 @@
-"""
-ObjectTracker — object-level temporal fusion (inspired by a colleague's PCL
-tabletop node) adapted for our cylinder + colour scenario.
-
-WHY object-level (not point-level) fusion:
-    Our earlier voxel-map fusion failed: stacking raw points from different head
-    poses accumulated depth noise + sub-degree extrinsic error into a smeared
-    blob ("layered heights", NO TABLE). Fusing at the OBJECT level avoids this
-    entirely — each frame yields an independent, clean detection and we only
-    combine the DERIVED quantities. No point registration => no error stacking
-    => works even while the head moves.
-
-KEY MECHANISMS (borrowed + adapted):
-    * Nearest-neighbour matching (2D, within TRACK_MATCH_DIST) gives each object
-      a stable identity across frames.
-    * EMA-smoothed dimensions (radius, height) — see the 2026-07-02 note below.
-    * Cumulative arc coverage: we OR the observed angular sectors across frames,
-      so coverage (and hence confidence) climbs toward 100% as more of the
-      object is seen from different viewpoints — the honest multi-view gain.
-    * Persistence: an unmatched object survives TRACK_MAX_UNSEEN frames before
-      deletion, so brief occlusions/dropouts don't make it flicker.
-
-    Position is EMA-smoothed (stable) rather than grow-only — averaging
-    viewpoints with opposite-sign partial-view bias actually reduces net bias.
-
-DIMENSION FUSION POLICY — CHANGED 2026-07-02 (accuracy pass):
-    Previously radius/height used a GROW-ONLY rule ("a partial view can only
-    ever make the estimate bigger, never smaller") with a slow decay. That
-    rule was a reasonable patch AS LONG AS the per-frame estimator was known
-    to be systematically biased SMALL (the old Kasa-on-the-whole-cluster fit
-    was: ~ -3 to -5mm on radius, verified numerically). Grow-only was, in
-    effect, quietly correcting for that one-directional bias.
-
-    The per-frame estimator in object_detector.py no longer has that bias
-    (rim extraction + Hyper fit; height now a top-slice median, not z_max —
-    see its module docstring). Grow-only on a now-UNBIASED, noisy signal is
-    the wrong fusion rule: it keeps taking the running max of a symmetric-
-    noise signal, which drifts systematically upward over many frames
-    (verified numerically: +0.5 to +0.9mm bias after just 5-50 frames, then
-    keeps climbing on a longer scan) — an over-estimate this task did not
-    have before, and does not need. A standard EMA (TRACK_POS_ALPHA, same
-    smoothing already used for position) is the correct fusion rule for a
-    now-unbiased per-frame signal: verified numerically to stay within
-    ~0.01mm of the true value regardless of how many frames are fused,
-    while still averaging out per-frame noise (its RMS scales down with
-    more frames, same as position).
-"""
+"""Object-level temporal fusion for the tabletop scene: each frame yields an independent detection
+and only DERIVED quantities are fused (no point registration, so no cross-view error stacking).
+Mechanisms: nearest-neighbour identity matching, EMA-smoothed position AND dimensions (EMA is the
+correct fusion for an unbiased noisy per-frame estimate; a running max drifts upward), cumulative
+arc coverage OR'd across frames, and persistence across brief dropouts."""
 
 import numpy as np
 
@@ -97,12 +55,18 @@ class TrackedObject:
         self.center = a * det.center + (1.0 - a) * self.center
         self.axis = det.axis.astype(float)
 
-        # EMA on dimensions too (changed from grow-only, 2026-07-02 — see the
-        # module docstring: grow-only was compensating for a since-fixed
-        # systematic under-estimate in the per-frame fit; on today's unbiased
-        # estimator it just drifts the estimate upward over time instead).
+        # EMA on dimensions too: a grow-only rule on an unbiased noisy signal drifts upward.
         self.radius = a * float(det.radius) + (1.0 - a) * self.radius
-        self.height = a * float(det.height) + (1.0 - a) * self.height
+
+        # Height is QUALITY-GATED, not blind EMA (see cfg.ENABLE_HEIGHT_QUALITY_GATE):
+        # only a frame whose vertical coverage is within HEIGHT_FUSE_VCOV_MARGIN of
+        # the best seen so far may move height, so a poor (oblique/foreshortened)
+        # POV can't drag a good close-view height back toward its bias. Gate reads
+        # self.vertical_coverage BEFORE its max-update below (= best-before-this-frame).
+        det_vcov = float(det.vertical_coverage)
+        if (not cfg.ENABLE_HEIGHT_QUALITY_GATE
+                or det_vcov >= self.vertical_coverage - cfg.HEIGHT_FUSE_VCOV_MARGIN):
+            self.height = a * float(det.height) + (1.0 - a) * self.height
 
         # Cumulative angular coverage across viewpoints.
         if det.arc_bins is not None:
@@ -110,7 +74,7 @@ class TrackedObject:
         # Keep the best (lowest) fit residual ever seen for this object.
         self.best_fit_rms = min(self.best_fit_rms, float(det.fit_rms))
         # Best (highest) vertical coverage seen -- more of the column observed.
-        self.vertical_coverage = max(self.vertical_coverage, float(det.vertical_coverage))
+        self.vertical_coverage = max(self.vertical_coverage, det_vcov)
 
         if det.color_name != "unknown":
             self.color_name = det.color_name

@@ -21,7 +21,7 @@ class QPVisualizer:
         self.ee_pos_left = None
         self.ee_vel_left = None
 
-        # --- NEW: State variables to hold the COMMANDED telemetry ---
+        # --- State variables to hold the COMMANDED telemetry ---
         self.cmd_pos_right = None
         self.cmd_rot_matrix_right = None
 
@@ -33,7 +33,7 @@ class QPVisualizer:
             10
         )
 
-        # --- NEW: Subscribe directly to the commanded reference ---
+        # --- Subscribe directly to the commanded reference ---
         self.cmd_sub = node.create_subscription(
             Float64MultiArray,
             '/arm_right/cartesian_reference',
@@ -50,7 +50,7 @@ class QPVisualizer:
             self.ee_vel_left = np.array(msg.data[9:12])
 
     def cmd_callback(self, msg):
-        """NEW: Listens to the user's teleoperation commands"""
+        """Listens to the user's teleoperation commands."""
         if len(msg.data) >= 6:
             # Extract position
             self.cmd_pos_right = np.array(msg.data[0:3])
@@ -59,7 +59,7 @@ class QPVisualizer:
             self.cmd_rot_matrix_right = R.from_euler('xyz', rpy, degrees=False).as_matrix()
 
     def _build_gripper(self, p_center, R_mat, opacity, start_id, timestamp):
-        """NEW: Builds a 3-part BLUE gripper for the commanded pose.
+        """Builds a 3-part BLUE gripper for the commanded pose.
            Shifted backward so the reference point aligns with the fingertips (TCP).
         """
         markers = []
@@ -293,7 +293,7 @@ class QPVisualizer:
         process_arm(self.ee_pos_right, self.ee_vel_right, target_right)
         process_arm(self.ee_pos_left, self.ee_vel_left, target_left)
 
-        # --- 4. NEW: COMMANDED GRIPPER VISUALIZATION ---
+        # --- 4. COMMANDED GRIPPER VISUALIZATION ---
         if self.cmd_pos_right is not None and self.cmd_rot_matrix_right is not None:
             # Opacity set to 0.8 as requested
             gripper_markers = self._build_gripper(self.cmd_pos_right, self.cmd_rot_matrix_right, 0.8, idx, timestamp)

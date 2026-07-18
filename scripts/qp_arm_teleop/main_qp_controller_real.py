@@ -1,52 +1,10 @@
 #!/usr/bin/env python3
 # main_qp_controller_real.py
-"""
-Real-hardware QP-CLF-CBF controller — SAME safety math as the base, but the two
-heaviest per-tick jobs run on WORKER THREADS so the control loop can hit a higher
-rate on the robot.
-
-This is a THIN SUBCLASS of SafetyQPController (main_qp_controller.py). On the real
-TIAGo Pro the single dominant per-tick cost is the SoftMin CBF aggregation
-(CollisionManager.compute_softmin_jacobian) — measured larger than the entire
-300 Hz budget on its own. This subclass moves it OFF the control tick:
-
-    * CBF worker thread  — runs the full FK + geometry + SoftMin CBF on its OWN
-      private pin.Data / GeometryData (so it never races the main thread's
-      kinematics refresh). The main tick reads the most-recent result and feeds it
-      to the QP. A STALENESS WATCHDOG freezes BOTH arms (zero velocity command,
-      auto-resume) if no fresh CBF has arrived for cfg.CBF_STALENESS_MAX_TICKS
-      consecutive ticks — so the QP can never act on an unboundedly-old barrier.
-    * RViz-overlay worker thread — publishes the collision-witness line + teleop
-      tethers (which need only a small witness snapshot; QPVisualizer reads
-      everything else from its own ROS subscriptions).
-
-EVERYTHING ELSE is inherited verbatim from the base, so this file is just the four
-overridden seams (_compute_cbf / _gate_command / _publish_visual_overlays /
-_process_deferred_topology), the two worker loops, and a main().
-
-Isolation invariant (why this is race-free):
-    * The rclpy executor is single-threaded, so current_q/current_v and the HRI
-      grasp dicts have exactly ONE writer (the executor). The CBF worker only ever
-      READS a snapshot the main tick hands it.
-    * The worker computes on private pin.Data / GeometryData; the shared self.data
-      / self.cdata stay owned by the main tick (telemetry/markers keep working).
-    * The ONLY shared mutable structure is the collision MODEL (cmodel), which is
-      structurally mutated on grasp attach/detach. That is serialized against the
-      worker via CollisionManager.geom_lock (held by the worker around its compute
-      and by _process_deferred_topology around the mutation).
-    * The CBF the QP consumes is delivered via an immutable CbfResult under a lock
-      with a monotonic sequence number; the witness/top-pairs telemetry is carried
-      inside that same record, so self.col.witness_* is never read cross-thread.
-
-Config (all in config.py, section 4 — the user tunes these, not this file):
-    REAL_ASYNC_CBF, REAL_ASYNC_VIZ, CBF_STALENESS_MAX_TICKS. Setting either flag
-    False, OR running where REAL_HARDWARE is not detected (e.g. Gazebo), makes
-    this subclass fall back to the base's synchronous behavior — so it is safe to
-    launch anywhere and is a drop-in A/B against main_qp_controller.py.
-
-Run (on the robot, in place of main_qp_controller.py):
-    ros2 run triago_control main_qp_controller_real.py
-"""
+"""Real-hardware QP controller: thin SafetyQPController subclass moving the SoftMin CBF and the
+RViz overlays onto worker threads (GIL released inside pinocchio/hppfcl/numpy). A staleness
+watchdog freezes both arms whenever the CBF result is unrefreshed for CBF_STALENESS_MAX_TICKS,
+so the QP can never act on an unboundedly-old barrier. Byte-identical sync fallback in sim or
+with the flags off."""
 
 import os
 import sys

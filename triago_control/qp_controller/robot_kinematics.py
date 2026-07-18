@@ -1,29 +1,7 @@
 # robot_kinematics.py
-"""
-The Digital Twin.
-
-Thin wrapper around Pinocchio's model/data that owns everything kinematic:
-    * loads the URDF and builds `pin.Model` / `pin.Data`,
-    * caches the right/left arm joint indices,
-    * derives a SMOOTHED joint velocity from raw positions (both sim and real),
-    * runs forward kinematics / frame placements / joint Jacobians each tick,
-    * optionally evolves a mathematically-perfect "ideal" digital twin.
-
-VELOCITY PIPELINE: both simulation and real hardware differentiate position on
-the Lie manifold and pass it through a First-Order Low-Pass Filter (EMA,
-governed by `cfg.ALPHA_FILTER`) rather than trusting /joint_states' velocity
-field directly — real hardware's raw sensor velocity is unfiltered and gets
-amplified by qp_formulator's rate-damping term (`RATE_WEIGHT` tracks it hard),
-so deriving it the same way sim always has keeps that term's input clean.
-The `v_direct` param below still exists for a caller that wants to bypass
-this, but nothing currently does.
-
-DETECTION METHOD:
-    The `real_hardware` flag is set by the orchestrator (`main_qp_controller.py`)
-    based on whether the URDF contains `gripper_*_grasping_link` frames:
-        - Present  → Gazebo simulation (URDF is complete)
-        - Absent   → Real hardware (URDF lacks grasping frames)
-"""
+"""Pinocchio wrapper: URDF model/data, arm joint indices, FK/Jacobians, and the joint-velocity pipeline.
+Velocity is ALWAYS derived from position (Lie-manifold diff + EMA) on sim and real alike -- raw sensor
+velocity is noisy and gets amplified by the QP's rate-damping term."""
 
 import pinocchio as pin
 import numpy as np
@@ -72,14 +50,8 @@ class RobotKinematics:
         print(f"[Init] Mapped {len(self.idx_right)} Right Joints and {len(self.idx_left)} Left Joints.")
 
     def _ensure_grasping_frames(self):
-        """Inject gripper grasping frames into the Pinocchio model if the URDF lacks them.
-
-        On the real TIAGo Pro, the URDF may not contain gripper_*_grasping_link.
-        We add them programmatically using the known offset from gripper_*_base_link:
-            translation: [0, 0, 0.157]  rotation: Ry(-90°) (pitch = -1.5708 rad)
-        This matches the static_transform_publisher used on hardware.
-        """
-        # Offset: 0.157m along parent Z, then -90° pitch (Ry)
+        """Injects gripper_*_grasping_link frames when the real TRIAGo URDF lacks them
+        ([0,0,0.157] + Ry(-90 deg) from gripper_*_base_link, matching the hardware static TF)."""
         R_offset = pin.rpy.rpyToMatrix(0.0, -1.5708, 0.0)
         t_offset = np.array([0.0, 0.0, 0.157])
         placement = pin.SE3(R_offset, t_offset)
@@ -114,12 +86,8 @@ class RobotKinematics:
         self.data = self.model.createData()
 
     def update_from_joint_state(self, q_physical, time_stamp, v_direct=None):
-        """Update joint state. If v_direct is provided, use it directly (no
-        current caller does). Otherwise derive + EMA-filter velocity from
-        positions -- the path both sim and real hardware use today."""
-
+        """Updates the joint state; velocity is derived + EMA-filtered from positions (v_direct bypass unused)."""
         if v_direct is not None and self.real_hardware:
-            # Bypass path: trust the given velocity directly, skip EMA filtering.
             v_physical = v_direct
         elif self.last_q_meas is not None and self.last_msg_time is not None:
             dt = time_stamp - self.last_msg_time
@@ -166,12 +134,7 @@ class RobotKinematics:
         self.current_q = self.q_sim.copy()  # Next QP iteration uses the perfect state
 
     def update_kinematics(self):
-        # Refresh FK, frame placements and joint Jacobians for the current
-        # configuration. Pass the measured joint velocity as well so
-        # pin.getFrameVelocity() returns the TRUE frame twist -- with position
-        # only, forwardKinematics leaves the data's velocity terms at zero, which
-        # is why /qp_debug/ee_real's velocity slots (and offline_plotter's
-        # velocity-error figure) read ~0. Placements/Jacobians are unaffected.
+        """Refreshes FK, frame placements and Jacobians; velocity is passed so frame twists are true."""
         v = self.current_v if self.current_v is not None else np.zeros(self.model.nv)
         pin.forwardKinematics(self.model, self.data, self.current_q, v)
         pin.updateFramePlacements(self.model, self.data)
@@ -211,14 +174,7 @@ class RobotKinematics:
         return qdot_err_14, xdot_err_6
 
     def get_joint_limits(self, joint_names):
-        """Return (lower_list, upper_list) for the given single-DOF joint names,
-        read directly from the Pinocchio model built from the live URDF (the
-        SAME limits the joint-limit CBF rows in qp_formulator enforce).
-
-        Used to feed the plotter's live joint-position slider GUI real limits
-        instead of a hard-coded placeholder range. Unbounded (continuous)
-        joints or missing names fall back to a sane +/-3.15 rad display range.
-        """
+        """Returns (lower, upper) URDF limits for the named joints; unbounded/missing fall back to +/-3.15 rad."""
         lower, upper = [], []
         for name in joint_names:
             if self.model.existJointName(name):

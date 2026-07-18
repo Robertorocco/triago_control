@@ -3,7 +3,7 @@
 cloud_relay_node.py — republish a real camera PointCloud2 onto the topic
 tabletop_perception_node.py subscribes to, throttled.
 
-WHY THIS EXISTS (root cause, found 2026-07-06)
+WHY THIS EXISTS
     tabletop_perception_node.py subscribes to `/filtered_cloud`, matching its
     upstream C++ original 1:1 (see that node's own module docstring). But
     NOTHING in the sibling chiarapanagrosso/Triago_Project repository

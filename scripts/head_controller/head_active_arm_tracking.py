@@ -92,6 +92,7 @@ import quadprog
 
 import rclpy
 from rclpy.node import Node
+from rclpy.signals import SignalHandlerOptions
 from std_msgs.msg import Float64MultiArray, String
 from geometry_msgs.msg import TwistStamped, Point
 from sensor_msgs.msg import JointState
@@ -201,14 +202,24 @@ class HeadActiveArmTracker(Node):
         self.declare_parameter('plot', True)
         self.declare_parameter('target_distance', TARGET_DISTANCE)
         self.declare_parameter('approach_align', ENABLE_APPROACH_ALIGN)
+        # CAMERA_FRAME (module default) is the SIM URDF's optical-frame name --
+        # real hardware names it differently (main_head.py's real diagnostics
+        # show 'head_arm_rgbd_depth_optical_frame', not 'gripper_head_camera_
+        # rgbd_*'), and getFrameId() on an unknown name returns an
+        # out-of-range index -> IndexError at the very first control tick.
+        # Same override pattern as main_head.py's depth_center_frame param.
+        self.declare_parameter('camera_frame', CAMERA_FRAME)
         self.enable_plot = self.get_parameter('plot').value
         self.target_distance = float(self.get_parameter('target_distance').value)
         self.approach_align = bool(self.get_parameter('approach_align').value)
+        self.camera_frame = self.get_parameter('camera_frame').value
 
         # --- State ---
         self.joint_name_seen = {}
         self.is_ready = False
         self.active_arm = 'right'          # default; overwritten by topic
+        self._ctrl_started = []            # controllers WE activated (restore_controllers reverses)
+        self._ctrl_stopped = []            # controllers WE deactivated
 
         # --- Telemetry buffers (shared with the plotting thread via lock) ---
         self.plot_lock = threading.Lock()
@@ -290,8 +301,35 @@ class HeadActiveArmTracker(Node):
         rclpy.spin_until_future_complete(self, future)
         if future.result().ok:
             self.get_logger().info("Successfully switched controllers!")
+            self._ctrl_started = to_start
+            self._ctrl_stopped = to_stop
         else:
             self.get_logger().error("Failed to switch controllers.")
+
+    def restore_controllers(self):
+        """Reverse check_and_switch_controllers() on shutdown: stop what we
+        started, start what we stopped -- returns the robot to its pre-launch
+        state instead of leaving the velocity controller active forever."""
+        if not self._ctrl_started and not self._ctrl_stopped:
+            return
+        print(f"[Shutdown] Restoring original head controllers: "
+              f"+{self._ctrl_stopped} | -{self._ctrl_started} ...", flush=True)
+        switch_client = self.create_client(SwitchController, '/controller_manager/switch_controller')
+        if not switch_client.wait_for_service(timeout_sec=2.0):
+            print("[Shutdown] Switch Controller service unavailable -- cannot restore "
+                  f"original head controller state (was: +{self._ctrl_started} "
+                  f"-{self._ctrl_stopped}).", flush=True)
+            return
+        req = SwitchController.Request()
+        req.activate_controllers = self._ctrl_stopped
+        req.deactivate_controllers = self._ctrl_started
+        req.strictness = SwitchController.Request.STRICT
+        future = switch_client.call_async(req)
+        rclpy.spin_until_future_complete(self, future, timeout_sec=3.0)
+        if future.result() is not None and future.result().ok:
+            print("[Shutdown] Original head controller state restored.", flush=True)
+        else:
+            print("[Shutdown] Restore Switch Service Failed.", flush=True)
 
     # ------------------------------------------------------------------ #
     # URDF / Pinocchio setup
@@ -311,6 +349,7 @@ class HeadActiveArmTracker(Node):
         self.model = pin.buildModelFromUrdf(urdf_path)
         self.data = self.model.createData()
         self.q_real = pin.neutral(self.model)
+        self._ensure_camera_frame()
 
         # Soft limits via official URDF parser
         self.soft_limits = {}
@@ -336,6 +375,45 @@ class HeadActiveArmTracker(Node):
                 self.head_v_idx.append(self.model.joints[jid].idx_v)
             else:
                 self.get_logger().error(f"[FATAL] Joint {name} not found in URDF!")
+
+    def _ensure_camera_frame(self, parent_body_name='arm_head_tool_link'):
+        """Inject self.camera_frame into the model if the URDF lacks it.
+
+        Real hardware: the camera is a separately-mounted module (realsense2_
+        camera driver + launch/head_real.launch.py's static_transform_publisher),
+        not baked into the base URDF the way Gazebo's sim camera plugin is -- no
+        topic/TF frame name we pass in would EVER resolve via getFrameId here,
+        since Pinocchio only knows the xacro-derived URDF, never the driver's
+        own runtime-published TF frames. Inject at the SAME measured
+        arm_head_tool_link -> head_arm_rgbd_link mount offset used there (and
+        in head_kinematics.py's identical _ensure_camera_frame for main_head.py)
+        instead of chasing the real driver's frame name.
+        """
+        if self.model.existFrame(self.camera_frame):
+            return  # sim: already native to the URDF
+        if not self.model.existFrame(parent_body_name):
+            self.get_logger().error(
+                f"Cannot inject '{self.camera_frame}': parent frame "
+                f"'{parent_body_name}' not found in model.")
+            return
+        t_mount = np.array([-0.056783, 0.034171, 0.011676])
+        R_mount = pin.Quaternion(0.69556217, 0.00914972, -0.71833972, 0.00987883).matrix()
+        # ROS body (X-fwd/Y-left/Z-up) -> optical (Z-fwd/X-right/Y-down) convention.
+        R_optical = pin.Quaternion(0.5, -0.5, 0.5, -0.5).matrix()
+        placement = pin.SE3(R_mount, t_mount) * pin.SE3(R_optical, np.zeros(3))
+        parent_frame_id = self.model.getFrameId(parent_body_name)
+        parent_joint_id = self.model.frames[parent_frame_id].parentJoint
+        parent_placement = self.model.frames[parent_frame_id].placement
+        frame_placement = parent_placement * placement
+        new_frame = pin.Frame(
+            self.camera_frame, parent_joint_id, parent_frame_id,
+            frame_placement, pin.FrameType.OP_FRAME,
+        )
+        self.model.addFrame(new_frame)
+        self.data = self.model.createData()   # rebuild data for the new frame
+        self.get_logger().info(
+            f"[Init] Injected frame '{self.camera_frame}' into Pinocchio "
+            f"model (parent: {parent_body_name}).")
 
     # ------------------------------------------------------------------ #
     # Callbacks
@@ -399,7 +477,7 @@ class HeadActiveArmTracker(Node):
         pin.forwardKinematics(self.model, self.data, self.q_real)
         pin.updateFramePlacements(self.model, self.data)
 
-        fid_cam = self.model.getFrameId(CAMERA_FRAME)
+        fid_cam = self.model.getFrameId(self.camera_frame)
         arm_frame = ARM_FRAMES[self.active_arm]
         fid_hand = self.model.getFrameId(arm_frame)
 
@@ -608,6 +686,22 @@ class HeadActiveArmTracker(Node):
                                    throttle_duration_sec=0.5)
             dq_opt = np.zeros(7)
 
+        # Debug: the tracked hand pose + camera pose (both in base_footprint,
+        # so they're directly sanity-checkable against known robot geometry),
+        # the hand as seen FROM the camera (P_cam/dist -- if this is wrong,
+        # T_hand or T_cam is being mis-evaluated), and the actual solved
+        # command magnitude (dq_norm==0 every tick means the QP genuinely
+        # isn't commanding motion, vs. a nonzero dq that the robot just isn't
+        # executing -- two very different problems).
+        self.get_logger().info(
+            f"[DEBUG] active_arm={self.active_arm} arm_frame={arm_frame} "
+            f"T_hand(base)={np.round(T_hand.translation, 3)} "
+            f"T_cam(base)={np.round(T_cam.translation, 3)} "
+            f"P_cam(optical)={np.round(P_cam, 3)} dist={dist:.2f}m "
+            f"ang_err={ang_err_deg:.1f}deg in_fov={in_fov} "
+            f"dq_norm={float(np.linalg.norm(dq_opt)):.4f}",
+            throttle_duration_sec=1.0)
+
         # 8. Publish command + telemetry
         self.pub_head_cmd.publish(Float64MultiArray(data=[float(x) for x in dq_opt]))
         self.pub_track_err.publish(Float64MultiArray(data=[float(x) for x in pub_error]))
@@ -616,7 +710,7 @@ class HeadActiveArmTracker(Node):
         v_cam_cmd = J_cam @ dq_opt
         tw = TwistStamped()
         tw.header.stamp = self.get_clock().now().to_msg()
-        tw.header.frame_id = CAMERA_FRAME
+        tw.header.frame_id = self.camera_frame
         tw.twist.linear.x, tw.twist.linear.y, tw.twist.linear.z = map(float, v_cam_cmd[:3])
         tw.twist.angular.x, tw.twist.angular.y, tw.twist.angular.z = map(float, v_cam_cmd[3:])
         self.pub_cartesian_cmd.publish(tw)
@@ -650,7 +744,7 @@ class HeadActiveArmTracker(Node):
     def _publish_markers(self, P_cam):
         # Target sphere at the tracked hand (camera frame)
         m = Marker()
-        m.header.frame_id = CAMERA_FRAME
+        m.header.frame_id = self.camera_frame
         m.ns = "active_hand"; m.id = 0
         m.type = Marker.SPHERE; m.action = Marker.ADD
         m.pose.position.x, m.pose.position.y, m.pose.position.z = map(float, P_cam)
@@ -660,7 +754,7 @@ class HeadActiveArmTracker(Node):
 
         # Optical-axis ray
         ray = Marker()
-        ray.header.frame_id = CAMERA_FRAME
+        ray.header.frame_id = self.camera_frame
         ray.ns = "optical_ray"; ray.id = 1
         ray.type = Marker.ARROW; ray.action = Marker.ADD
         p0 = Point(); p0.x = p0.y = p0.z = 0.0
@@ -784,7 +878,10 @@ def plotting_thread(node: HeadActiveArmTracker, stop_event: threading.Event):
 # MAIN
 # =============================================================================
 def main():
-    rclpy.init()
+    # NO signal handler: on Ctrl-C, rclpy must stay alive long enough for
+    # restore_controllers()'s service call in `finally`, not shut the context
+    # down immediately (same reasoning as main_head.py).
+    rclpy.init(signal_handler_options=SignalHandlerOptions.NO)
     node = HeadActiveArmTracker()
 
     print("[Main] Fetching URDF from robot_state_publisher...")
@@ -826,6 +923,7 @@ def main():
         stop_event.set()
         if plot_thread is not None:
             plot_thread.join(timeout=1.0)
+        node.restore_controllers()
         node.destroy_node()
         rclpy.shutdown()
 
