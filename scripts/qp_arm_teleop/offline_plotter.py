@@ -899,12 +899,17 @@ class OfflinePlotter(Node):
         self.min_dist_buffer.append(msg.data)
 
     def dyn_weights_callback(self, msg):
-        # 5 floats: [weight_slack_r, weight_slack_l, gamma_mean, gamma_r, gamma_l].
+        # 7 floats: [weight_slack_r, weight_slack_l, gamma_mean, gamma_r, gamma_l,
+        # posture_weight_r, posture_weight_l]. Older 5-float bags -> posture weights
+        # default to W_CENTER (flat on the reference line, i.e. DYNAMIC_POSTURE_WEIGHT off).
         if not self._recording_active():
             return
         data = list(msg.data)
-        if len(data) < 5:
-            data = (data + [0.0] * 5)[:5]
+        while len(data) < 5:
+            data.append(0.0)
+        while len(data) < 7:
+            data.append(cfg.W_CENTER)
+        data = data[:7]
         self.time_dyn_weights.append(self._t())
         self.dyn_weights_buffer.append(data)
 
@@ -1626,7 +1631,7 @@ class OfflinePlotter(Node):
         # (a loop-health diagnostic, not a task-adaptive quantity) lives here
         # rather than in fig2_qp_data purely to keep this figure's theme --
         # "things that change the QP's behavior over the trial" -- coherent.
-        fig, axs = plt.subplots(4, 1, sharex=True, figsize=(8, 10))
+        fig, axs = plt.subplots(5, 1, sharex=True, figsize=(8, 12.5))
         fig.suptitle('Adaptive QP Parameters + Loop Health')
 
         ax = axs[0]
@@ -1642,6 +1647,22 @@ class OfflinePlotter(Node):
             ax.legend(loc='upper right')
 
         ax = axs[1]
+        ax.set_title('Posture Weight'); ax.set_ylabel(r'$w_{post}$')
+        if self.time_dyn_weights:
+            data = np.array(self.dyn_weights_buffer)
+            # Per-arm max over that arm's posture joints (cfg.DYNAMIC_POSTURE_WEIGHT).
+            # Same overlap-safety convention as the slack panel above.
+            ax.plot(self.time_dyn_weights, data[:, 5], color='r', linestyle='-',
+                    linewidth=2.6, zorder=2, label=r'$w_{post,R}$')
+            ax.plot(self.time_dyn_weights, data[:, 6], color='b', linestyle='-',
+                    linewidth=1.3, zorder=3, label=r'$w_{post,L}$')
+            # W_CENTER is what both pin to when DYNAMIC_POSTURE_WEIGHT is off --
+            # flat lines on this reference confirm the scheduler is off, not broken.
+            ax.axhline(cfg.W_CENTER, color='0.5', linestyle=':', linewidth=1,
+                      zorder=1, label=r'$W_{center}$')
+            ax.legend(loc='upper right')
+
+        ax = axs[2]
         ax.set_title('CLF Convergence Rate'); ax.set_ylabel(r'$\gamma_{CLF}$')
         if self.time_dyn_weights:
             data = np.array(self.dyn_weights_buffer)
@@ -1657,7 +1678,7 @@ class OfflinePlotter(Node):
                       linewidth=1, zorder=1, label=r'$\gamma_{CLF}^{default}$')
             ax.legend(loc='upper right')
 
-        ax = axs[2]
+        ax = axs[3]
         ax.set_title('Dynamic Safety Margin (base + velocity term)')
         ax.set_ylabel(r'$d_{safe}$ [m]')
         if self.time_d_safe:
@@ -1681,7 +1702,7 @@ class OfflinePlotter(Node):
             ax.set_ylim(bottom=0)
             ax.legend(loc='upper right', fontsize=8)
 
-        ax = axs[3]
+        ax = axs[4]
         ax.set_title('Control Loop Frequency'); ax.set_ylabel('Freq [Hz]')
         ax.set_xlabel('Time [s]')
         if self.time_freq:

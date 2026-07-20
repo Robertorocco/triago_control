@@ -15,6 +15,7 @@ DYNAMIC_CBF = False             # dynamically remove pairs for interaction
 DYNAMIC_SLACK_WEIGHT = True    # raise slack weight in free space, drop it near obstacles
 COMPARISON_CLF = True           # normalized (unit-error) scalar CLF formulation
 DYNAMIC_GAMMA_CLF = False       # vary CLF convergence rate with the safety margin
+DYNAMIC_POSTURE_WEIGHT = False  # per-joint posture weight rises with that joint's own limit lambda; also drops lambda_jl from the slack/gamma driver (OFF = today)
 SIMULATE_IDEAL_KINEMATICS = False  # True = pure-math digital twin instead of measured state
 ORIENTATION_CTRL = True         # True = 6DOF (pos+ori), False = 3DOF (pos only)
 
@@ -42,7 +43,7 @@ CLUTCH = "CLUTCH"
 JOYSTICK = "JOYSTICK"
 
 # Active experiment condition: edit these three to select a study cell.
-CONTROL_MODE   = CLUTCH      # CLUTCH (position control) | JOYSTICK (velocity control)
+CONTROL_MODE   = JOYSTICK      # CLUTCH (position control) | JOYSTICK (velocity control)
 ASSIST_FEEDBACK = True      # channel F: assistive guidance forces on the handle
 ASSIST_BLENDING = True      # channel B: reference-level user<->policy blending
 
@@ -159,9 +160,19 @@ JOINT_LIMIT_K_V = 0.1          # joint-limit velocity horizon (seconds of look-a
 # limits, on the NORMALIZED joint position; near-zero mid-range, sharp (clamped) near a limit.
 K_GRADIENT = 0.07              # gain on the negative potential gradient
 V_MAX_POSTURE = 1.0            # rad/s hard clamp on the posture reference (solver safety)
-W_CENTER = 0.96                # posture-task weight in the QP cost
+W_CENTER = 0.96                # posture-task weight in the QP cost (used only when DYNAMIC_POSTURE_WEIGHT is off)
 POSTURE_GRASP_SCALE = 0.05     # posture weight scale during autonomous precision phases
 POSTURE_SCALE_TAU = 0.2        # s first-order ramp for the posture-scale switch
+
+# Dynamic per-joint posture weight (DYNAMIC_POSTURE_WEIGHT). Same exp(-beta*lambda^2)
+# tolerance kernel as the slack schedule, blended in the OPPOSITE direction: slack
+# decays MAX->BASE as lambda grows, posture climbs BASE->MAX with that joint's own
+# joint-limit shadow price, concentrating reconfiguration authority on the joint
+# actually fighting its limit.
+BASE_WEIGHT_POSTURE = 0.8      # posture weight when the joint is idle (lambda_jl ~ 0)
+MAX_WEIGHT_POSTURE = 1.5       # posture weight when the joint is hard against its limit
+BETA_POSTURE = 0.05            # kernel sensitivity (own knee; lambda_jl range differs from lambda_cbf)
+POSTURE_WEIGHT_FILTER_TAU = 0.2  # 2nd-stage LPF on the posture weight (symmetric with WEIGHT_SLACK_FILTER_TAU)
 
 # Rate damping: + RATE_WEIGHT * ||dq - dq_measured||^2 on the arm joints anchors the
 # task-null wrist DOFs to the arm's real state each tick (kills qdot oscillation).

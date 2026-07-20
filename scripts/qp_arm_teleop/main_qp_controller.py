@@ -1150,12 +1150,14 @@ class SafetyQPController(Node):
 
         # Min distance + dynamic weights
         self.pub_min_dist.publish(Float64(data=abs_min_distance))
-        # 5 floats: [weight_slack_r, weight_slack_l, gamma_mean, gamma_r, gamma_l].
-        # gamma_mean kept at index 2 for plotter.py's live dashboard.
+        # 7 floats: [weight_slack_r, weight_slack_l, gamma_mean, gamma_r, gamma_l,
+        # posture_weight_r, posture_weight_l]. gamma_mean at index 2 for plotter.py's
+        # live dashboard; posture weights APPENDED at 5,6 (existing consumers unaffected).
         gamma_mean = 0.5 * (self.qp.gamma_clf_r + self.qp.gamma_clf_l)
         self.pub_dynamic_weights.publish(Float64MultiArray(data=[
             float(self.qp.weight_slack_r), float(self.qp.weight_slack_l),
-            float(gamma_mean), float(self.qp.gamma_clf_r), float(self.qp.gamma_clf_l)]))
+            float(gamma_mean), float(self.qp.gamma_clf_r), float(self.qp.gamma_clf_l),
+            float(self.qp.posture_weight_r), float(self.qp.posture_weight_l)]))
         # Per-arm frozen/active ground truth for the RViz visualizer.
         self.pub_arm_frozen.publish(Float64MultiArray(
             data=[1.0 if self.right_frozen else 0.0, 1.0 if self.left_frozen else 0.0]))

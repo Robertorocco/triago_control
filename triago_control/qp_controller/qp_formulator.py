@@ -48,6 +48,17 @@ class QPFormulator:
         self._lam_jr_f = 0.0
         self._lam_jl_f = 0.0
 
+        # DYNAMIC_POSTURE_WEIGHT state: the FULL per-joint joint-limit shadow-price vector
+        # (previous tick + its input-stage LPF) and the 2nd-stage LPF on the per-joint posture
+        # weight, so the joint actually fighting its limit gets more reconfiguration authority.
+        self.last_lambda_joints_vec = np.zeros(self.n_joints)
+        self._lam_jl_vec_f = np.zeros(self.n_joints)
+        self._w_posture_vec_f = np.full(self.n_joints, cfg.BASE_WEIGHT_POSTURE)
+        # Per-arm representative posture weight (max over that arm's posture joints) for fig4;
+        # == W_CENTER*posture_scale when the flag is off.
+        self.posture_weight_r = cfg.W_CENTER
+        self.posture_weight_l = cfg.W_CENTER
+
         # CLF convergence rate, updated per arm by _schedule_weights.
         self.gamma_clf_r = cfg.GAMMA_CLF_DEFAULT
         self.gamma_clf_l = cfg.GAMMA_CLF_DEFAULT
@@ -118,10 +129,18 @@ class QPFormulator:
         self._lam_col_l_f = filter_alpha * self._lam_col_l_f + (1.0 - filter_alpha) * self.last_lambda_cbf_left
         self._lam_jr_f = filter_alpha * self._lam_jr_f + (1.0 - filter_alpha) * self.last_lambda_joints_right
         self._lam_jl_f = filter_alpha * self._lam_jl_f + (1.0 - filter_alpha) * self.last_lambda_joints_left
+        # Input-stage LPF on the FULL per-joint joint-limit shadow price (drives the dynamic posture weight).
+        self._lam_jl_vec_f = filter_alpha * self._lam_jl_vec_f + (1.0 - filter_alpha) * self.last_lambda_joints_vec
 
-        # Per-arm worst shadow price: that arm's own collision OR joint-limit price, never the other's.
-        max_shadow_r = max(self._lam_col_r_f, self._lam_jr_f)
-        max_shadow_l = max(self._lam_col_l_f, self._lam_jl_f)
+        # Per-arm worst shadow price driving the slack/gamma schedule. With DYNAMIC_POSTURE_WEIGHT
+        # the joint-limit price is REMOVED here (it drives the posture weight instead), so the slack
+        # no longer yields tracking near a joint limit -- the arm reconfigures the joint and keeps tracking.
+        if cfg.DYNAMIC_POSTURE_WEIGHT:
+            max_shadow_r = self._lam_col_r_f
+            max_shadow_l = self._lam_col_l_f
+        else:
+            max_shadow_r = max(self._lam_col_r_f, self._lam_jr_f)
+            max_shadow_l = max(self._lam_col_l_f, self._lam_jl_f)
 
         # Decoupled per-arm slack weighting; a second LPF on the weight itself smooths
         # BETA's steep squared-exponential response to fast-rising lambdas.
@@ -304,9 +323,27 @@ class QPFormulator:
             v_ref_center[v_idx] = v
 
         # Effective posture weight, scaled down during autonomous precision phases.
-        w_center = cfg.W_CENTER * self.posture_scale
-        H_center = np.diag(mask_center * w_center)
-        g_center = -(mask_center * w_center) * v_ref_center
+        # Nominal (flag off): uniform W_CENTER. Dynamic (DYNAMIC_POSTURE_WEIGHT): each joint's
+        # weight climbs BASE_WEIGHT_POSTURE -> MAX_WEIGHT_POSTURE with its OWN filtered joint-limit
+        # shadow price -- same exp(-beta*lambda^2) kernel as the slack schedule, blended in the
+        # opposite direction -- so the joint fighting its limit gets more reconfiguration authority.
+        # Selected at v_idx only (never mask-multiplied against a full vector: 0*nan == nan).
+        w_center_vec = np.zeros(self.n_joints)
+        if cfg.DYNAMIC_POSTURE_WEIGHT and v_idx.size > 0:
+            lam = self._lam_jl_vec_f[v_idx]
+            w_tgt = cfg.BASE_WEIGHT_POSTURE + (1.0 - np.exp(-cfg.BETA_POSTURE * lam ** 2)) * \
+                (cfg.MAX_WEIGHT_POSTURE - cfg.BASE_WEIGHT_POSTURE)
+            filter_alpha_p = np.exp(-dt / cfg.POSTURE_WEIGHT_FILTER_TAU)
+            self._w_posture_vec_f[v_idx] = filter_alpha_p * self._w_posture_vec_f[v_idx] + \
+                (1.0 - filter_alpha_p) * w_tgt
+            w_center_vec[v_idx] = self._w_posture_vec_f[v_idx] * self.posture_scale
+        else:
+            w_center_vec[v_idx] = cfg.W_CENTER * self.posture_scale
+        H_center = np.diag(mask_center * w_center_vec)
+        g_center = -(mask_center * w_center_vec) * v_ref_center
+        # Per-arm representative (max over that arm's joints) for the fig4 telemetry trace.
+        self.posture_weight_r = float(np.max(w_center_vec[kin.idx_right])) if kin.idx_right else cfg.W_CENTER * self.posture_scale
+        self.posture_weight_l = float(np.max(w_center_vec[kin.idx_left])) if kin.idx_left else cfg.W_CENTER * self.posture_scale
 
         # Rate damping ||dq - dq_measured||^2, arm joints ONLY: locked joints are pinned to dq=0 by
         # two opposing box rows, and an unmasked rate gradient contests that pin -- two linearly
@@ -529,12 +566,16 @@ class QPFormulator:
         def _sum_sq(vec, idx):
             return float(np.sum(vec[idx] ** 2)) if idx else 0.0
 
+        def _wsum_sq(vec, w, idx):
+            return float(np.sum(w[idx] * vec[idx] ** 2)) if idx else 0.0
+
         idx_r, idx_l = kin.idx_right, kin.idx_left
         dq_post = (q_dot_safe - v_ref_center) * mask_center
         e_damp_r = cfg.DAMP * _sum_sq(q_dot_safe, idx_r)
         e_damp_l = cfg.DAMP * _sum_sq(q_dot_safe, idx_l)
-        e_posture_r = w_center * _sum_sq(dq_post, idx_r)
-        e_posture_l = w_center * _sum_sq(dq_post, idx_l)
+        # Per-joint posture weight (w_center_vec) -> faithful decomposition under DYNAMIC_POSTURE_WEIGHT.
+        e_posture_r = _wsum_sq(dq_post, w_center_vec, idx_r)
+        e_posture_l = _wsum_sq(dq_post, w_center_vec, idx_l)
         e_slack_r = float(weight_slack_r * slack_r ** 2)
         e_slack_l = float(weight_slack_l * slack_l ** 2)
         # Selected at arm indices for the same NaN-poisoning reason as g_rate above.
@@ -556,6 +597,8 @@ class QPFormulator:
             e_damp_r, e_posture_r, e_slack_r, e_rate_r,
             e_damp_l, e_posture_l, e_slack_l, e_rate_l,
         ])
+        # Full per-joint joint-limit shadow price for next tick's dynamic posture weight.
+        self.last_lambda_joints_vec = lambda_joints_total.copy()
         self.last_dq_safe = q_dot_safe.copy()
 
         return q_dot_safe, slack_r, slack_l, (b_col_r, b_col_l), lambda_joints_total

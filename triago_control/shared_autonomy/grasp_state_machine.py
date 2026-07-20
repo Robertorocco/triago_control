@@ -111,7 +111,7 @@ class GraspStateMachine:
     #   - SIDE: shallower than top -- deep enough for the fingers to bracket the wall
     #     without shoving the cylinder sideways before they close.
     GRASP_INSERTION_TRAVEL_TOP = 0.135
-    GRASP_INSERTION_TRAVEL_SIDE = 0.0918
+    GRASP_INSERTION_TRAVEL_SIDE = 0.1102
     GRASP_FORCE_THRESHOLD = 2.0
     GRASP_CLOSE_HOLD_S = 4.0
     GRASP_APPROACH_TIMEOUT_S = 30.0  # approach can be slow with the relaxed CBF
@@ -154,6 +154,8 @@ class GraspStateMachine:
         self._abort_lift_color = None  # color of the cylinder being retreated from
         self._abort_start_pos = None  # EE position at retreat start (travel-distance gate)
         self._recover_start = None  # reset for RECOVER (post-abort barrier-restore settle) phase
+        self._recover_confirm_start = None  # debounce timer for a confirmed-clear contact reading
+        self._recover_warn_count = 0  # edge-trigger for RECOVER's throttled "still stuck" warning
         self._align_start = None  # reset for GRASP_ALIGN timeout
         self._holding_entered = False  # latch so the HOLDING banner prints once per grasp
 
@@ -762,6 +764,19 @@ class GraspStateMachine:
     ABORT_RETREAT_DISTANCE = 0.10    # m — guaranteed EE back-out before restoring the barrier
     ABORT_RETREAT_VELOCITY = 0.05    # m/s — decisive (faster than a lift) so 10 cm clears quickly
     ABORT_RETREAT_MAX_S = 6.0        # s — hard cap (covers 10 cm + tracking lag; joint-limited case)
+    # Blend a small UP component into the retreat direction (not pure reverse-
+    # approach): a straight-line horizontal retreat for a SIDE grasp can drive
+    # straight into a joint limit or the table's own (non-bypassed) CBF -- the
+    # observed failure mode (retreat capped at 4 of 10 cm). Backing out while
+    # also lifting is far less likely to be blocked by the SAME obstruction.
+    ABORT_RETREAT_LIFT_BLEND = 0.4   # fraction of world +Z mixed into -approach_axis
+
+    @classmethod
+    def _retreat_direction(cls, current_T_EE):
+        """Unit retreat direction: reverse approach axis blended with world +Z."""
+        approach_axis = current_T_EE[:3, :3][:, 0]
+        d = -approach_axis + cls.ABORT_RETREAT_LIFT_BLEND * np.array([0.0, 0.0, 1.0])
+        return d / np.linalg.norm(d)
 
     def _abort_lift(self, inp: TickInput) -> TickOutput:
         """Retreat after a failed grasp (approach/align timeout).
@@ -791,10 +806,10 @@ class GraspStateMachine:
         done = traveled >= self.ABORT_RETREAT_DISTANCE
 
         if not done and elapsed < self.ABORT_RETREAT_MAX_S:
-            # Reverse approach: retreat along the gripper's local -X (approach axis
-            # points +X into the object, so backing out is -X) in world frame.
-            approach_axis = inp.current_T_EE[:3, :3][:, 0]
-            v_lin = -self.ABORT_RETREAT_VELOCITY * approach_axis
+            # Reverse approach blended with a lift component (see
+            # ABORT_RETREAT_LIFT_BLEND) -- less likely to be blocked than a
+            # pure horizontal retreat.
+            v_lin = self.ABORT_RETREAT_VELOCITY * self._retreat_direction(inp.current_T_EE)
             target_twist = np.array([v_lin[0], v_lin[1], v_lin[2], 0.0, 0.0, 0.0])
             return TickOutput(
                 target_twist=target_twist,
@@ -821,52 +836,122 @@ class GraspStateMachine:
         )
 
     # ------------------------------------------------------------------
-    # PHASE 8: RECOVER (post-abort: restore the barrier smoothly, then release)
+    # PHASE 8: RECOVER (post-abort: verify real clearance, THEN restore the barrier)
     # ------------------------------------------------------------------
-    RECOVER_RAMP_S = 1.5   # s — hold the arm still and ramp the margin to nominal
+    RECOVER_CLEARANCE = 0.02        # m — contact must read at least this before restoring starts
+    RECOVER_CONFIRM_S = 0.5         # s — clearance must hold this long (debounce a noisy reading)
+    RECOVER_RAMP_S = 1.5            # s — once confirmed clear, ramp margin -> nominal (arm held)
+    RECOVER_NUDGE_VELOCITY = 0.03   # m/s — gentle extra retreat if ABORT_RETREAT was capped short
+    RECOVER_WARN_S = 5.0            # s — start warning if still not clear past this long
+    RECOVER_WARN_PERIOD_S = 5.0     # s — repeat interval for the "still stuck" warning
+    RECOVER_SAFETY_BUFFER = 0.02    # m — margin stays this far behind the live-measured overlap
+    RECOVER_MARGIN_FLOOR = -0.5     # m — sanity bound only, not a trust ceiling (see below)
 
     def _recover(self, inp: TickInput) -> TickOutput:
-        """Post-abort settle: hold still and smoothly restore the CBF before teleop.
+        """Post-abort settle: VERIFY real clearance with live contact, THEN restore the CBF.
 
-        The gripper is now clear of the cylinder. Drop the full CBF bypass and
-        ramp the relaxed grasp margin (GRASP_CBF_MARGIN -> 0) back to nominal
-        over RECOVER_RAMP_S with the arm FROZEN, so the barrier is continuous and
-        fully active by the time shared autonomy (pi_max) resumes -- fixing the
-        post-abort reference oscillation (policy drove back into a barrier that
-        had snapped from fully-bypassed to nominal in a single tick). Reached
-        ONLY from a failed grasp; the normal grasp/lift/hold/release path never
-        enters here.
+        Fixes the residual crash risk in the first version of this phase: that
+        version restored the barrier on a FIXED time schedule, trusting that
+        ABORT_RETREAT's distance-based retreat always got fully clear. When the
+        retreat was capped short (blocked by a joint limit / another CBF pair --
+        the observed failure: 4 of the intended 10 cm), the schedule still ran
+        to completion and restored a near-nominal barrier onto a gripper that
+        was STILL overlapping the cylinder -> a real repulsion spike, not just
+        the earlier open-finger sensor artifact.
+
+        This version never restores past what `grasp_contact` currently
+        supports: the margin is continuously clamped to (contact_d - buffer),
+        so the barrier is a no-op at whatever the ACTUAL geometry is, however
+        that came about. If still overlapping on entry, it keeps nudging clear
+        (reverse-approach + lift blend, see _retreat_direction) instead of
+        freezing and hoping. Only once clearance is confirmed (debounced) does
+        it ramp to nominal and hand back to SHARED_AUTONOMY -- which unconditionally
+        clears the margin on its own next tick, so handing back BEFORE genuine
+        clearance would silently undo this whole safeguard.
         """
         self._transition("RECOVER")
         log_lines = []
+        color = self._abort_lift_color or inp.active_goal_key.split('_')[0]
+        contact_d = inp.grasp_contact.get(color.lower(), 1.0)
+        cleared = contact_d >= self.RECOVER_CLEARANCE
+        # Never trust a schedule past what's currently measured -- this bound
+        # is applied to EVERY margin this method returns, cleared or not.
+        contact_bound = contact_d - self.RECOVER_SAFETY_BUFFER
 
         if self._recover_start is None:
             self._recover_start = time.time()
+            self._recover_confirm_start = None
+            self._recover_warn_count = 0
             log_lines.append(
-                ("info", f"[RECOVER] Clear of the cylinder. Restoring the collision barrier "
-                         f"smoothly over {self.RECOVER_RAMP_S:.1f}s (arm held)."))
+                ("info", f"[RECOVER] Verifying clearance (gap={contact_d * 100:.1f} cm) "
+                         f"before restoring the barrier."))
 
         elapsed = time.time() - self._recover_start
-        ramp = max(0.0, min(1.0, elapsed / self.RECOVER_RAMP_S))   # 0 -> 1
-        # Quantized to 1 cm steps: the node re-logs the margin only when the value
-        # changes, so a continuous ramp would spam ~150 lines over the window.
-        margin = round((1.0 - ramp) * self.GRASP_CBF_MARGIN, 2)    # -0.08 -> 0
+
+        if not cleared:
+            self._recover_confirm_start = None   # any confirm streak is broken
+            margin = round(max(self.RECOVER_MARGIN_FLOOR, min(0.0, contact_bound)), 2)
+
+            # Still overlapping: keep nudging clear (never freeze and hope -- the
+            # arm is grasp_exec-locked here, so the operator's own teleop input is
+            # ALSO zeroed at the node level; auto-nudging is the only thing that
+            # can actually move it). Margin stays clamped to the live gap the
+            # entire time, however long this takes -- no time-based restore.
+            if elapsed > self.RECOVER_WARN_S and int(elapsed / self.RECOVER_WARN_PERIOD_S) > self._recover_warn_count:
+                self._recover_warn_count = int(elapsed / self.RECOVER_WARN_PERIOD_S)
+                log_lines.append(
+                    ("warn", f"[RECOVER] Still overlapping the {color} cylinder "
+                             f"(gap={contact_d * 100:.1f} cm) after {elapsed:.0f}s of nudging -- "
+                             f"possibly wedged or joint-limited. Barrier held relaxed at "
+                             f"{margin:+.3f} m (NOT restored), teleop still suspended. Continuing "
+                             f"to nudge automatically; if this persists, a hardware-level "
+                             f"intervention (E-stop / manual repositioning) may be needed."))
+            v_lin = self.RECOVER_NUDGE_VELOCITY * self._retreat_direction(inp.current_T_EE)
+            target_twist = np.array([v_lin[0], v_lin[1], v_lin[2], 0.0, 0.0, 0.0])
+            return TickOutput(
+                target_twist=target_twist,
+                new_state=self._state,
+                ignore_cbf="None",
+                grasp_margin=margin,
+                log_lines=log_lines,
+            )
+
+        # Clear -- debounce briefly (one good reading isn't proof) before ramping.
+        if self._recover_confirm_start is None:
+            self._recover_confirm_start = time.time()
+        confirm_elapsed = time.time() - self._recover_confirm_start
+        if confirm_elapsed < self.RECOVER_CONFIRM_S:
+            margin = round(max(self.RECOVER_MARGIN_FLOOR, min(0.0, contact_bound)), 2)
+            return TickOutput(
+                target_twist=np.zeros(6),
+                new_state=self._state,
+                ignore_cbf="None",
+                grasp_margin=margin,
+                log_lines=log_lines,
+            )
+
+        ramp = max(0.0, min(1.0, (confirm_elapsed - self.RECOVER_CONFIRM_S) / self.RECOVER_RAMP_S))
+        scheduled = (1.0 - ramp) * self.GRASP_CBF_MARGIN            # -0.08 -> 0
+        # Quantized to 1 cm steps: the node re-logs the margin only when the
+        # value changes, so a continuous ramp would spam ~150 lines.
+        margin = round(max(self.RECOVER_MARGIN_FLOOR, min(scheduled, contact_bound, 0.0)), 2)
 
         if ramp < 1.0:
             return TickOutput(
                 target_twist=np.zeros(6),   # arm frozen while the barrier ramps in
                 new_state=self._state,
-                ignore_cbf="None",          # bypass dropped: barrier ACTIVE (still relaxed via margin)
+                ignore_cbf="None",
                 grasp_margin=margin,
                 log_lines=log_lines,
             )
 
-        # Barrier fully restored → hand control back to shared autonomy.
+        # Confirmed clear AND fully ramped → safe to hand control back.
         self._recover_start = None
+        self._recover_confirm_start = None
         self._abort_lift_start = None
         self._abort_lift_color = None
         self._transition("SHARED_AUTONOMY")
-        log_lines.append(("info", "[RECOVER] Barrier restored. Teleoperation resumed."))
+        log_lines.append(("info", "[RECOVER] Clearance confirmed, barrier restored. Teleoperation resumed."))
         return TickOutput(
             target_twist=np.zeros(6),
             new_state=self._state,
