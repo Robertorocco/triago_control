@@ -7,6 +7,11 @@ The system comprises three independent control subsystems running concurrently:
 2. **Shared Autonomy** — Bayesian intent prediction + haptic guidance
 3. **Head Visual Servoing** — Independent vision-based head control to keep hands in camera FOV
 
+## Branches
+
+- **`real-hw`** — frozen checkpoint of every gain/parameter as tuned on the physical robot. Full commit history back to project start is preserved here; never developed on directly. Diff against it to see exactly what a sim retune has changed: `git diff real-hw -- triago_control/qp_controller/config.py`.
+- **`main`** / **`feature/sim-user-study`** — active development, simulation-only, prioritizing safety/robustness over tracking performance. Both point to the same commit as `real-hw`'s tip and diverge from here forward.
+
 ## Architecture
 
 ```
