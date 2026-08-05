@@ -43,7 +43,7 @@ CLUTCH = "CLUTCH"
 JOYSTICK = "JOYSTICK"
 
 # Active experiment condition: edit these three to select a study cell.
-CONTROL_MODE   = JOYSTICK      # CLUTCH (position control) | JOYSTICK (velocity control)
+CONTROL_MODE   = CLUTCH      # CLUTCH (position control) | JOYSTICK (velocity control)
 ASSIST_FEEDBACK = True          # channel F: assistive guidance forces on the handle
 ASSIST_BLENDING = True      # channel B: reference-level user<->policy blending
 
