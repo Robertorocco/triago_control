@@ -8,8 +8,10 @@ writes, IN THAT FOLDER, FOUR figures:
 
     plot_triago_right.png    robot-side telemetry, RIGHT arm
     plot_triago_left.png     robot-side telemetry, LEFT  arm
-    plot_haption_right.png   device-side telemetry (single Haption handle; the
-                             per-arm split is redundant, so only this one)
+    plot_haption.png         device-side telemetry (single Haption handle,
+                             covers the whole trial regardless of which arm
+                             was active -- see the active-arm shading on
+                             every panel, both here and in the two above)
 
 plus the numeric summaries (unchanged):
 
@@ -235,6 +237,7 @@ def make_triago_dashboard(series, metrics, metadata, arm, t_act, right_active, o
     if qm is not None and len(qm):
         for j in range(qm.shape[1]):
             ax.plot(tqm, qm[:, j], lw=0.8, color=JOINT_COLORS[j], label=f"J{j+1}")
+        _shade_active(ax, t_act, right_active, arm)
         ax.set_xlabel("t [s]"); ax.set_ylabel(r"$\dot{q}$ [rad/s]")
         ax.set_title("Joint velocity (measured)")
         ax.legend(loc="best", fontsize=6, ncol=2)
@@ -248,6 +251,7 @@ def make_triago_dashboard(series, metrics, metadata, arm, t_act, right_active, o
     if qc is not None and len(qc):
         for j in range(qc.shape[1]):
             ax.plot(tqc, qc[:, j], lw=0.8, color=JOINT_COLORS[j], label=f"J{j+1}")
+        _shade_active(ax, t_act, right_active, arm)
         ax.set_xlabel("t [s]"); ax.set_ylabel(r"$\dot{q}$ [rad/s]")
         ax.set_title(r"QP solution (commanded $\dot{q}$)")
         ax.legend(loc="best", fontsize=6, ncol=2)
@@ -260,6 +264,7 @@ def make_triago_dashboard(series, metrics, metadata, arm, t_act, right_active, o
     scol = sl.col(f"d{sm._SLACK_IDX[arm]}") if sl else None
     if scol is not None and len(scol):
         ax.plot(sl.t, scol, color="#d62728", lw=1.0)
+        _shade_active(ax, t_act, right_active, arm)
         ax.set_xlabel("t [s]"); ax.set_ylabel(r"$\delta$")
         ax.set_title("CLF slack")
     else:
@@ -279,6 +284,7 @@ def make_triago_dashboard(series, metrics, metadata, arm, t_act, right_active, o
         ax.plot(lj.t, ljcol, color="#9467bd", lw=1.0, label=r"$\lambda_{joints}$")
         plotted = True
     if plotted:
+        _shade_active(ax, t_act, right_active, arm)
         ax.set_xlabel("t [s]"); ax.set_ylabel(r"$\lambda$")
         ax.set_title("Barrier shadow prices (CBF / joint-limit)")
         _legend(ax)
@@ -310,6 +316,7 @@ def make_triago_dashboard(series, metrics, metadata, arm, t_act, right_active, o
                 drew = True
         ax.axhline(0.0, color="#333", ls=":", lw=0.8)   # 0 = contact
         _shade_grasp(ax, series)
+        _shade_active(ax, t_act, right_active, arm)
         ax.set_xlabel("t [s]"); ax.set_ylabel("distance [m]")
         ax.set_title(f"Obstacle clearance (< {thr:g} m)")
         if drew:
@@ -349,7 +356,7 @@ def make_haption_dashboard(series, metrics, metadata, arm, t_act, right_active, 
     n = len(rows)
     fig, axs = plt.subplots(n, 1, figsize=(13, 2.7 * n), squeeze=False)
     axs = axs[:, 0]
-    fig.suptitle(_title(metadata, arm, "Haption (device)"), fontsize=14, fontweight="bold")
+    fig.suptitle(_title(metadata, None, "Haption (device)"), fontsize=14, fontweight="bold")
 
     pose = series.get(sm.T_VIRT_POSE)
     clutch = series.get(sm.T_CLUTCH)
@@ -377,11 +384,22 @@ def make_haption_dashboard(series, metrics, metadata, arm, t_act, right_active, 
             if vel and vel.col("lx") is not None and len(vel):
                 lin = np.linalg.norm(sm._stack_named(vel, ("lx", "ly", "lz")), axis=1)
                 ang = np.linalg.norm(sm._stack_named(vel, ("ax", "ay", "az")), axis=1)
-                ax.plot(vel.t, lin, color="#1f77b4", lw=1.0, label="|v| lin [m/s]")
-                ax.plot(vel.t, ang, color="#ff7f0e", lw=1.0, label="|ω| ang [rad/s]")
+                # Separate y-axes: linear [m/s] and angular [rad/s] are different
+                # units with typically very different numeric ranges (a quick wrist
+                # flick alone can exceed several rad/s) -- sharing one axis let the
+                # larger-magnitude angular trace dominate the autoscale and flatten
+                # the linear one out near zero.
+                ax2 = ax.twinx()
+                l1, = ax.plot(vel.t, lin, color="#1f77b4", lw=1.0, label="|v| lin [m/s]")
+                l2, = ax2.plot(vel.t, ang, color="#ff7f0e", lw=1.0, label="|ω| ang [rad/s]")
+                ax.tick_params(axis="y", labelcolor="#1f77b4")
+                ax2.tick_params(axis="y", labelcolor="#ff7f0e")
+                _shade_active(ax, t_act, right_active, arm)
                 _clutch_band(ax)
-                ax.set_ylabel("speed"); ax.set_title("Handle speed")
-                _legend(ax)
+                ax.set_ylabel("|v| [m/s]", color="#1f77b4")
+                ax2.set_ylabel("|ω| [rad/s]", color="#ff7f0e")
+                ax.set_title("Handle speed")
+                ax.legend(handles=[l1, l2], loc="best", fontsize=7)
             else:
                 _no_data(ax, "Handle speed")
 
@@ -399,6 +417,7 @@ def make_haption_dashboard(series, metrics, metadata, arm, t_act, right_active, 
                         label="grasp trigger (left btn)")
                 drew = True
             if drew:
+                _shade_active(ax, t_act, right_active, arm)
                 ax.set_ylim(-0.1, 1.1); ax.set_yticks([0, 1])
                 ax.set_ylabel("pressed"); ax.set_title("Buttons")
                 _legend(ax, ncol=2)
@@ -428,6 +447,7 @@ def make_haption_dashboard(series, metrics, metadata, arm, t_act, right_active, 
                 if dba is not None:
                     ax.axhline(float(dba), color="#9b59b6", ls=":", lw=1.0, alpha=0.7,
                                label=f"ang deadband {dba:.3f} rad")
+                _shade_active(ax, t_act, right_active, arm)
                 ax.set_ylabel("displacement")
                 ax.set_title("Joystick command: handle displacement from home (→ commanded twist)")
                 _legend(ax, ncol=2)
@@ -443,6 +463,7 @@ def make_haption_dashboard(series, metrics, metadata, arm, t_act, right_active, 
                 ax.axhline(MAX_DEVICE_FORCE, color="#333", ls="--", lw=1.0, alpha=0.7,
                            label=f"\u00b1{MAX_DEVICE_FORCE:g} N limit")
                 ax.axhline(-MAX_DEVICE_FORCE, color="#333", ls="--", lw=1.0, alpha=0.7)
+                _shade_active(ax, t_act, right_active, arm)
                 _clutch_band(ax)
                 ax.set_ylabel("force [N]")
                 ax.set_title("Device force on the handle (virtuose/force_cmd)")
@@ -459,6 +480,7 @@ def make_haption_dashboard(series, metrics, metadata, arm, t_act, right_active, 
                 ax.axhline(MAX_DEVICE_TORQUE, color="#333", ls="--", lw=1.0, alpha=0.7,
                            label=f"\u00b1{MAX_DEVICE_TORQUE:g} Nm limit")
                 ax.axhline(-MAX_DEVICE_TORQUE, color="#333", ls="--", lw=1.0, alpha=0.7)
+                _shade_active(ax, t_act, right_active, arm)
                 _clutch_band(ax)
                 ax.set_ylabel("torque [Nm]")
                 ax.set_title("Device torque on the handle (virtuose/force_cmd)")
@@ -480,12 +502,20 @@ def make_haption_dashboard(series, metrics, metadata, arm, t_act, right_active, 
                 p = a * np.linalg.norm(vp, axis=1)
                 tot = u + p
                 good = tot > 1e-9
-                u_pct = np.full_like(a, np.nan)
-                p_pct = np.full_like(a, np.nan)
+                # tot==0 whenever NEITHER side is contributing anything this tick
+                # (the still-user "suspend blending" case: alpha forced to 0 AND
+                # the deadbanded user twist is exactly 0 -- see main_shared_autonomy's
+                # compute_alpha). That is a frequent, normal pause during teleop, not
+                # missing data -- render it as a flat 0% baseline (nothing blended),
+                # not a gap: NaN here made matplotlib skip the point entirely, which
+                # fragmented the line into many short dashes across every idle moment.
+                u_pct = np.zeros_like(a)
+                p_pct = np.zeros_like(a)
                 u_pct[good] = 100.0 * u[good] / tot[good]
                 p_pct[good] = 100.0 * p[good] / tot[good]
                 ax.plot(bd.t, u_pct, color="#1f77b4", lw=1.2, label="user %")
                 ax.plot(bd.t, p_pct, color="#ff7f0e", lw=1.2, label="policy %")
+                _shade_active(ax, t_act, right_active, arm)
                 ax.set_ylim(-5, 105); ax.set_ylabel("share [%]")
                 ax.set_title("Blended-action share: (1-\u03b1)\u00b7v_user  vs  \u03b1\u00b7v_policy")
                 _legend(ax, ncol=2)
@@ -497,6 +527,7 @@ def make_haption_dashboard(series, metrics, metadata, arm, t_act, right_active, 
             if bd and bd.col("d0") is not None and len(bd):
                 ax.plot(bd.t, bd.col("d0"), color="#ff7f0e", lw=1.2, label="authority α")
                 ax.axhline(0.5, color="#888", ls=":", lw=0.8)
+                _shade_active(ax, t_act, right_active, arm)
                 ax.set_ylim(-0.05, 1.05); ax.set_ylabel("α")
                 ax.set_title("Blending authority (0 = user, 1 = policy)")
                 _legend(ax)
@@ -511,10 +542,13 @@ def make_haption_dashboard(series, metrics, metadata, arm, t_act, right_active, 
 
 
 def _title(metadata, arm, side):
+    """`arm=None` omits the "· ARM arm" suffix -- for a figure (e.g. the single
+    Haption device dashboard) that covers the whole trial, not one arm's data."""
+    suffix = f" · {arm.upper()} arm" if arm else ""
     return (f"{metadata.get('participant', '?')} | "
             f"{metadata.get('condition', metadata.get('cell_code', '?'))} | "
             f"{metadata.get('world_shortcut', '?')} | "
-            f"success={metadata.get('success', '?')}  —  {side} · {arm.upper()} arm")
+            f"success={metadata.get('success', '?')}  —  {side}{suffix}")
 
 
 # ---------------------------------------------------------------- driver
@@ -545,10 +579,12 @@ def analyze_one(bag_dir: str) -> bool:
             print(f"  ! triago {arm} plot failed: {type(exc).__name__}: {exc}")
 
     # The Haption device is single (one operator, one handle), so a per-arm
-    # split is redundant -- emit ONE device figure keyed to the right arm.
+    # split is redundant -- emit ONE device figure covering the whole trial.
+    # "right" here only selects which arm's activity the shading highlights
+    # (see _shade_active), not a per-arm subset of the device data itself.
     try:
         make_haption_dashboard(series, out["right"], metadata, "right", t_act,
-                               right_active, os.path.join(bag_dir, "plot_haption_right.png"))
+                               right_active, os.path.join(bag_dir, "plot_haption.png"))
     except Exception as exc:                         # noqa: BLE001
         print(f"  ! haption plot failed: {type(exc).__name__}: {exc}")
 
@@ -562,7 +598,7 @@ def analyze_one(bag_dir: str) -> bool:
         print(f"  [{arm}] active={mm.get('this_arm_active_frac')} "
               f"path={mm.get('ee_path_len_m')}m speed_mean={mm.get('ee_speed_mean_mps')} "
               f"sparc={mm.get('ee_sparc')} min_dist={mm.get('safety_min_dist_m')}")
-    print(f"  -> wrote plot_triago_(right|left).png, plot_haption_right.png, "
+    print(f"  -> wrote plot_triago_(right|left).png, plot_haption.png, "
           f"metrics_summary_(right|left).txt, {METRICS_NAME}")
     return True
 
