@@ -1684,12 +1684,14 @@ class SharedControlNode(Node):
             # /arm_*/cartesian_reference -- the reference the robot is actually
             # tracking, integrated consistently from the blended twist (user +
             # policy). Colored by WHO is currently driving it:
-            #   GREEN  = tracking the policy (hands-off autopilot, or the user's
-            #            twist agrees so the policy dominates the blend, alpha>=0.5).
-            #   ORANGE = listening to the user's twist intention (actively overriding).
+            #   GREEN  = policy has visibly taken over: blending is active, the
+            #            user is actively moving, and the policy dominates the
+            #            blend (alpha>=0.5).
+            #   ORANGE = the user has the floor -- blending inactive, user idle,
+            #            or the user's twist still dominates (alpha<0.5).
             _user_active = (float(np.linalg.norm(self.current_v_h[:3])) > 1e-6
                             or float(np.linalg.norm(self.current_v_h[3:])) > 1e-6)
-            _tracking_policy = (not blend_active) or (not _user_active) or (self.last_alpha >= 0.5)
+            _tracking_policy = blend_active and _user_active and (self.last_alpha >= 0.5)
             _ref_rgb = (0.1, 0.9, 0.1) if _tracking_policy else (1.0, 0.55, 0.0)
             blended_ref_markers = MarkerArray()
             blended_now = self.get_clock().now().to_msg()
@@ -1868,8 +1870,6 @@ class SharedControlNode(Node):
         excluded = self.belief_estimator.get_excluded_goals()
         markers = []
         for i, goal_key in enumerate(self.target_keys):
-            if goal_key in self.goal_set.platform_keys:
-                continue  # Platform goal marker suppressed in RViz (operator request)
             if goal_key in excluded:
                 markers.extend(self._delete_gripper_markers(i, now, ns="goal_poses"))
                 continue

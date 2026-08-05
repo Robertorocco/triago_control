@@ -411,7 +411,7 @@ Visualization Manager:
         Value: /desired_pose
       Value: true
     - Class: rviz_default_plugins/MarkerArray
-      Enabled: false
+      Enabled: true
       Name: QP_Debug_Markers
       Namespaces:
         {}
@@ -421,7 +421,7 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Best Effort
         Value: /qp_debug_visualization
-      Value: false
+      Value: true
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
       Name: Blended_Reference
