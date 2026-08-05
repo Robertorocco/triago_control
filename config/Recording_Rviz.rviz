@@ -1,6 +1,6 @@
 Panels:
   - Class: rviz_common/Displays
-    Help Height: 78
+    Help Height: 172
     Name: Displays
     Property Tree Widget:
       Expanded:
@@ -18,7 +18,7 @@ Panels:
         - /QP_Debug_Markers3/Namespaces1
         - /Marker4
       Splitter Ratio: 0.4910941421985626
-    Tree Height: 294
+    Tree Height: 1015
   - Class: rviz_common/Views
     Expanded:
       - /Current View1
@@ -218,6 +218,20 @@ Visualization Manager:
           Show Axes: false
           Show Trail: false
           Value: true
+        gripper_head_camera_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        gripper_left_base_finger_left_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        gripper_left_base_finger_right_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
         gripper_left_base_link:
           Alpha: 1
           Show Axes: false
@@ -233,6 +247,10 @@ Visualization Manager:
           Show Axes: false
           Show Trail: false
           Value: true
+        gripper_left_grasping_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
         gripper_left_inner_finger_left_link:
           Alpha: 1
           Show Axes: false
@@ -253,6 +271,24 @@ Visualization Manager:
           Show Axes: false
           Show Trail: false
           Value: true
+        gripper_left_screw_left_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        gripper_left_screw_right_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        gripper_right_base_finger_left_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        gripper_right_base_finger_right_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
         gripper_right_base_link:
           Alpha: 1
           Show Axes: false
@@ -268,6 +304,10 @@ Visualization Manager:
           Show Axes: false
           Show Trail: false
           Value: true
+        gripper_right_grasping_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
         gripper_right_inner_finger_left_link:
           Alpha: 1
           Show Axes: false
@@ -288,6 +328,14 @@ Visualization Manager:
           Show Axes: false
           Show Trail: false
           Value: true
+        gripper_right_screw_left_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        gripper_right_screw_right_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
         suspension_front_left_link:
           Alpha: 1
           Show Axes: false
@@ -363,6 +411,36 @@ Visualization Manager:
           Show Axes: false
           Show Trail: false
           Value: true
+        wrist_left_ft_sensor_base_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        wrist_left_ft_sensor_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        wrist_left_ft_tool_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        wrist_right_ft_sensor_base_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        wrist_right_ft_sensor_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
+        wrist_right_ft_tool_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
       Mass Properties:
         Inertia: false
         Mass: false
@@ -411,7 +489,7 @@ Visualization Manager:
         Value: /desired_pose
       Value: true
     - Class: rviz_default_plugins/MarkerArray
-      Enabled: true
+      Enabled: false
       Name: QP_Debug_Markers
       Namespaces:
         {}
@@ -421,12 +499,12 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Best Effort
         Value: /qp_debug_visualization
-      Value: true
+      Value: false
     - Class: rviz_default_plugins/MarkerArray
       Enabled: true
       Name: Blended_Reference
       Namespaces:
-        blended_reference: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -494,7 +572,7 @@ Visualization Manager:
       Use rainbow: true
       Value: false
     - Class: rviz_default_plugins/Image
-      Enabled: true
+      Enabled: false
       Max Value: 1
       Median window: 5
       Min Value: 0
@@ -506,7 +584,7 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Best Effort
         Value: /head_arm_rgbd/color/image_raw
-      Value: true
+      Value: false
     - Class: rviz_default_plugins/Marker
       Enabled: true
       Name: Marker
@@ -537,7 +615,7 @@ Visualization Manager:
       Enabled: true
       Name: QP_Debug_Markers
       Namespaces:
-        goal_poses: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -562,7 +640,7 @@ Visualization Manager:
       Enabled: true
       Name: QP_Debug_Markers
       Namespaces:
-        guidance_policy: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -586,8 +664,7 @@ Visualization Manager:
       Enabled: true
       Name: Real World Snapshot
       Namespaces:
-        objects: true
-        table: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -616,7 +693,7 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 1.0198894739151
+      Distance: 1.9510103464126587
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
@@ -631,10 +708,10 @@ Visualization Manager:
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 1.1549994945526123
+      Pitch: 0.4199998676776886
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 4.728169918060303
+      Yaw: 3.68316912651062
     Saved:
       - Class: rviz_default_plugins/Orbit
         Distance: 1.0063155889511108
@@ -721,14 +798,14 @@ Window Geometry:
     collapsed: false
   Displays:
     collapsed: true
-  Height: 683
+  Height: 1858
   Hide Left Dock: true
   Hide Right Dock: false
   Image:
     collapsed: false
-  QMainWindow State: 000000ff00000000fd00000002000000000000018b00000255fc0200000003fb000000100044006900730070006c006100790073000000003b000001af000000c700fffffffb0000000a0056006900650077007300000001f0000000a0000000a000fffffffb0000000c00430061006d00650072006100000003c30000008d0000002800ffffff000000020000050000000106fc0100000001fb0000000a0049006d0061006700650300000ad900000038000001a60000014c000005000000025500000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd00000002000000000000023800000692fc0200000003fb000000100044006900730070006c00610079007300000000800000051d000001d200fffffffb0000000a0056006900650077007300000005ac000001660000016600fffffffb0000000c00430061006d00650072006100000003c30000008d0000005400ffffff000000020000050000000106fc0100000001fb0000000a0049006d0061006700650200000ad900000044000001a60000014c000005fa0000069200000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Views:
     collapsed: true
-  Width: 1280
-  X: 1920
-  Y: 0
+  Width: 1530
+  X: 1670
+  Y: 68
