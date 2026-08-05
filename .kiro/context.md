@@ -180,7 +180,7 @@ Belief selects *which* goal's policy is `pi_policy`; `alpha` only arbitrates aut
 
 **Telemetry**: `/shared_autonomy/blend_debug` (19 floats: `[alpha, v_user(6), v_policy(6), v_blend(6)]`), published every tick regardless of `cfg.BLENDING`.
 
-**Operator marker** (`/blended_reference_marker`): the gripper the operator watches while teleoperating (`T_virtual_ref`, integrated from the blended twist). GREEN = tracking the policy (`alpha ≥ 0.5`); ORANGE = listening to user override. Primary teleop cue; other predictive markers can stay disabled in RViz.
+**Operator marker** (`/blended_reference_marker`): the ONE gripper the operator keeps on in RViz, for every control mode and study cell, showing the literal pose on `/arm_*/cartesian_reference`. Source is `main_shared_autonomy`'s own `T_virtual_ref` while it owns that topic (`ASSIST_BLENDING`/grasp-exec/test), or `current_T_user` otherwise — which mirrors the teleop script's own publish whenever `ASSIST_BLENDING=False` (same topic, teleop is the writer then). GREEN = tracking the policy (`blend_active AND user moving AND alpha ≥ 0.5`); ORANGE otherwise — a fixed static color whenever `ASSIST_BLENDING` is off, since `blend_active` is then always False. Suppressed entirely during autonomous grasp execution (cleared via `_sweep_all_markers()` on the rising edge into `grasp_exec`, since the operator isn't driving any reference then) — goal-pose and robot-policy predictive markers are suppressed the same way, same rationale. The former light-blue `/guidance_policy_marker` (belief-weighted user-policy preview) was removed: it was buggy around grasp transitions and redundant with this one marker.
 
 ### 5.3 Bimanual State
 

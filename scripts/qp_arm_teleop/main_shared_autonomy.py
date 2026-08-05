@@ -476,26 +476,20 @@ class SharedControlNode(Node):
 
         # --- Visualization Infrastructure ---
         self.pub_markers = self.create_publisher(MarkerArray, '/shared_policy_markers', 10)
-        # Separate topic for the YELLOW guidance gripper so it can be toggled
-        # independently in RViz. It is reference-anchored (current_T_user) and
-        # shows the belief-weighted USER-policy blend — i.e. exactly the velocity
-        # field that the haptic F_guide renders onto the operator's handle. This
-        # is the human-side counterpart to the green robot-policy gripper.
-        self.pub_guidance_marker = self.create_publisher(MarkerArray, '/guidance_policy_marker', 10)
         # Dedicated topic for the light-green robot-policy (predictive trajectory)
         # gripper, split out of /shared_policy_markers so it can be shown/hidden
-        # independently in RViz, same rationale as the guidance marker above.
+        # independently in RViz.
         self.pub_robot_policy_marker = self.create_publisher(MarkerArray, '/robot_policy_marker', 10)
-        # --- Blended-reference gripper (TWIST BLENDING mode only) ---
-        # Shows the ACTUAL pose being integrated from the blended twist
-        # (target_twist = (1-alpha)*v_user + alpha*pi_policy) and sent to the QP
-        # CLF-CBF on /arm_*/cartesian_reference -- i.e. the literal reference the
-        # robot is tracking, NOT a speculative lookahead. Rendered in the SAME
-        # light-blue color as /guidance_policy_marker (the pure-user-intent
-        # gripper) so the operator can visually A/B the two: "pure user intent"
-        # vs. "what is actually being sent to the robot". BOTH topics stay live
-        # simultaneously (independently toggleable in RViz) so the operator can
-        # switch between them to judge which is more intuitive.
+        # --- Reference gripper: the ONE marker the operator keeps on in RViz ---
+        # Shows the literal pose sent to the QP CLF-CBF on /arm_*/cartesian_reference,
+        # sourced from self._ref_track_T (this node's own computation while it owns
+        # that topic under ASSIST_BLENDING/grasp/test, mirrored via subscription from
+        # the teleop script otherwise) -- so exactly one gripper is ever shown, in
+        # every control mode and study cell. GREEN when the policy has taken over
+        # (blending active, user moving, alpha>=0.5), ORANGE otherwise -- a fixed
+        # color whenever ASSIST_BLENDING is off, since blend_active is then always
+        # False. Cleared during autonomous grasp execution (see grasp_exec handling
+        # in timer_callback): the operator isn't driving any reference then.
         self.pub_blended_ref_marker = self.create_publisher(MarkerArray, '/blended_reference_marker', 10)
         # Assigned exactly once,
         # silently leaking the first TransformBroadcaster. Assigned exactly once.
@@ -519,6 +513,12 @@ class SharedControlNode(Node):
         self.MARKER_CLEANUP_PERIOD_S = 3.0
         self.timer_marker_cleanup = self.create_timer(
             self.MARKER_CLEANUP_PERIOD_S, self._sweep_all_markers)
+
+        # Reference-gripper marker cache (see the marker block in timer_callback)
+        # and the previous-tick grasp_exec flag, used to clear all markers exactly
+        # once on the rising edge into autonomous execution.
+        self._ref_track_T = np.eye(4)
+        self._grasp_exec_prev = False
 
         # --- User Pose To build user_policy ---
         self.current_T_user = np.eye(4)
@@ -1423,6 +1423,12 @@ class SharedControlNode(Node):
         # the arm directly (see section 6) and the Haption teleop must yield.
         grasp_exec = self.grasp_sm.state in (
             "GRASP_ALIGN", "GRASP_APPROACH", "GRASP_CLOSE", "LIFT", "RELEASE_LIFT", "ABORT_RETREAT", "RECOVER")
+        if grasp_exec and not self._grasp_exec_prev:
+            # Entering autonomous execution: the operator drives nothing anymore,
+            # so clear every gripper/goal-pose marker instead of leaving a stale
+            # pose on screen until it naturally times out.
+            self._sweep_all_markers()
+        self._grasp_exec_prev = grasp_exec
         self.pub_grasp_active.publish(Bool(data=grasp_exec))
         # Latched active-arm state: late-joining nodes (teleop, force manager)
         # always know which arm is being controlled.
@@ -1462,94 +1468,77 @@ class SharedControlNode(Node):
             if self._viz_counter >= self.VIZ_DECIM:
                 self._viz_counter = 0
 
-                visual_dt = 0.5
-                trajectory_data = []
-                active_v_geo = self.compute_v_geo(self.current_T_EE, T_active_goal)
-                T_cube_1 = self.integrate_twist(self.current_T_EE, target_twist, visual_dt)
-                trajectory_data.append((T_cube_1, target_twist))
-
-                sim_T_EE = T_cube_1
-                if in_free_space and valid_matrices:
-                    for _ in range(1):
-                        visual_dt = visual_dt + 0.3
-                        T_sim_goal = self.goal_set.get_dynamic_goal_pose(
-                            sim_T_EE, self.active_goal_key, update_memory=False)
-                        sim_v_geo = self.compute_v_geo(sim_T_EE, T_sim_goal)
-                        sim_twist = self.solve_local_policy(sim_v_geo, self.J_c, self.h_c)
-                        sim_T_next = self.integrate_twist(sim_T_EE, sim_twist, visual_dt)
-                        trajectory_data.append((sim_T_next, sim_twist))
-                        sim_T_EE = sim_T_next
-
-                # Single consolidated marker publish: one MarkerArray per tick halves the
-                # message rate and avoids RViz subscriber queue starvation.
-                combined_markers = MarkerArray()
-
-                # Light-green robot-policy grippers (predictive trajectory) now
-                # published on their OWN topic (/robot_policy_marker), not mixed
-                # into /shared_policy_markers, so it can be toggled independently.
-                robot_policy_markers = MarkerArray()
-                robot_policy_markers.markers.extend(
-                    self._build_policy_gripper_markers(trajectory_data))
-                self.pub_robot_policy_marker.publish(robot_policy_markers)
-
-                # Goal poses as belief-opacity gripper markers
-                beliefs = self.belief_estimator.get_beliefs()
-                combined_markers.markers.extend(
-                    self._build_goal_pose_markers(beliefs))
-
-                # PRE_GRASP visual cue: pulsing green sphere + one-shot console msg.
-                # A latch timer prevents the sphere from flickering when the state
-                # machine oscillates at the PRE_GRASP/SHARED_AUTONOMY boundary due
-                # to alignment/belief noise. The sphere stays visible for at least
-                # _GRASP_CUE_LATCH_S after PRE_GRASP is last seen.
-                _GRASP_CUE_LATCH_S = 1.0
-                if self.grasp_sm.state == "PRE_GRASP":
-                    self._grasp_cue_last_seen = time.time()
-                    combined_markers.markers.extend(
-                        self._build_grasp_ready_cue(self.current_T_EE))
-                    if not getattr(self, '_pregrasp_cue_logged', False):
-                        self._pregrasp_cue_logged = True
-                        self.get_logger().info(
-                            "=== [PRE-GRASP READY] Aligned! Press LEFT BUTTON on Haption to execute grasp. ===")
-                elif (hasattr(self, '_grasp_cue_last_seen')
-                      and (time.time() - self._grasp_cue_last_seen) < _GRASP_CUE_LATCH_S):
-                    # Within latch window: keep showing the sphere (prevents flicker)
-                    combined_markers.markers.extend(
-                        self._build_grasp_ready_cue(self.current_T_EE))
+                if grasp_exec:
+                    # Autonomous execution: the operator drives nothing, so no
+                    # goal-pose / robot-policy markers are published this tick
+                    # (already cleared on the rising edge above).
+                    pass
                 else:
-                    if getattr(self, '_pregrasp_cue_logged', False):
-                        self._pregrasp_cue_logged = False
-                        combined_markers.markers.extend(self._build_clear_grasp_ready_cue())
+                    visual_dt = 0.5
+                    trajectory_data = []
+                    T_cube_1 = self.integrate_twist(self.current_T_EE, target_twist, visual_dt)
+                    trajectory_data.append((T_cube_1, target_twist))
 
-                # (Grasp-guidance move/rotate arrows REMOVED per operator request:
-                # they cluttered the visualization without adding clarity. The
-                # _build_grasp_guidance / _build_clear_grasp_guidance helpers are
-                # kept in the codebase — unused — in case they're wanted again.)
+                    sim_T_EE = T_cube_1
+                    if in_free_space and valid_matrices:
+                        for _ in range(1):
+                            visual_dt = visual_dt + 0.3
+                            T_sim_goal = self.goal_set.get_dynamic_goal_pose(
+                                sim_T_EE, self.active_goal_key, update_memory=False)
+                            sim_v_geo = self.compute_v_geo(sim_T_EE, T_sim_goal)
+                            sim_twist = self.solve_local_policy(sim_v_geo, self.J_c, self.h_c)
+                            sim_T_next = self.integrate_twist(sim_T_EE, sim_twist, visual_dt)
+                            trajectory_data.append((sim_T_next, sim_twist))
+                            sim_T_EE = sim_T_next
 
-                # ONE publish per tick — all markers in a single message.
-                self.pub_markers.publish(combined_markers)
+                    # Single consolidated marker publish: one MarkerArray per tick halves the
+                    # message rate and avoids RViz subscriber queue starvation.
+                    combined_markers = MarkerArray()
 
-                # --- LIGHT-BLUE GUIDANCE GRIPPER (separate topic, toggleable) -- #
-                # Reference-anchored counterpart to the light-green robot-policy
-                # gripper. It integrates the belief-weighted USER-policy blend
-                # (pi_blend) from the REFERENCE pose (current_T_user) — i.e. the
-                # exact velocity field that the haptic F_guide renders onto the
-                # handle. Published on its own topic (/guidance_policy_marker) so
-                # it can be shown/hidden in RViz independently.
-                if user_policies and all(k in user_policies for k in self.target_keys):
-                    try:
-                        pi_blend_user = self.belief_estimator.blend_policies(user_policies)
-                    except KeyError:
-                        pi_blend_user = None
-                    if pi_blend_user is not None:
-                        guidance_markers = MarkerArray()
-                        guid_now = self.get_clock().now().to_msg()
-                        T_guid_1 = self.integrate_twist(belief_anchor, pi_blend_user, 0.5)
-                        guidance_markers.markers.extend(
-                            self.create_gripper_markers(
-                                T_guid_1, 0.85, 0, guid_now,
-                                ns="guidance_policy", rgb=(0.3, 0.7, 1.0)))
-                        self.pub_guidance_marker.publish(guidance_markers)
+                    # Light-green robot-policy grippers (predictive trajectory) now
+                    # published on their OWN topic (/robot_policy_marker), not mixed
+                    # into /shared_policy_markers, so it can be toggled independently.
+                    robot_policy_markers = MarkerArray()
+                    robot_policy_markers.markers.extend(
+                        self._build_policy_gripper_markers(trajectory_data))
+                    self.pub_robot_policy_marker.publish(robot_policy_markers)
+
+                    # Goal poses as belief-opacity gripper markers
+                    beliefs = self.belief_estimator.get_beliefs()
+                    combined_markers.markers.extend(
+                        self._build_goal_pose_markers(beliefs))
+
+                    # PRE_GRASP visual cue: pulsing green sphere + one-shot console msg.
+                    # A latch timer prevents the sphere from flickering when the state
+                    # machine oscillates at the PRE_GRASP/SHARED_AUTONOMY boundary due
+                    # to alignment/belief noise. The sphere stays visible for at least
+                    # _GRASP_CUE_LATCH_S after PRE_GRASP is last seen.
+                    _GRASP_CUE_LATCH_S = 1.0
+                    if self.grasp_sm.state == "PRE_GRASP":
+                        self._grasp_cue_last_seen = time.time()
+                        combined_markers.markers.extend(
+                            self._build_grasp_ready_cue(self.current_T_EE))
+                        if not getattr(self, '_pregrasp_cue_logged', False):
+                            self._pregrasp_cue_logged = True
+                            self.get_logger().info(
+                                "=== [PRE-GRASP READY] Aligned! Press LEFT BUTTON on Haption to execute grasp. ===")
+                    elif (hasattr(self, '_grasp_cue_last_seen')
+                          and (time.time() - self._grasp_cue_last_seen) < _GRASP_CUE_LATCH_S):
+                        # Within latch window: keep showing the sphere (prevents flicker)
+                        combined_markers.markers.extend(
+                            self._build_grasp_ready_cue(self.current_T_EE))
+                    else:
+                        if getattr(self, '_pregrasp_cue_logged', False):
+                            self._pregrasp_cue_logged = False
+                            combined_markers.markers.extend(self._build_clear_grasp_ready_cue())
+
+                    # (Grasp-guidance move/rotate arrows REMOVED per operator request:
+                    # they cluttered the visualization without adding clarity. The
+                    # _build_grasp_guidance / _build_clear_grasp_guidance helpers are
+                    # kept in the codebase — unused — in case they're wanted again.)
+
+                    # ONE publish per tick — all markers in a single message.
+                    self.pub_markers.publish(combined_markers)
 
             # Inference state (consumed by the haptic force manager) is lightweight
             # Float64MultiArray traffic — keep it at the full control rate.
@@ -1568,7 +1557,11 @@ class SharedControlNode(Node):
         #   the blended twist (1-alpha)*v_user + alpha*pi_policy, integrated below
         #   exactly like the grasp-execution / test-mode reference always was.
         publish_cmd = self.POLICY_BELIEF_TEST or grasp_exec or cfg.BLENDING
-        if publish_cmd and not np.allclose(self.current_T_EE, np.eye(4)):
+        # Whether THIS node is the current writer of /arm_*/cartesian_reference (and
+        # therefore the authority on the reference-gripper pose below) vs. the teleop
+        # script owning it instead -- see the reference-gripper marker after this block.
+        _node_is_ref_writer = publish_cmd and not np.allclose(self.current_T_EE, np.eye(4))
+        if _node_is_ref_writer:
             # --- Reference integration -------------------------------------
             # use_persistent: real BLENDING teleop in SHARED_AUTONOMY. The blended
             # twist is integrated into a PERSISTENT latched pose (self.T_blend_ref)
@@ -1679,32 +1672,43 @@ class SharedControlNode(Node):
             msg_cmd = Float64MultiArray()
             msg_cmd.data = cmd_data.tolist()
 
-            # --- Tracked-reference gripper marker (the ONE marker to watch) ---
-            # T_virtual_ref IS the literal pose published below on
-            # /arm_*/cartesian_reference -- the reference the robot is actually
-            # tracking, integrated consistently from the blended twist (user +
-            # policy). Colored by WHO is currently driving it:
-            #   GREEN  = policy has visibly taken over: blending is active, the
-            #            user is actively moving, and the policy dominates the
-            #            blend (alpha>=0.5).
-            #   ORANGE = the user has the floor -- blending inactive, user idle,
-            #            or the user's twist still dominates (alpha<0.5).
-            _user_active = (float(np.linalg.norm(self.current_v_h[:3])) > 1e-6
-                            or float(np.linalg.norm(self.current_v_h[3:])) > 1e-6)
-            _tracking_policy = blend_active and _user_active and (self.last_alpha >= 0.5)
-            _ref_rgb = (0.1, 0.9, 0.1) if _tracking_policy else (1.0, 0.55, 0.0)
-            blended_ref_markers = MarkerArray()
-            blended_now = self.get_clock().now().to_msg()
-            blended_ref_markers.markers.extend(
-                self.create_gripper_markers(
-                    T_virtual_ref, 0.9, 0, blended_now,
-                    ns="blended_reference", rgb=_ref_rgb))
-            self.pub_blended_ref_marker.publish(blended_ref_markers)
+            # Cache for the reference-gripper marker below: T_virtual_ref IS the
+            # literal pose about to be published on /arm_*/cartesian_reference.
+            self._ref_track_T = T_virtual_ref
 
             if self.active_arm == 'right':
                 self.pub_blend_right.publish(msg_cmd)
             else:
                 self.pub_blend_left.publish(msg_cmd)
+
+        # --- Reference-gripper marker (the ONE marker to watch, every modality) ---
+        # Pose source: this node's own T_virtual_ref (just cached above) while it
+        # owns /arm_*/cartesian_reference, otherwise self.current_T_user -- which,
+        # whenever _node_is_ref_writer is False, is guaranteed to mirror that exact
+        # topic instead (see the BLENDING routing comment above sub_human_reference_*),
+        # since the teleop script is the one writing it in that case. Colored by WHO
+        # is currently driving it:
+        #   GREEN  = policy has visibly taken over: blending is active, the
+        #            user is actively moving, and the policy dominates the
+        #            blend (alpha>=0.5).
+        #   ORANGE = the user has the floor -- blending inactive, user idle,
+        #            or the user's twist still dominates (alpha<0.5). This is the
+        #            fixed color whenever ASSIST_BLENDING is off, since blend_active
+        #            is then always False.
+        # Suppressed entirely during autonomous grasp execution: see grasp_exec
+        # handling above (cleared on the rising edge via _sweep_all_markers()).
+        if not grasp_exec:
+            _ref_T = self._ref_track_T if _node_is_ref_writer else self.current_T_user
+            _user_active = (float(np.linalg.norm(self.current_v_h[:3])) > 1e-6
+                            or float(np.linalg.norm(self.current_v_h[3:])) > 1e-6)
+            _tracking_policy = blend_active and _user_active and (self.last_alpha >= 0.5)
+            _ref_rgb = (0.1, 0.9, 0.1) if _tracking_policy else (1.0, 0.55, 0.0)
+            ref_markers = MarkerArray()
+            ref_markers.markers.extend(
+                self.create_gripper_markers(
+                    _ref_T, 0.9, 0, self.get_clock().now().to_msg(),
+                    ns="blended_reference", rgb=_ref_rgb))
+            self.pub_blended_ref_marker.publish(ref_markers)
 
     # --- Core Mathematical Functions ---
 
@@ -1992,7 +1996,7 @@ class SharedControlNode(Node):
         delete_all.action = Marker.DELETEALL
         ma = MarkerArray()
         ma.markers.append(delete_all)
-        for pub in (self.pub_markers, self.pub_guidance_marker, self.pub_robot_policy_marker,
+        for pub in (self.pub_markers, self.pub_robot_policy_marker,
                     self.pub_blended_ref_marker):
             pub.publish(ma)
 
