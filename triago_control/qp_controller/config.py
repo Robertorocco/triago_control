@@ -44,7 +44,7 @@ JOYSTICK = "JOYSTICK"
 
 # Active experiment condition: edit these three to select a study cell.
 CONTROL_MODE   = JOYSTICK      # CLUTCH (position control) | JOYSTICK (velocity control)
-ASSIST_FEEDBACK = True      # channel F: assistive guidance forces on the handle
+ASSIST_FEEDBACK = True          # channel F: assistive guidance forces on the handle
 ASSIST_BLENDING = True      # channel B: reference-level user<->policy blending
 
 # Backward-compat alias: legacy code reads BLENDING to decide reference-topic ownership.
@@ -73,15 +73,18 @@ def validate_condition(node_name, control_mode=None, feedback=None, blending=Non
 # --- Joystick home pose (Haption base frame) -------------------------------
 # Fixed home position; home ORIENTATION tracks the gripper via a per-arm reference delta
 # captured once at first activation, angle-compressed by JOYSTICK_ROT_HOME_SCALE, never re-anchored.
-JOYSTICK_NEUTRAL_POSITION_M = [0.5, -0.03, -0.03]
+# Device workspace is x[0.14,0.36] y[-0.24,0.22] z[-0.18,0.18] m; this operator rest pose keeps at
+# least 9.7 cm of handle travel on every axis, the tightest direction being +x.
+JOYSTICK_NEUTRAL_POSITION_M = [0.2624, 0.0103, -0.0729]
 # Neutral handle quaternion, measured on the device at the operator's comfortable rest orientation.
 JOYSTICK_NEUTRAL_ORIENTATION_XYZW = [-0.015140674076974392, 0.8170770406723022,
                                      0.06124841421842575, 0.5730659365653992]
 
 # --- Displacement -> twist mapping (teleop_triago_joystick.py) --------------
 # Twist magnitude is proportional to the handle's distance from home past a radial deadband.
-# Deadbands are deliberately large: the centering spring cannot settle to mm/sub-degree precision.
-JOYSTICK_DEADBAND_LIN = 0.06912      # m   (6.91 cm)
+# Each deadband must stay above the centering spring's settle precision, or the residual
+# settle-oscillation of a released handle is read as spurious user input.
+JOYSTICK_DEADBAND_LIN = 0.03456      # m   (3.46 cm)
 JOYSTICK_DEADBAND_ANG = 0.23328      # rad (~13.37 deg)
 JOYSTICK_K_TRANS = 1.6               # (m/s) per m of handle linear displacement
 JOYSTICK_K_ROT = 1.5                 # (rad/s) per rad of handle angular displacement
@@ -96,15 +99,15 @@ JOYSTICK_DAMP_ANG = 0.075            # unitless fraction of handle angular veloc
 
 # --- Home-orientation rebasing scale ---------------------------------------
 # Gripper rotation is divided by this when building the home orientation (gripper 90 deg ->
-# handle ~69 deg), fitting the Haption's narrower rotational workspace; never scales the twist.
-JOYSTICK_ROT_HOME_SCALE = 1.3
+# handle 60 deg), fitting the Haption's narrower rotational workspace; never scales the twist.
+JOYSTICK_ROT_HOME_SCALE = 1.5
 
 # --- Restorative centering spring (joystick force managers) -----------------
 # The homing spring-damper toward the dynamic home pose, unified across all joystick cells.
-JOYSTICK_SPRING_KP_LIN = 60.0        # N/m
-JOYSTICK_SPRING_KD_LIN = 1.0         # N/(m/s)
-JOYSTICK_SPRING_KP_ANG = 1.5         # Nm/rad
-JOYSTICK_SPRING_KD_ANG = 0.15        # Nm/(rad/s)
+JOYSTICK_SPRING_KP_LIN = 30.0        # N/m
+JOYSTICK_SPRING_KD_LIN = 0.5         # N/(m/s)
+JOYSTICK_SPRING_KP_ANG = 0.75        # Nm/rad
+JOYSTICK_SPRING_KD_ANG = 0.075       # Nm/(rad/s)
 
 # Live home pose broadcast (teleop -> force manager), layout [pos(3), quat_xyzw(4)];
 # the teleop node owns it so the spring target and the twist zero-point are identical.
@@ -179,10 +182,10 @@ POSTURE_WEIGHT_FILTER_TAU = 0.2  # 2nd-stage LPF on the posture weight (symmetri
 # Anchoring on the QP's own last output instead is a self-referential low-pass: rejected.
 ENABLE_RATE_DAMPING = True
 RATE_DAMPING_VS_MEASURED = True
-RATE_WEIGHT = 1500.0          # hand-tuned on real hardware; its entire job is anti-oscillation
+RATE_WEIGHT = 50.0          # sim default; real-hw tuned value (500) lives on the real-hw branch
 # During fine grasp centering the measured velocity is near zero, so full RATE_WEIGHT resists
 # the tiny corrective qdot needed; relaxed to this on the tracking-boosted arm only.
-RATE_WEIGHT_GRASP = 200.0
+RATE_WEIGHT_GRASP = 20.0    # sim default; real-hw tuned value (200) lives on the real-hw branch
 
 # =============================================================================
 # 3. DYNAMIC SCALING BOUNDARIES

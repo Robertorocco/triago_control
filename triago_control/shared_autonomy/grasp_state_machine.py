@@ -75,10 +75,10 @@ class GraspStateMachine:
     # standoff), which pushes pos_error back up toward ~0.05; thresholds are kept
     # forgiving enough (ENTER > standoff) that being at/near the surface still
     # counts as "aligned" so the grasp stays committable.
-    POS_ERR_ENTER = 0.06
-    ANG_ERR_ENTER = 0.20
-    POS_ERR_STAY = 0.09
-    ANG_ERR_STAY = 0.28
+    POS_ERR_ENTER = 0.048
+    ANG_ERR_ENTER = 0.16
+    POS_ERR_STAY = 0.072
+    ANG_ERR_STAY = 0.224
 
     BELIEF_ENTER = 0.90   # belief threshold required to *enter* PRE_GRASP
     BELIEF_STAY = 0.75    # relaxed belief threshold required to *stay* in PRE_GRASP
@@ -107,14 +107,14 @@ class GraspStateMachine:
     # Straight-line advance from the standoff along the approach axis (the DEPTH knob),
     # PER GRASP TYPE. The gripper drives this far from the standoff toward/into the
     # cylinder before closing; selected via _insertion_travel().
-    #   - TOP  (0.09): vertical insertion depth — works well, leave as-is.
+    #   - TOP: vertical insertion depth.
     #   - SIDE: shallower than top -- deep enough for the fingers to bracket the wall
     #     without shoving the cylinder sideways before they close.
-    GRASP_INSERTION_TRAVEL_TOP = 0.135
-    GRASP_INSERTION_TRAVEL_SIDE = 0.1102
+    GRASP_INSERTION_TRAVEL_TOP = 0.09
+    GRASP_INSERTION_TRAVEL_SIDE = 0.078
     GRASP_FORCE_THRESHOLD = 2.0
     GRASP_CLOSE_HOLD_S = 4.0
-    GRASP_APPROACH_TIMEOUT_S = 30.0  # approach can be slow with the relaxed CBF
+    GRASP_APPROACH_TIMEOUT_S = 15.0  # approach can be slow with the relaxed CBF
 
     # Force-controlled closure parameters
     GRIP_CLOSE_VELOCITY = 0.01   # rad/s — very slow closure (~13s to close)
@@ -343,14 +343,15 @@ class GraspStateMachine:
     # ------------------------------------------------------------------
     # PHASE 1.5: GRASP_ALIGN (precise centering before the blind insertion)
     # ------------------------------------------------------------------
-    ALIGN_POS_TOL = 0.029   # m -- within ~2.9 cm of the standoff
-    ALIGN_ANG_TOL = 0.143   # rad -- approach-axis within ~8.2 deg of the goal
+    ALIGN_POS_TOL = 0.0209   # m -- within ~2.1 cm of the standoff
+    ALIGN_ANG_TOL = 0.103    # rad -- approach-axis within ~5.9 deg of the goal
     # Lateral centering tolerance: the perpendicular distance from the cylinder
     # axis to the gripper's approach line must be within this. If not, the fingers
     # will hit one side of the cylinder and knock it over during the blind insertion.
     # Physically: gripper finger opening is ~7 cm, cylinder diameter is ~4 cm, so
-    # up to ~1.5 cm lateral error still lets both fingers bracket the cylinder.
-    ALIGN_CENTERING_TOL = 0.0288  # m -- centered within ~28.8 mm of the cylinder axis
+    # up to ~1.5 cm lateral error still lets both fingers bracket the cylinder --
+    # this tolerance still exceeds that physical bound, tightened only partway there.
+    ALIGN_CENTERING_TOL = 0.0207  # m -- centered within ~20.7 mm of the cylinder axis
     ALIGN_TIMEOUT_S = 12.0  # s -- precise centring is slow; a premature abort nudges the cylinder
 
     def _grasp_align(self, inp: TickInput) -> TickOutput:
