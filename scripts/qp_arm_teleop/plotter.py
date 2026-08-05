@@ -1,4 +1,8 @@
 #!/usr/bin/env python3
+# plotter.py
+"""Live telemetry dashboard: 7 Tk windows animated at 10Hz from the QP/teleop
+topics, mirroring offline_plotter.py's figure set and style for side-by-side
+comparison, but updating in real time instead of rendering once at trial end."""
 import sys
 import traceback
 from std_msgs.msg import Float64MultiArray, Float64, String
@@ -14,6 +18,34 @@ from matplotlib.gridspec import GridSpec, GridSpecFromSubplotSpec
 import threading
 from collections import deque
 import numpy as np
+import pinocchio as pin
+
+import triago_control.qp_controller.config as cfg
+
+
+# =============================================================================
+# PUBLICATION STYLE -- same rcParams as offline_plotter.py, applied once, so a
+# live dashboard screenshot and a saved trial figure read as the same system.
+# =============================================================================
+def _apply_publication_style():
+    plt.rcParams.update({
+        'font.family': 'serif',
+        'font.size': 11,
+        'axes.titlesize': 12,
+        'axes.labelsize': 11,
+        'legend.fontsize': 9,
+        'xtick.labelsize': 9,
+        'ytick.labelsize': 9,
+        'figure.titlesize': 15,
+        'axes.grid': True,
+        'grid.alpha': 0.3,
+        'grid.linewidth': 0.5,
+        'lines.linewidth': 1.4,
+        'axes.linewidth': 0.9,
+    })
+
+
+JOINT_COLORS = plt.cm.jet(np.linspace(0, 1, 7))
 
 
 class TriagoDashboard(Node):
@@ -59,6 +91,20 @@ class TriagoDashboard(Node):
         self.err_pos_l = deque(maxlen=self.history_len)
         self.err_vel_r = deque(maxlen=self.history_len)
         self.err_vel_l = deque(maxlen=self.history_len)
+
+        # Angular tracking error (geodesic SO(3) angle, same metric as
+        # offline_plotter.py's cb_real/_geodesic_angle) + a finite-differenced
+        # angular velocity error -- only populated when /qp_debug/ee_real
+        # carries orientation (18-float layout: ..., rpy_r(3), rpy_l(3)).
+        self.err_ang_r = deque(maxlen=self.history_len)
+        self.err_ang_l = deque(maxlen=self.history_len)
+        self.err_ang_vel_r = deque(maxlen=self.history_len)
+        self.err_ang_vel_l = deque(maxlen=self.history_len)
+        self._prev_R_r = None
+        self._prev_R_l = None
+        self._prev_ang_t = None
+        self._w_est_ema_r = None
+        self._w_est_ema_l = None
 
         self.h_buffer = deque(maxlen=self.history_len)
         self.h_time = deque(maxlen=self.history_len)
@@ -368,12 +414,18 @@ class TriagoDashboard(Node):
 
     # --- Adaptive Controller Callbacks ---
     def dyn_weights_callback(self, msg):
-        """[weight_slack_r, weight_slack_l, gamma_clf]: weight_slack_r weights
-        only delta_r, weight_slack_l only delta_l (build_and_solve's slack block)."""
+        """7 floats: [weight_slack_r, weight_slack_l, gamma_mean, gamma_r,
+        gamma_l, posture_weight_r, posture_weight_l]. weight_slack_r weights
+        only delta_r, weight_slack_l only delta_l (build_and_solve's slack
+        block). Older 5-float messages (pre posture-weight telemetry) pad the
+        posture weights to cfg.W_CENTER, same convention as offline_plotter."""
         t = self.get_time()
         data = list(msg.data)
-        if len(data) < 3:
-            data = (data + [0.0, 0.0, 0.0])[:3]
+        while len(data) < 5:
+            data.append(0.0)
+        while len(data) < 7:
+            data.append(cfg.W_CENTER)
+        data = data[:7]
         self.dyn_weights_time.append(t)
         self.dyn_weights_buffer.append(data)
 
@@ -445,39 +497,91 @@ class TriagoDashboard(Node):
             self.has_ref_left = True
 
 
+    @staticmethod
+    def _geodesic_angle(rpy, R_real):
+        """||log3(R_des . R_real^T)|| -- same construction as
+        offline_plotter.py's cb_real / ReferenceGovernor._clamp_orientation_error,
+        used here purely as a READ-ONLY diagnostic (never fed back into control)."""
+        if rpy is None or R_real is None:
+            return 0.0
+        R_des = pin.rpy.rpyToMatrix(float(rpy[0]), float(rpy[1]), float(rpy[2]))
+        R_error = R_des @ np.asarray(R_real).T
+        trace = np.clip(np.trace(R_error), -1.0, 3.0)
+        if trace <= -1.0 + 1e-6:
+            return float(np.pi)  # near-singularity guard
+        return float(np.linalg.norm(pin.log3(R_error)))
+
     def cb_real(self, msg):
-        if not self.has_ref_right: 
+        if not self.has_ref_right:
             return
-            
+
         real = np.array(msg.data)
         p_real_r = real[0:3]
         v_real_r = real[3:6]
         p_real_l = real[6:9]
         v_real_l = real[9:12]
-        
+
         # Right Arm Error
         e_p_r = np.linalg.norm(self.ref_right[0:3] - p_real_r)
         e_v_r = np.linalg.norm(self.ref_right[6:9] - v_real_r)
-        
+
         # Left Arm Error
         e_p_l = np.linalg.norm(self.ref_left[0:3] - p_real_l) if self.has_ref_left else 0.0
         e_v_l = np.linalg.norm(self.ref_left[6:9] - v_real_l) if self.has_ref_left else 0.0
-        
+
         t = self.get_time()
         self.err_time.append(t)
         self.err_pos_r.append(e_p_r)
         self.err_vel_r.append(e_v_r)
         self.err_pos_l.append(e_p_l)
         self.err_vel_l.append(e_v_l)
-        
+
+        # Angular tracking error -- only when ee_real carries RPY (18-float
+        # layout: p_r(3),v_r(3),p_l(3),v_l(3),rpy_r(3),rpy_l(3)). Angular
+        # velocity error uses a finite-differenced, EMA-smoothed measured
+        # angular velocity (ee_real has no measured angular velocity
+        # directly), same idiom as offline_plotter.py's cb_real.
+        e_ang_r = e_ang_l = 0.0
+        e_ang_vel_r = e_ang_vel_l = 0.0
+        if len(real) >= 18:
+            rpy_r, rpy_l = real[12:15], real[15:18]
+            R_real_r = pin.rpy.rpyToMatrix(*rpy_r)
+            R_real_l = pin.rpy.rpyToMatrix(*rpy_l)
+            e_ang_r = self._geodesic_angle(self.ref_right[3:6], R_real_r)
+            e_ang_l = self._geodesic_angle(self.ref_left[3:6], R_real_l) if self.has_ref_left else 0.0
+
+            w_est_r = self._w_est_ema_r if self._w_est_ema_r is not None else np.zeros(3)
+            w_est_l = self._w_est_ema_l if self._w_est_ema_l is not None else np.zeros(3)
+            if self._prev_R_r is not None and self._prev_ang_t is not None:
+                dt_ang = t - self._prev_ang_t
+                if dt_ang > 1e-4:
+                    raw_w_r = pin.log3(R_real_r @ self._prev_R_r.T) / dt_ang
+                    raw_w_l = pin.log3(R_real_l @ self._prev_R_l.T) / dt_ang
+                    if self._w_est_ema_r is None:
+                        self._w_est_ema_r, self._w_est_ema_l = raw_w_r, raw_w_l
+                    else:
+                        a = 0.85
+                        self._w_est_ema_r = a * self._w_est_ema_r + (1.0 - a) * raw_w_r
+                        self._w_est_ema_l = a * self._w_est_ema_l + (1.0 - a) * raw_w_l
+                    w_est_r, w_est_l = self._w_est_ema_r, self._w_est_ema_l
+            self._prev_R_r, self._prev_R_l = R_real_r, R_real_l
+            self._prev_ang_t = t
+            e_ang_vel_r = float(np.linalg.norm(self.ref_right[9:12] - w_est_r))
+            e_ang_vel_l = (float(np.linalg.norm(self.ref_left[9:12] - w_est_l))
+                          if self.has_ref_left else 0.0)
+        self.err_ang_r.append(e_ang_r)
+        self.err_ang_l.append(e_ang_l)
+        self.err_ang_vel_r.append(e_ang_vel_r)
+        self.err_ang_vel_l.append(e_ang_vel_l)
+
         self.ref_pos_r.append(self.ref_right[0:3].copy())
         self.real_pos_r.append(p_real_r.copy())
-        
+
         if self.has_ref_left:
             self.ref_pos_l.append(self.ref_left[0:3].copy())
         else:
             self.ref_pos_l.append(np.zeros(3))
-            
+
         self.real_pos_l.append(p_real_l.copy())
 
     def slack_callback(self, msg):
@@ -515,10 +619,17 @@ class TriagoDashboard(Node):
         self.lambda_joints_buffer.append(list(msg.data))
 
     def task_authority_callback(self, msg):
-        """[E_damp, E_posture, E_slack] soft-task cost energies from the QP."""
+        """12 floats: [0:4] combined R+L totals, [4:8] right-arm-only,
+        [8:12] left-arm-only -- each block [E_damp, E_posture, E_slack, E_rate]
+        (qp_formulator.py's task_energies). The per-arm blocks are what
+        actually localizes an oscillation to one wrist instead of hiding it
+        in a combined sum. Older/shorter messages pad missing fields with 0."""
         if len(msg.data) >= 3:
+            data = list(msg.data[:12])
+            while len(data) < 12:
+                data.append(0.0)
             self.task_auth_time.append(self.get_time())
-            self.task_auth_buffer.append(list(msg.data[:3]))
+            self.task_auth_buffer.append(data)
 
     def listener_callback(self, msg):
         t = self.get_time()
@@ -775,9 +886,15 @@ def update_plot(frame, node, lines_map, axs1, axs2, axs3, ax_pairs, dyn_plots, f
             lines_map['err_pos_l'].set_data(t_e[:min_len], list(node.err_pos_l)[:min_len])
             lines_map['err_vel_r'].set_data(t_e[:min_len], list(node.err_vel_r)[:min_len])
             lines_map['err_vel_l'].set_data(t_e[:min_len], list(node.err_vel_l)[:min_len])
+            lines_map['err_ang_r'].set_data(t_e[:min_len], list(node.err_ang_r)[:min_len])
+            lines_map['err_ang_l'].set_data(t_e[:min_len], list(node.err_ang_l)[:min_len])
+            lines_map['err_ang_vel_r'].set_data(t_e[:min_len], list(node.err_ang_vel_r)[:min_len])
+            lines_map['err_ang_vel_l'].set_data(t_e[:min_len], list(node.err_ang_vel_l)[:min_len])
             artists.extend([
                 lines_map['err_pos_r'], lines_map['err_pos_l'],
-                lines_map['err_vel_r'], lines_map['err_vel_l']
+                lines_map['err_vel_r'], lines_map['err_vel_l'],
+                lines_map['err_ang_r'], lines_map['err_ang_l'],
+                lines_map['err_ang_vel_r'], lines_map['err_ang_vel_l'],
             ])
 
         current_max_time = t_e[-1]
@@ -810,6 +927,14 @@ def update_plot(frame, node, lines_map, axs1, axs2, axs3, ax_pairs, dyn_plots, f
                 if min_len > 0:
                     y_data = [d[2] for d in data_dw[:min_len]]
                     lines_map[f'dyn_{key}'].set_data(t_dw[:min_len], y_data)
+            elif key == 'posture_weight':
+                # data_dw: [..., posture_weight_r(idx5), posture_weight_l(idx6)].
+                min_len = min(len(t_dw), len(data_dw))
+                if min_len > 0:
+                    y_r = [d[5] for d in data_dw[:min_len]]
+                    y_l = [d[6] for d in data_dw[:min_len]]
+                    lines_map[f'dyn_{key}_r'].set_data(t_dw[:min_len], y_r)
+                    lines_map[f'dyn_{key}_l'].set_data(t_dw[:min_len], y_l)
             elif key == 'd_safe_dynamic':
                 min_len = min(len(t_ds), len(data_ds))
                 if min_len > 0:
@@ -822,7 +947,7 @@ def update_plot(frame, node, lines_map, axs1, axs2, axs3, ax_pairs, dyn_plots, f
         all_t = list(t_dw) + list(t_ds)
         if all_t:
             max_t = max(all_t)
-            n_fixed = 2  # rows 0 and 1 are error plots
+            n_fixed = 4  # rows 0-3 are pos/vel/ang/ang-vel error plots
             for row_idx in range(len(dyn_plots)):
                 ax = axs3[n_fixed + row_idx]
                 ax.set_xlim(max(0, max_t - window), max_t + 0.1)
@@ -860,16 +985,32 @@ def update_plot(frame, node, lines_map, axs1, axs2, axs3, ax_pairs, dyn_plots, f
         data_a = list(node.task_auth_buffer)
         m = min(len(t_a), len(data_a))
         if m > 0:
-            arr = np.array(data_a[:m], dtype=float)         # (m, 3)
-            total = arr.sum(axis=1, keepdims=True)
-            total[total < 1e-12] = 1.0                       # avoid /0 when fully idle
-            shares = arr / total                             # normalised to [0,1]
+            arr = np.array(data_a[:m], dtype=float)   # (m, 12): combined(4),right(4),left(4)
             t_view = t_a[:m]
+
+            def _shares(block):
+                total = block.sum(axis=1, keepdims=True)
+                total[total < 1e-12] = 1.0            # avoid /0 when fully idle
+                return block / total                  # normalised to [0,1]
+
+            shares = _shares(arr[:, 0:4])
             lines_map['auth_damp'].set_data(t_view, shares[:, 0])
             lines_map['auth_post'].set_data(t_view, shares[:, 1])
             lines_map['auth_slack'].set_data(t_view, shares[:, 2])
+            lines_map['auth_rate'].set_data(t_view, shares[:, 3])
+
+            # Per-arm, each normalized to ONLY that arm's own total -- localizes
+            # an oscillation the combined row above can dilute/hide.
+            for side, sl in (('r', slice(4, 8)), ('l', slice(8, 12))):
+                shares_side = _shares(arr[:, sl])
+                lines_map[f'auth_damp_{side}'].set_data(t_view, shares_side[:, 0])
+                lines_map[f'auth_post_{side}'].set_data(t_view, shares_side[:, 1])
+                lines_map[f'auth_slack_{side}'].set_data(t_view, shares_side[:, 2])
+                lines_map[f'auth_rate_{side}'].set_data(t_view, shares_side[:, 3])
+
             max_t = t_view[-1]
-            for ax in [lines_map['auth_damp'].axes]:
+            for ax in (lines_map['auth_damp'].axes, lines_map['auth_damp_r'].axes,
+                      lines_map['auth_damp_l'].axes):
                 ax.set_xlim(max(0, max_t - window), max_t + 0.1)
             figs[4].canvas.draw_idle()
 
@@ -900,7 +1041,8 @@ def update_plot(frame, node, lines_map, axs1, axs2, axs3, ax_pairs, dyn_plots, f
 
 
 def main(args=None):
-    import triago_control.qp_controller.config as cfg_plot
+    cfg_plot = cfg
+    _apply_publication_style()
 
     rclpy.init(args=args)
     node = TriagoDashboard()
@@ -948,7 +1090,7 @@ def main(args=None):
         mng = fig.canvas.manager
         mng.window.wm_geometry(f"+{x}+{y}")
 
-    colors = plt.cm.jet(np.linspace(0, 1, 7))
+    colors = JOINT_COLORS  # shared with offline_plotter.py's per-joint palette
     lines_map = {}
 
 
@@ -958,6 +1100,7 @@ def main(args=None):
     # Positions live in the slider GUI (Window 6); this is velocity / QP
     # solution / servo error only, 3x2 grid.
     fig1, axs1 = plt.subplots(3, 2, sharex=True)
+    fig1.canvas.manager.set_window_title('Joint Data')
     fig1.suptitle('Joint Data')
 
     # Row 0: Velocity from driver
@@ -1019,7 +1162,8 @@ def main(args=None):
     # WINDOW 2 (center): "QP Data" — 7x1 stacked
     # ===================================================================
     fig2, axs2 = plt.subplots(7, 1, sharex=True)
-    fig2.suptitle('QP Data')
+    fig2.canvas.manager.set_window_title('QP Data -- Slacks, Shadow Prices, Safety')
+    fig2.suptitle('QP Data -- Slacks, Shadow Prices, Safety')
 
     # Row 0: Right Slack
     l_sr_scalar, = axs2[0].plot([], [], 'r-', label=r'$\delta_{R}$ (scalar)', linewidth=2)
@@ -1110,10 +1254,13 @@ def main(args=None):
         dyn_plots.append(('gamma_clf', r'$\gamma_{CLF}$', 'CLF Convergence Rate'))
     if cfg_plot.DYNAMIC_SLACK_WEIGHT:
         dyn_plots.append(('weight_slack', r'$w_{\delta}$', 'Slack Weight'))
+    if cfg_plot.DYNAMIC_POSTURE_WEIGHT:
+        dyn_plots.append(('posture_weight', r'$w_{post}$', 'Posture Weight'))
 
-    n_rows_3 = 2 + len(dyn_plots)
+    n_rows_3 = 4 + len(dyn_plots)
     fig3, axs3 = plt.subplots(n_rows_3, 1, sharex=True, squeeze=False)
     axs3 = axs3.flatten()
+    fig3.canvas.manager.set_window_title('Task Error & Adaptation')
     fig3.suptitle('Task Error & Adaptation')
 
     # Row 0: Position error (R and L)
@@ -1136,17 +1283,41 @@ def main(args=None):
     lines_map['err_vel_r'] = l_evr
     lines_map['err_vel_l'] = l_evl
 
-    # Rows 2+: Dynamic weight subplots
+    # Row 2: Angular tracking error (geodesic SO(3) angle, R and L) -- 0.0
+    # (not NaN) whenever ee_real carries no orientation, same sentinel
+    # convention as offline_plotter.py.
+    l_ear, = axs3[2].plot([], [], 'r-', label='Ang Err R')
+    l_eal, = axs3[2].plot([], [], 'b-', label='Ang Err L')
+    axs3[2].set_ylabel('Error [rad]', rotation=0, ha='left', labelpad=10)
+    axs3[2].yaxis.set_label_position('right')
+    axs3[2].grid(True, alpha=0.3)
+    axs3[2].legend(loc='upper left', fontsize='x-small')
+    lines_map['err_ang_r'] = l_ear
+    lines_map['err_ang_l'] = l_eal
+
+    # Row 3: Angular velocity tracking error (R and L)
+    l_eavr, = axs3[3].plot([], [], 'r-', label='Ang Vel Err R')
+    l_eavl, = axs3[3].plot([], [], 'b-', label='Ang Vel Err L')
+    axs3[3].set_ylabel('Error [rad/s]', rotation=0, ha='left', labelpad=10)
+    axs3[3].yaxis.set_label_position('right')
+    axs3[3].grid(True, alpha=0.3)
+    axs3[3].legend(loc='upper left', fontsize='x-small')
+    lines_map['err_ang_vel_r'] = l_eavr
+    lines_map['err_ang_vel_l'] = l_eavl
+
+    # Rows 4+: Dynamic weight subplots
     for idx, (key, ylabel, title) in enumerate(dyn_plots):
-        ax = axs3[2 + idx]
+        ax = axs3[4 + idx]
         ax.set_title(title, fontsize='small')
         ax.set_ylabel(ylabel, rotation=0, ha='left', labelpad=10)
         ax.yaxis.set_label_position('right')
         ax.grid(True, alpha=0.3)
-        if key in ('d_safe_dynamic', 'weight_slack'):
+        if key in ('d_safe_dynamic', 'weight_slack', 'posture_weight'):
             # Per-arm: R (red) and L (blue), matching the dashboard convention.
-            label_r = r'$d_{safe,R}^{dyn}$' if key == 'd_safe_dynamic' else r'$w_{\delta,R}$'
-            label_l = r'$d_{safe,L}^{dyn}$' if key == 'd_safe_dynamic' else r'$w_{\delta,L}$'
+            label_r = {'d_safe_dynamic': r'$d_{safe,R}^{dyn}$', 'weight_slack': r'$w_{\delta,R}$',
+                      'posture_weight': r'$w_{post,R}$'}[key]
+            label_l = {'d_safe_dynamic': r'$d_{safe,L}^{dyn}$', 'weight_slack': r'$w_{\delta,L}$',
+                      'posture_weight': r'$w_{post,L}$'}[key]
             l_r, = ax.plot([], [], 'r-', linewidth=1.2, label=label_r)
             l_l, = ax.plot([], [], 'b-', linewidth=1.2, label=label_l)
             ax.legend(loc='upper left', fontsize='x-small')
@@ -1201,20 +1372,51 @@ def main(args=None):
     # obstacle/limit); a high posture share => the redundant DOF is busy fleeing a
     # limit. (The HARD-constraint authority is the KKT dual / shadow prices in the
     # "QP Data" window: lambda_CBF and lambda_Joints.)
-    fig5, ax_auth = plt.subplots(1, 1, figsize=(7, 4))
+    # Row 0 (combined R+L, unchanged) + rows 1-2 (per-arm breakdown, NEW):
+    # a combined sum can hide an oscillation that only one arm's wrist is
+    # actually fighting -- the per-arm rows are what localizes it (matches
+    # offline_plotter.py's fig5_task_authority, which plots Right/Left
+    # separately for exactly this reason).
+    fig5, axs5 = plt.subplots(3, 1, figsize=(7, 10), sharex=True)
+    ax_auth, ax_auth_r, ax_auth_l = axs5
     fig5.canvas.manager.set_window_title('Task Authority (soft-task cost shares)')
     fig5.suptitle('Soft-task QP cost shares (objective decomposition)')
     l_auth_damp, = ax_auth.plot([], [], color='#888888', linewidth=1.6, label='Damping')
     l_auth_post, = ax_auth.plot([], [], color='#2a9d8f', linewidth=1.8, label='Posture / limit')
     l_auth_slack, = ax_auth.plot([], [], color='#e63946', linewidth=1.8, label='Slack (CLF give)')
+    # Rate-damping share (cfg.ENABLE_RATE_DAMPING) -- 0 whenever disabled,
+    # plotted anyway so an A/B is a straight before/after read of this figure
+    # (same convention as offline_plotter's fig5_task_authority).
+    l_auth_rate, = ax_auth.plot([], [], color='#4a3aa7', linewidth=1.8, label='Rate damping')
+    ax_auth.set_title('Combined (Right + Left)', fontsize=10)
     ax_auth.set_ylim(-0.02, 1.02)
     ax_auth.set_ylabel('Authority share [-]')
-    ax_auth.set_xlabel('Time [s]')
     ax_auth.grid(True, alpha=0.3)
-    ax_auth.legend(loc='upper left', fontsize='x-small', ncol=3)
+    ax_auth.legend(loc='upper left', fontsize='x-small', ncol=4)
     lines_map['auth_damp'] = l_auth_damp
     lines_map['auth_post'] = l_auth_post
     lines_map['auth_slack'] = l_auth_slack
+    lines_map['auth_rate'] = l_auth_rate
+
+    # Rows 1-2: per-arm breakdown, each normalized to THAT arm's own total
+    # (not the combined total above) -- a wrist fighting rate-damping alone
+    # shows as a high share here even while the combined row above looks calm
+    # (diluted by the other, quiet arm).
+    for ax, side in ((ax_auth_r, 'r'), (ax_auth_l, 'l')):
+        l_d, = ax.plot([], [], color='#888888', linewidth=1.6, label='Damping')
+        l_p, = ax.plot([], [], color='#2a9d8f', linewidth=1.8, label='Posture / limit')
+        l_s, = ax.plot([], [], color='#e63946', linewidth=1.8, label='Slack (CLF give)')
+        l_r, = ax.plot([], [], color='#4a3aa7', linewidth=1.8, label='Rate damping')
+        ax.set_title('Right Arm' if side == 'r' else 'Left Arm', fontsize=10)
+        ax.set_ylim(-0.02, 1.02)
+        ax.set_ylabel('Authority share [-]')
+        ax.grid(True, alpha=0.3)
+        ax.legend(loc='upper left', fontsize='x-small', ncol=4)
+        lines_map[f'auth_damp_{side}'] = l_d
+        lines_map[f'auth_post_{side}'] = l_p
+        lines_map[f'auth_slack_{side}'] = l_s
+        lines_map[f'auth_rate_{side}'] = l_r
+    ax_auth_l.set_xlabel('Time [s]')
 
     # ===================================================================
     # WINDOW 6: "Joint Positions" — live slider GUI (control-panel style)
@@ -1347,7 +1549,7 @@ def main(args=None):
     place_window(fig2, 893, 118, 542, 1131)   # Center: QP Data
     place_window(fig3, 1436, 118, 498, 1131)  # Right: Task Error
     place_window(fig4, 300, 300, 700, 380)    # Debug: CBF active pairs (floats on top)
-    place_window(fig5, 350, 350, 700, 380)    # Debug: Task authority (floats on top)
+    place_window(fig5, 350, 350, 700, 900)    # Debug: Task authority (combined + per-arm, floats on top)
     place_window(fig6, 400, 400, 900, 620)    # Debug: Joint Positions slider GUI
     place_window(fig7, 450, 450, 700, 600)    # Debug: Reference Governor
 
