@@ -126,7 +126,7 @@ ALIGN_ALPHA_LPF_COEFF = 0.1          # low-pass on alpha for C0-continuity of th
 # =============================================================================
 # 2. SAFETY + CONTROL HYPERPARAMETERS
 # =============================================================================
-ALPHA_SOFTMIN = 50.0            # sharpness of the SoftMin collision aggregation
+ALPHA_SOFTMIN = 60.0            # sharpness of the SoftMin collision aggregation (concentrates weight on the truly nearest pair; too low over-aggregates a cluttered scene into a phantom high lambda_CBF)
 GAMMA_CBF = 0.70               # CBF class-K gain
 D_SAFE_BASE = 0.015            # base safety distance for the collision barrier
 K_V_SAFE = 0.1                 # predictive velocity horizon (brake earlier at high speed)
