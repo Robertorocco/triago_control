@@ -75,7 +75,10 @@ class GraspStateMachine:
     # standoff), which pushes pos_error back up toward ~0.05; thresholds are kept
     # forgiving enough (ENTER > standoff) that being at/near the surface still
     # counts as "aligned" so the grasp stays committable.
-    POS_ERR_ENTER = 0.048
+    # ENTER shrinks the search GRASP_ALIGN must finish on its own: it drives to the
+    # same standoff but demands ALIGN_POS_TOL (0.0209), so whatever ENTER allows
+    # above that has to be closed autonomously inside ALIGN_TIMEOUT_S.
+    POS_ERR_ENTER = 0.040
     ANG_ERR_ENTER = 0.16
     POS_ERR_STAY = 0.072
     ANG_ERR_STAY = 0.224
@@ -101,7 +104,12 @@ class GraspStateMachine:
     #   Both are reachable within the relaxed gripper<->cylinder CBF (GRASP_CBF_MARGIN=-0.08).
     #   Selected by grasp type via _contact_depth_threshold().
     GRASP_CONTACT_DEPTH_TOP = -0.045
-    GRASP_CONTACT_DEPTH_SIDE = -0.05
+    # Tracks GRASP_INSERTION_TRAVEL_SIDE: the two are coupled, since a shallower
+    # insertion ends the advance further out and so reads a less-negative overlap.
+    # Shortening the side travel to 0.068 tops the reading out near -0.045, which
+    # the old -0.05 gate could not reach -- the approach then always timed out on
+    # a grasp that was visually seated. Re-tune BOTH together, never one alone.
+    GRASP_CONTACT_DEPTH_SIDE = -0.04
     APPROACH_ANG_TOL = 0.135         # rad -- approach-axis alignment at end of insertion
     APPROACH_POS_TOL = 0.009         # m -- position-reached fallback
     # Straight-line advance from the standoff along the approach axis (the DEPTH knob),
@@ -111,7 +119,9 @@ class GraspStateMachine:
     #   - SIDE: shallower than top -- deep enough for the fingers to bracket the wall
     #     without shoving the cylinder sideways before they close.
     GRASP_INSERTION_TRAVEL_TOP = 0.09
-    GRASP_INSERTION_TRAVEL_SIDE = 0.078
+    # Standoff is 0.05 from the cylinder surface, so travel > 0.05 ends PAST the
+    # surface (bracketing the wall) and travel < 0.05 stops short of it.
+    GRASP_INSERTION_TRAVEL_SIDE = 0.068
     GRASP_FORCE_THRESHOLD = 2.0
     GRASP_CLOSE_HOLD_S = 4.0
     GRASP_APPROACH_TIMEOUT_S = 15.0  # approach can be slow with the relaxed CBF
@@ -150,6 +160,7 @@ class GraspStateMachine:
         self.grip_force_stable_since = None
         self._lift_start_time = None  # reset for LIFT phase
         self._release_lift_start = None  # reset for RELEASE_LIFT (post-OPEN) phase
+        self._release_start_pos = None  # EE position at release retreat start (travel gate)
         self._abort_lift_start = None  # reset for ABORT_LIFT (failed grasp retreat) phase
         self._abort_lift_color = None  # color of the cylinder being retreated from
         self._abort_start_pos = None  # EE position at retreat start (travel-distance gate)
@@ -712,29 +723,45 @@ class GraspStateMachine:
     # ------------------------------------------------------------------
     # PHASE 6: RELEASE_LIFT (post-OPEN: move clear of the just-placed object)
     # ------------------------------------------------------------------
+    # Gated on ACTUAL EE travel, not elapsed time: a time-gated lift only
+    # COMMANDS a velocity, and whatever the CBF/joint limits/tracking lag absorb
+    # is silently lost -- the barrier then re-engages with the gripper still
+    # overlapping the object it just placed, which is what wedges the arm. Same
+    # failure and same remedy as ABORT_RETREAT below, whose numbers these mirror.
+    RELEASE_RETREAT_DISTANCE = 0.14   # m — guaranteed EE clearance before handing back
+    RELEASE_RETREAT_VELOCITY = 0.05   # m/s — decisive, matches the abort retreat
+    RELEASE_RETREAT_MAX_S = 7.0       # s — hard cap (covers 14 cm + tracking lag)
+
     def _release_lift(self, inp: TickInput) -> TickOutput:
         """Dual of the post-CLOSE LIFT, executed after the object is released.
 
-        Right after OPEN the gripper is sitting on top of the freshly-placed
-        cylinder, which is being re-introduced into the collision world with a
-        smooth barrier ramp. We drive a slow vertical lift to move clear of it
-        BEFORE the barrier fully engages, then hand control back to the user
-        (SHARED_AUTONOMY). Mirrors _lift but returns to SHARED_AUTONOMY instead
-        of HOLDING.
+        Right after OPEN the gripper still brackets the freshly-placed cylinder,
+        which is being re-introduced into the collision world on a smooth barrier
+        ramp. Back out along the reverse approach axis blended with world +Z (the
+        same direction ABORT_RETREAT uses) until the EE has physically travelled
+        RELEASE_RETREAT_DISTANCE, then hand control back to the user. A pure
+        vertical lift does NOT de-approach a SIDE placement -- the fingers stay
+        wrapped around the cylinder while rising, so the re-engaging barrier
+        catches them still overlapping.
         """
         self._transition("RELEASE_LIFT")
         log_lines = []
 
         if self._release_lift_start is None:
             self._release_lift_start = time.time()
+            self._release_start_pos = inp.current_T_EE[:3, 3].copy()
             log_lines.append(
-                ("info", f"[RELEASE-LIFT] Moving ~{self.LIFT_HEIGHT * 100:.0f} cm clear of the "
-                         f"placed object before the barrier engages."))
+                ("info", f"[RELEASE-LIFT] Backing ~{self.RELEASE_RETREAT_DISTANCE * 100:.0f} cm off "
+                         f"the placed object along the reverse approach axis before the "
+                         f"barrier engages."))
 
         elapsed = time.time() - self._release_lift_start
+        traveled = float(np.linalg.norm(inp.current_T_EE[:3, 3] - self._release_start_pos))
+        done = traveled >= self.RELEASE_RETREAT_DISTANCE
 
-        if elapsed < self.LIFT_DURATION:
-            target_twist = np.array([0.0, 0.0, self.LIFT_VELOCITY, 0.0, 0.0, 0.0])
+        if not done and elapsed < self.RELEASE_RETREAT_MAX_S:
+            v_lin = self.RELEASE_RETREAT_VELOCITY * self._retreat_direction(inp.current_T_EE)
+            target_twist = np.array([v_lin[0], v_lin[1], v_lin[2], 0.0, 0.0, 0.0])
             return TickOutput(
                 target_twist=target_twist,
                 new_state=self._state,
@@ -743,9 +770,17 @@ class GraspStateMachine:
                 log_lines=log_lines,
             )
 
+        if not done:
+            log_lines.append(
+                ("warn", f"[RELEASE-LIFT] Retreat capped at {self.RELEASE_RETREAT_MAX_S:.0f}s "
+                         f"(only {traveled * 100:.1f} cm of "
+                         f"{self.RELEASE_RETREAT_DISTANCE * 100:.0f} cm — arm likely joint-limited "
+                         f"or blocked). Handing back anyway; expect a tight barrier."))
+
         # Clear of the object -> return control to the user.
         self._transition("SHARED_AUTONOMY")
-        log_lines.append(("info", "[RELEASE-LIFT] Clear. Teleoperation resumed."))
+        log_lines.append(
+            ("info", f"[RELEASE-LIFT] Clear ({traveled * 100:.1f} cm). Teleoperation resumed."))
         return TickOutput(
             target_twist=np.zeros(6),
             new_state=self._state,
