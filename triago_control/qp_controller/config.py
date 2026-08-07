@@ -85,7 +85,7 @@ JOYSTICK_NEUTRAL_ORIENTATION_XYZW = [-0.015140674076974392, 0.8170770406723022,
 # Each deadband must stay above the centering spring's settle precision, or the residual
 # settle-oscillation of a released handle is read as spurious user input.
 JOYSTICK_DEADBAND_LIN = 0.03456      # m   (3.46 cm)
-JOYSTICK_DEADBAND_ANG = 0.23328      # rad (~13.37 deg)
+JOYSTICK_DEADBAND_ANG = 0.23328 * 0.7  # rad (~9.36 deg, 30% smaller: precise orientation twists were hard to impose)
 JOYSTICK_K_TRANS = 1.6               # (m/s) per m of handle linear displacement
 JOYSTICK_K_ROT = 1.5                 # (rad/s) per rad of handle angular displacement
 JOYSTICK_V_MAX_LIN = 0.10            # m/s   hard safety clamp on the commanded linear twist
