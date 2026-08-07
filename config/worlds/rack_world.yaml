@@ -1,39 +1,55 @@
 # =============================================================================
 # rack_world.yaml
 # -----------------------------------------------------------------------------
-# World 3 of the user-study set: same table + red/blue graspable cylinders +
-# platform as no_obstacle.yaml, PLUS a STORAGE RACK: an open shelving frame
-# that straddles the work table with a horizontal shelf ~0.50 m above the table
-# surface, directly over BOTH cylinders. Goal poses (cylinders, platform) are
-# UNCHANGED from no_obstacle -- this is purely an added structure.
+# World 3 of the user-study set: table + red/blue graspable cylinders +
+# STORAGE RACK (shelf ~0.40 m above the table, over both cylinders, forcing a
+# SIDE grasp) PLUS a CONVEYOR station on the robot's right (negative y).
 #
-# WHY THIS WORLD (the point of the task): the shelf forms a CEILING over the
-# cylinders, so the vertical top-grasp corridor is blocked -- the QP-CLF-CBF
-# will keep the arm from reaching over the top of a cylinder -- and the operator
-# is forced into a SIDE grasp. This makes the pick-and-place task materially
-# harder than no_obstacle / shield_world.
+# TASK: both batteries must end on the conveyor's Final station. The RIGHT
+# arm picks the red battery straight off the table and carries it to the
+# conveyor. The BLUE battery sits on the left, out of the conveyor's reach for
+# the left arm, so the LEFT arm sets it on the Handover disk (table centreline)
+# and the RIGHT arm relays it to the conveyor. No divider: the handover is
+# forced by reach, not an obstacle. The rack shelf still blocks
+# the top-grasp corridor over the table, so table picks/places stay SIDE
+# approaches; the conveyor is outside the shelf footprint, so the Final
+# placement can be made from the top.
 #
-# GEOMETRY (a frame straddling the table, all axis-aligned boxes):
-#   work table:   top at z = 0.70, x in [0.70,1.30], y in [-0.25,0.25]
+# GEOMETRY (all axis-aligned boxes unless noted):
+#   work table:   top at z = 0.70   x in [0.70,1.30]  y in [-0.25,0.25]
 #   cylinders:    x = 0.80, y = +-0.20, z_center = 0.775 (top ~0.85)
 #   rack shelf:   center [1.00, 0.0, 1.12], size [0.66,0.94,0.04]
-#                 -> underside at z = 1.10 (= 0.40 m above the table top),
-#                    x in [0.67,1.33], y in [-0.47,0.47] -> covers both cylinders.
-#   2 REAR legs:  size [0.05,0.05,1.10], centers z = 0.55 (floor z=0 -> shelf z=1.10)
-#                 at the back corners x = 1.30, y in {-0.42,+0.42}.
-#   1 FRONT-CENTER leg: size [0.05,0.05,0.40], center [0.725, 0.0, 0.90] -> stands
-#                 ON THE TABLE (base at the table top z=0.70) at the front edge,
-#                 centered between the two cylinders (y=0), so the table carries it
-#                 and it props the front of the shelf. Footprint fully on the table
-#                 (x in [0.70,0.75]), well clear of the cylinder approach lines at
-#                 y=+-0.20. (The old floor-standing front CORNER legs were removed:
-#                 near the robot, they collided with it at spawn.)
+#                 -> underside at z = 1.10, x in [0.67,1.33], y in [-0.47,0.47]
+#   2 rack legs (rear):   size [0.05,0.05,1.10], z-center 0.55, x=1.30, y=+-0.42
+#   1 rack leg (front-center): size [0.05,0.05,0.40], center [0.725,0.0,0.90],
+#                 stands ON the table (base at table top z=0.70)
+#   conveyor:     single CBF envelope, box center [1.10,-0.90,0.35] (net of
+#                 two shifts from the original [1.35,-0.85,0.35]: -0.30 in x
+#                 then +0.05 in x / -0.05 in y),
+#                 size [1.30,0.48,0.70] -> top z = 0.70 (== table top),
+#                 x in [0.45,1.75], y in [-1.14,-0.66]. Belt (visual-only, see
+#                 the .world) is narrower, y in [-1.08,-0.72], centered inside.
+#                 Every decorative part (drums/frame/rollers/legs/motor/e-stop)
+#                 is visual-only in the .world and intentionally absent here --
+#                 CBF aggregation is already the heaviest phase of the 150 Hz
+#                 loop, so only this one collision box is paired against the
+#                 arm capsules (see shield_world.yaml's header for precedent).
 #
-# The legs + shelf are ordinary collision boxes (role: "obstacle"), so
-# CollisionManager (CBF), VisualizationEngine (RViz + Meshcat) and GoalSet
-# consume them generically -- NO code changes were needed to add this world,
-# exactly like shield_world (any role other than "wall"/"table" falls into the
-# same generic collision + RViz/Meshcat marker path the table/cylinders use).
+# TWO functional placement goals (multi-platform, like handover_world):
+#   Handover: [1.03,-0.01,0.701] r=0.09 -- on the table centreline, disk
+#             spanning x[0.94,1.12] y[-0.10,+0.08]: near enough the front table
+#             edge that BOTH arms reach it without extending. Clears the
+#             front-center rack leg footprint x[0.70,0.75] y[-0.03,0.03] by
+#             0.19 m, the red cylinder [0.80,-0.20] by 0.19 m, the blue one by
+#             0.20 m, and stays fully on the table (front edge x=0.70).
+#   Final:    [0.650,-0.90,0.701] r=0.15 -- on the conveyor belt. Disk spans
+#             y in [-1.05,-0.75], inside the belt's [-1.08,-0.72] with a 0.03 m
+#             margin each side. radius/thickness/place_margin copied verbatim
+#             from this world's old single `platform:` entry.
+#
+# The rack/conveyor obstacles are ordinary collision boxes (role: "obstacle"),
+# so CollisionManager (CBF), VisualizationEngine (RViz + Meshcat) and GoalSet
+# consume them generically -- no code changes needed, exactly like shield_world.
 #
 # Matches the Gazebo world launched via:
 #   ros2 launch triago_gazebo triago_gazebo.launch.py ... world_name:=rack_world
@@ -74,8 +90,8 @@ static_obstacles:
     collision: true
 
   # --- Storage rack: horizontal shelf (ceiling over the cylinders) ---------- #
-  # Underside at z = 1.20 (0.50 m above the table top), spanning over BOTH
-  # cylinders -> blocks the top-grasp approach, forcing a side grasp.
+  # Underside at z = 1.10, spanning over BOTH cylinders -> blocks the
+  # top-grasp approach, forcing a side grasp.
   - name: "rack_shelf"
     role: "obstacle"
     shape: "box"
@@ -120,6 +136,16 @@ static_obstacles:
     color: [0.40, 0.40, 0.42, 1.0]
     collision: true
 
+  # --- Conveyor: single CBF envelope; every decorative drum/frame/roller/leg
+  # lives only in the .world as visual-only geometry (see the header above). --
+  - name: "conveyor"
+    role: "obstacle"
+    shape: "box"
+    pose: [1.10, -0.90, 0.35, 0.0, 0.0, 0.0]
+    size: [1.30, 0.48, 0.70]
+    color: [0.25, 0.25, 0.27, 1.0]
+    collision: true
+
   # Virtual wall: OFF by default (mirrors the old WALL_COLLIDER=False flag).
   - name: "virtual_wall"
     role: "wall"
@@ -133,8 +159,20 @@ grasp_roles:
   red: "red_cylinder"
   blue: "blue_cylinder"
 
-platform:
-  pose: [1.000, 0.0, 0.701]
-  radius: 0.15
-  thickness: 0.002
-  place_margin: 0.03
+# TWO functional placement goals (multi-platform, see handover_world.yaml for
+# the pattern). Both are demandable by either arm whenever it holds a
+# cylinder; the belief/guidance picks the one the operator steers toward.
+#   - Handover: on the table centreline. The LEFT hand sets the blue cylinder
+#               here for the RIGHT hand to relay to the conveyor.
+#   - Final:    on the conveyor belt. Where both batteries ultimately land.
+platforms:
+  - name: "Handover"
+    pose: [1.030, -0.01, 0.701]
+    radius: 0.09
+    thickness: 0.002
+    place_margin: 0.03
+  - name: "Final"
+    pose: [0.650, -0.90, 0.701]
+    radius: 0.15
+    thickness: 0.002
+    place_margin: 0.03
