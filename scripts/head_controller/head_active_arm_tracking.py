@@ -76,9 +76,31 @@ the hand framed and stand-off holds the distance. It is subordinate to tracking
 and resolves in the null space of centering+stand-off. Toggle via ENABLE_
 APPROACH_ALIGN / the `approach_align` ROS param.
 
+CHAIN LEAN (soft redundancy resolution toward the active side)
+--------------------------------------------------------------
+Joints 5-7 form a spherical wrist that owns the camera orientation outright, and
+JOINT_WEIGHTS prices it ~50x below the shoulder, so centering alone is served by
+the wrist and the proximal joints never move: after a right->left switch the
+chain stays leaning right and only the camera swivels, framing the left hand at a
+grazing, self-occluded angle. Nothing else in the cost depends on the active side
+(the posture spring targets a fixed mid-range pose), so the lean is stated
+explicitly as a lateral target on the head ELBOW:
+
+    y_elbow -> LEAN_FRACTION * y_hand   (in the FK root frame)
+
+The elbow is chosen because joints 5-7 are downstream of it, making its Jacobian
+columns there structurally zero -- the wrist cannot absorb the task, only the
+proximal joints can serve it. The single Jacobian row is inverted (damped) into a
+joint velocity and added to the posture channel, which g pre-multiplies by
+JOINT_WEIGHTS, so the cost reads 0.5*||dq - dq_target||^2_W and the proximal
+weights cancel instead of throttling the gain. Toggle via ENABLE_CHAIN_LEAN / the
+`chain_lean` ROS param.
+
 RUN:
     ros2 run triago_control head_active_arm_tracking.py
     ros2 run triago_control head_active_arm_tracking.py --ros-args -p plot:=false
+    ros2 run triago_control head_active_arm_tracking.py --ros-args -p debug:=true
+    ros2 run triago_control head_active_arm_tracking.py --ros-args -p chain_lean:=false
 """
 
 import os
@@ -187,6 +209,31 @@ APPROACH_V_MAX = 0.3            # [m/s] clamp on the requested orbit velocity
 APPROACH_GATE_ANGLE_DEG = 25.0  # fades out as the hand leaves the optical axis...
 APPROACH_GATE_FLOOR = 0.0       # ...to zero (never fights FOV acquisition / PBVS)
 
+# --- Soft chain lean toward the active arm (redundancy resolution) --------
+# Preference (NOT a hard task): the head arm's PROXIMAL joints should carry the
+# whole chain to whichever side the active hand is on. Without it, joints 5-7 are
+# a spherical wrist that owns the camera orientation outright and costs 1.0
+# against 50/40/30 for the shoulder, so the QP satisfies centering with the wrist
+# alone: after a right->left switch the chain stays leaning right and only the
+# camera swivels, giving a grazing, self-occluded view of the left hand. Nothing
+# else in the cost is a function of the active side (the posture spring targets a
+# fixed mid-range pose), so the lean has to be stated explicitly.
+# Encoded as a lateral target on an INTERMEDIATE link: joints 5-7 are downstream
+# of LEAN_FRAME, so its Jacobian columns there are structurally zero and the wrist
+# CANNOT absorb the task - only the proximal joints can serve it. That is the
+# whole point of choosing an elbow frame over the camera frame.
+# Folded into the null-space posture velocity, which g pre-multiplies by
+# JOINT_WEIGHTS: the cost becomes 0.5*||dq - dq_target||^2_W, so the heavy
+# proximal weights cancel and K_LEAN is a true 1/s rather than a gain silently
+# divided by the weight of the joint it acts on (the fate of the roll/approach
+# terms above, which are not weight-compensated).
+ENABLE_CHAIN_LEAN = True
+LEAN_FRAME = 'arm_head_4_link'  # head "elbow": placed by joints 1-3, immune to the wrist
+LEAN_FRACTION = 0.6      # elbow lateral target = this fraction of the active hand's y
+K_LEAN = 1.5             # lean servo gain [1/s]
+LEAN_V_MAX = 0.15        # [m/s] clamp on the requested lateral elbow velocity
+LEAN_DAMPING = 1e-3      # damped-pinv regularizer for the single-row lean Jacobian
+
 # Control loop rate
 CONTROL_HZ = 50.0
 
@@ -202,6 +249,7 @@ class HeadActiveArmTracker(Node):
         self.declare_parameter('plot', True)
         self.declare_parameter('target_distance', TARGET_DISTANCE)
         self.declare_parameter('approach_align', ENABLE_APPROACH_ALIGN)
+        self.declare_parameter('chain_lean', ENABLE_CHAIN_LEAN)
         # CAMERA_FRAME (module default) is the SIM URDF's optical-frame name --
         # real hardware names it differently (main_head.py's real diagnostics
         # show 'head_arm_rgbd_depth_optical_frame', not 'gripper_head_camera_
@@ -209,10 +257,16 @@ class HeadActiveArmTracker(Node):
         # out-of-range index -> IndexError at the very first control tick.
         # Same override pattern as main_head.py's depth_center_frame param.
         self.declare_parameter('camera_frame', CAMERA_FRAME)
-        self.enable_plot = self.get_parameter('plot').value
+        # Per-tick tracking dump, off by default: at 1 Hz it drowns every other
+        # message in the console for the whole session.
+        self.declare_parameter('debug', False)
+        self.enable_plot = bool(self.get_parameter('plot').value)
+        self.debug = bool(self.get_parameter('debug').value)
         self.target_distance = float(self.get_parameter('target_distance').value)
         self.approach_align = bool(self.get_parameter('approach_align').value)
+        self.chain_lean = bool(self.get_parameter('chain_lean').value)
         self.camera_frame = self.get_parameter('camera_frame').value
+        self.fid_lean = None               # resolved in setup_pinocchio()
 
         # --- State ---
         self.joint_name_seen = {}
@@ -350,6 +404,17 @@ class HeadActiveArmTracker(Node):
         self.data = self.model.createData()
         self.q_real = pin.neutral(self.model)
         self._ensure_camera_frame()
+
+        # Lean frame is an ordinary URDF link, so a miss means a renamed chain --
+        # degrade to wrist-only tracking rather than crashing the control loop.
+        if self.chain_lean:
+            if self.model.existFrame(LEAN_FRAME):
+                self.fid_lean = self.model.getFrameId(LEAN_FRAME)
+            else:
+                self.get_logger().warn(
+                    f"Chain-lean frame '{LEAN_FRAME}' not in the model; "
+                    f"disabling the lean preference.")
+                self.chain_lean = False
 
         # Soft limits via official URDF parser
         self.soft_limits = {}
@@ -578,7 +643,25 @@ class HeadActiveArmTracker(Node):
             if (q_max - q_min) > 0.01 and abs(q_max) < 100.0 and abs(q_min) < 100.0:
                 q_center = 0.5 * (q_max + q_min)
                 dq_posture[i] = -K_POSTURE * (q_i - q_center)
-        g[:7] = H[:7, :7] @ dq_posture
+
+        # Chain lean: drive the elbow's WORLD-y toward the active hand's side, so
+        # the proximal joints follow the arm switch instead of leaving the chain
+        # parked where the previous arm left it. LOCAL_WORLD_ALIGNED makes row 1 a
+        # world-y velocity; the damped pseudo-inverse of that single row turns the
+        # scalar task into a joint velocity, which rides the posture channel below
+        # and so escapes the proximal weight penalty (see LEAN_* above).
+        dq_lean = np.zeros(self.nq_head)
+        lean_err = 0.0
+        if self.chain_lean:
+            p_lean_y = float(self.data.oMf[self.fid_lean].translation[1])
+            lean_err = LEAN_FRACTION * float(T_hand.translation[1]) - p_lean_y
+            v_lean = float(np.clip(K_LEAN * lean_err, -LEAN_V_MAX, LEAN_V_MAX))
+            J_lean = pin.computeFrameJacobian(
+                self.model, self.data, self.q_real, self.fid_lean,
+                pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)[1, self.head_v_idx]
+            dq_lean = J_lean * v_lean / (float(J_lean @ J_lean) + LEAN_DAMPING)
+
+        g[:7] = H[:7, :7] @ (dq_posture + dq_lean)
 
         # Soft roll-alignment task: add (W/2) * (wz_cam - wz_align)^2 to the cost,
         # where wz_cam = J_cam[5,:] @ dq is the camera roll rate about the optical
@@ -686,21 +769,22 @@ class HeadActiveArmTracker(Node):
                                    throttle_duration_sec=0.5)
             dq_opt = np.zeros(7)
 
-        # Debug: the tracked hand pose + camera pose (both in base_footprint,
-        # so they're directly sanity-checkable against known robot geometry),
-        # the hand as seen FROM the camera (P_cam/dist -- if this is wrong,
-        # T_hand or T_cam is being mis-evaluated), and the actual solved
-        # command magnitude (dq_norm==0 every tick means the QP genuinely
-        # isn't commanding motion, vs. a nonzero dq that the robot just isn't
-        # executing -- two very different problems).
-        self.get_logger().info(
-            f"[DEBUG] active_arm={self.active_arm} arm_frame={arm_frame} "
-            f"T_hand(base)={np.round(T_hand.translation, 3)} "
-            f"T_cam(base)={np.round(T_cam.translation, 3)} "
-            f"P_cam(optical)={np.round(P_cam, 3)} dist={dist:.2f}m "
-            f"ang_err={ang_err_deg:.1f}deg in_fov={in_fov} "
-            f"dq_norm={float(np.linalg.norm(dq_opt)):.4f}",
-            throttle_duration_sec=1.0)
+        # Opt-in tracking dump (-p debug:=true). Hand + camera pose are in
+        # base_footprint, so both are sanity-checkable against known robot
+        # geometry; P_cam/dist is the hand as seen FROM the camera (wrong here
+        # means T_hand or T_cam is mis-evaluated); dq_norm==0 every tick means
+        # the QP genuinely isn't commanding motion, as opposed to a nonzero dq
+        # the robot just isn't executing -- two very different problems.
+        if self.debug:
+            self.get_logger().info(
+                f"[DEBUG] active_arm={self.active_arm} arm_frame={arm_frame} "
+                f"T_hand(base)={np.round(T_hand.translation, 3)} "
+                f"T_cam(base)={np.round(T_cam.translation, 3)} "
+                f"P_cam(optical)={np.round(P_cam, 3)} dist={dist:.2f}m "
+                f"ang_err={ang_err_deg:.1f}deg in_fov={in_fov} "
+                f"lean_err={lean_err:+.3f}m dq_prox={np.round(dq_opt[:3], 3)} "
+                f"dq_norm={float(np.linalg.norm(dq_opt)):.4f}",
+                throttle_duration_sec=1.0)
 
         # 8. Publish command + telemetry
         self.pub_head_cmd.publish(Float64MultiArray(data=[float(x) for x in dq_opt]))
