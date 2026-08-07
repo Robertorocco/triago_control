@@ -16,6 +16,13 @@ import numpy as np
 class BeliefEstimator:
     """Stateful EMA intent inference over a fixed set of goal keys (flat simplex)."""
 
+    # Weight of the proximity term against the twist term in the per-goal cost.
+    # Only the ratio w/(1-w) matters: `raw` is min/spread-normalised right after
+    # the blend. Raising it does NOT separate two grasp types of the SAME cylinder
+    # (Top vs Side sit at similar cost, and the spread is set by the far goals),
+    # so keep it as the small degeneracy-breaker it was designed to be.
+    POS_COST_WEIGHT = 0.10
+
     def __init__(self, target_keys, W, beta=0.04, ema_alpha=0.995):
         """Initializes uniform beliefs and stores the inference hyperparameters.
 
@@ -96,6 +103,24 @@ class BeliefEstimator:
             key = max(active, key=active.get)
             return key, active[key]
 
+    def get_object_belief(self, goal_key):
+        """Belief mass on the OBJECT behind `goal_key`, i.e. summed over its grasp types.
+
+        'Blue_Top' and 'Blue_Side' are two ways to take the SAME cylinder, so they
+        split the posterior between them and neither can reach a high single-goal
+        threshold while both stay plausible -- the split is a statement about grasp
+        STYLE, not about which object the operator wants. Summing over the shared
+        prefix answers the question a grasp commit actually depends on ("is the
+        target certain?"); which style executes is still the argmax key, and the
+        pose gates verify the operator is really at that pose.
+        """
+        if not goal_key:
+            return 0.0
+        obj = goal_key.split('_')[0]
+        with self._lock:
+            return float(sum(v for k, v in self.beliefs.items()
+                             if k not in self._excluded and k.split('_')[0] == obj))
+
     def update(self, v_h_curr, pi_stars, gain=1.0, pos_costs=None):
         """Performs one EMA log-belief update given the latest observed human twist.
 
@@ -109,9 +134,8 @@ class BeliefEstimator:
                   When the user is actively moving, full responsiveness.
             pos_costs: optional dict {goal_key: float} giving a small proximity
                   bonus (lower = closer to that goal). Used to break the symmetry
-                  when twist-costs are degenerate (aligned policies). If provided,
-                  pos_costs are blended in at 10% weight relative to the main twist
-                  cost so that a stationary user near a goal sees it slowly climb.
+                  when twist-costs are degenerate (aligned policies). Blended in at
+                  POS_COST_WEIGHT so a stationary user near a goal sees it climb.
         """
         active = [k for k in self.target_keys if k not in self._excluded]
         if not active:
@@ -128,11 +152,14 @@ class BeliefEstimator:
         raw = {k: float((v_h_curr - pi_stars[k]) @ self.W @ (v_h_curr - pi_stars[k]))
                for k in active}
 
-        # Blend in position-distance cost (10% weight) to break degeneracy.
+        # Blend in position-distance cost to break degeneracy. Only the RATIO
+        # w/(1-w) matters downstream, since raw is min/spread-normalised right
+        # after this -- proximity's influence scales with that ratio, not w itself.
+        w = self.POS_COST_WEIGHT
         if pos_costs is not None:
             for k in active:
                 if k in pos_costs:
-                    raw[k] = 0.90 * raw[k] + 0.10 * pos_costs[k]
+                    raw[k] = (1.0 - w) * raw[k] + w * pos_costs[k]
 
         min_c = min(raw.values())
         max_c = max(raw.values())

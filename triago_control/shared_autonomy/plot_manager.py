@@ -18,7 +18,8 @@ class PlotManager:
     N_COMP = 6
     HISTORY_LEN = 150  # 150 x 0.1s = 15s of history at 10 Hz
 
-    def __init__(self, target_keys, plot_lock=None, logger=None, freq_window_s=10.0):
+    def __init__(self, target_keys, plot_lock=None, logger=None, freq_window_s=10.0,
+                 enabled=True):
         """Builds both figures up front; all artists that get updated every tick
         are created once here and mutated in place afterwards.
 
@@ -29,11 +30,15 @@ class PlotManager:
             logger: optional object exposing .info(msg) for frequency reporting
                     (e.g. a ROS node's get_logger()). If None, frequency is not logged.
             freq_window_s: reporting window (s) for the plotting-loop frequency monitor.
+            enabled: False builds no figures and turns every public method into a
+                     no-op, so callers need no guards of their own -- lets a headless
+                     or study session drop the matplotlib windows entirely.
         """
         self.target_keys = list(target_keys)
         self.plot_lock = plot_lock if plot_lock is not None else threading.Lock()
         self.logger = logger
         self.freq_window_s = freq_window_s
+        self.enabled = bool(enabled)
 
         self._plot_ticks = 0
         self._plot_last_print = time.time()
@@ -46,6 +51,9 @@ class PlotManager:
         self._twist_snapshot = None  # dict: {'v_h', 'pi_star', 'goal_key'}
         self._latest_beliefs = {k: 1.0 / len(self.target_keys) for k in self.target_keys}
         self._excluded_goals = set()  # goals disabled from estimation -> drawn lighter
+
+        if not self.enabled:
+            return   # every public method below returns early; no figures exist
 
         plt.ion()
         self._build_belief_figure()
@@ -197,6 +205,8 @@ class PlotManager:
         """Thread-safe write of the latest belief distribution (+ excluded set).
         Updates ONLY the active arm's belief snapshot; the inactive arm stays frozen.
         """
+        if not self.enabled:
+            return
         with self.plot_lock:
             self._latest_beliefs = dict(beliefs)
             self._excluded_goals = set(excluded) if excluded else set()
@@ -211,6 +221,8 @@ class PlotManager:
 
     def push_arm_switch(self, new_arm):
         """Called when the active arm changes. Freezes the now-inactive arm's beliefs."""
+        if not self.enabled:
+            return
         with self.plot_lock:
             self._active_arm_plot = new_arm
 
@@ -218,6 +230,8 @@ class PlotManager:
         """Thread-safe write of the latest (v_h, pi*, goal_key) sample for the twist plot.
         Also tracks the inference frequency (call rate of this method = control Hz).
         """
+        if not self.enabled:
+            return
         now = time.time()
         if self._freq_last_time is not None:
             dt = now - self._freq_last_time
@@ -242,6 +256,8 @@ class PlotManager:
         Must be called from the main thread (matplotlib requirement); only the
         data hand-off is locked, all heavy drawing happens outside the lock.
         """
+        if not self.enabled:
+            return
         self._plot_ticks += 1
         current_time = time.time()
         if self.logger is not None and (current_time - self._plot_last_print) >= self.freq_window_s:

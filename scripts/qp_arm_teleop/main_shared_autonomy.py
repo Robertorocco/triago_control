@@ -265,13 +265,22 @@ class SharedControlNode(Node):
         # --- Plot Manager (delegated to PlotManager) ---
         # Imported lazily here (after plt.ion() is implicitly handled inside
         # PlotManager) to keep the import block above focused on ROS/math deps.
+        # `plot` (default True) suspends the live belief/twist windows -- same
+        # parameter name head_active_arm_tracking.py uses. Disabled, PlotManager
+        # builds no figures and no-ops, so no call site here needs a guard.
+        self.declare_parameter('plot', True)
+        self.enable_plot = bool(self.get_parameter('plot').value)
         from triago_control.shared_autonomy.plot_manager import PlotManager
         self.plot_manager = PlotManager(
             target_keys=self.target_keys,
             plot_lock=self.plot_lock,
             logger=self.get_logger(),
             freq_window_s=self.freq_window_s,
+            enabled=self.enable_plot,
         )
+        if not self.enable_plot:
+            self.get_logger().info(
+                "\033[93m[Plot] Live shared-autonomy plots DISABLED (-p plot:=false).\033[0m")
 
         # NOTE: this node DRIVES the arm switch itself (double-click on the left
         # button → _switch_active_arm) and PUBLISHES /shared_autonomy/active_arm
@@ -496,6 +505,12 @@ class SharedControlNode(Node):
         self.tf_broadcaster = TransformBroadcaster(self)
 
         # --- Unified Inference State Publishers ---
+        # Grasp-gate readout: the four conditions that must ALL hold to enter
+        # PRE_GRASP. pos_error/ang_error are otherwise invisible from outside the
+        # node, so a refused trigger gives no clue which gate blocked it.
+        self.pub_grasp_gate = self.create_publisher(String, '/shared_autonomy/grasp_gate', 10)
+        self._grasp_gate_last_pub = 0.0
+
         self.pub_goal_names = self.create_publisher(String, '/shared_autonomy/goal_names', 10)
         self.pub_goal_probs = self.create_publisher(Float64MultiArray, '/shared_autonomy/goal_probabilities', 10)
         self.pub_ee_policy = self.create_publisher(Float64MultiArray, '/shared_autonomy/ee_policy', 10)
@@ -690,11 +705,13 @@ class SharedControlNode(Node):
                 f"[WORLD] {self.grasped_color} cylinder placed at "
                 f"[{fallen[0]:.3f}, {fallen[1]:.3f}, {fallen[2]:.3f}] (perfect-fall model).")
 
-        # Reset the grasp state machine into the post-OPEN lift phase: it will
-        # drive a short vertical lift to clear the just-placed object, then return
-        # to SHARED_AUTONOMY on its own (mirrors the post-CLOSE LIFT -> HOLDING).
+        # Reset the grasp state machine into the post-OPEN retreat phase: it backs
+        # the gripper off the just-placed object by a GUARANTEED travelled distance,
+        # then returns to SHARED_AUTONOMY on its own (mirrors post-CLOSE LIFT ->
+        # HOLDING). Both fields must be cleared: they are what re-arm the retreat.
         self.grasp_sm._transition("RELEASE_LIFT")
         self.grasp_sm._release_lift_start = None
+        self.grasp_sm._release_start_pos = None
         self.grasp_sm.grip_position = 0.7
         self.grasp_sm.grip_contact_detected = False
         self.grasp_sm.grip_force_stable_since = None
@@ -988,6 +1005,40 @@ class SharedControlNode(Node):
         self._ee_twist = a * raw + (1.0 - a) * self._ee_twist
         self._prev_T_EE = T.copy()
 
+    def _publish_grasp_gate(self, pos_error, ang_error, b_max):
+        """Publishes why PRE_GRASP is (not) enterable: every gate, its live value and limit.
+
+        Thresholds are read off the live state machine, and which pair applies flips
+        with hysteresis (ENTER while outside PRE_GRASP, the looser STAY once inside),
+        so the printed limit is always the one actually being tested this tick.
+        """
+        now = time.time()
+        if now - self._grasp_gate_last_pub < 0.2:   # 5 Hz: readable under `ros2 topic echo`
+            return
+        self._grasp_gate_last_pub = now
+
+        sm = self.grasp_sm
+        in_pre = sm.state == "PRE_GRASP"
+        pos_lim = sm.POS_ERR_STAY if in_pre else sm.POS_ERR_ENTER
+        ang_lim = sm.ANG_ERR_STAY if in_pre else sm.ANG_ERR_ENTER
+        bel_lim = sm.BELIEF_STAY if in_pre else sm.BELIEF_ENTER
+
+        parts = (self.active_goal_key or '').split('_')
+        graspable = len(parts) == 2 and parts[1] in ('Top', 'Side')
+        gates = [
+            ('graspable', 1.0 if graspable else 0.0, 1.0, graspable),
+            ('belief', b_max, bel_lim, b_max > bel_lim),
+            ('pos_err', pos_error, pos_lim, pos_error < pos_lim),
+            ('ang_err', ang_error, ang_lim, ang_error < ang_lim),
+        ]
+        blockers = [n for n, _, _, ok in gates if not ok]
+        body = "  ".join(
+            f"{n}={v:.3f}{'<' if n.startswith(('pos', 'ang')) else '>'}{lim:.3f}"
+            f"[{'OK ' if ok else 'FAIL'}]" for n, v, lim, ok in gates)
+        self.pub_grasp_gate.publish(String(data=(
+            f"state={sm.state} goal={self.active_goal_key} arm={self.active_arm} | {body} | "
+            f"{'TRIGGERABLE' if not blockers else 'BLOCKED_BY=' + ','.join(blockers)}")))
+
     @staticmethod
     def _cylinders_from_world_scene(world_scene):
         """Builds GoalSet's `cylinders` dict from a loaded WorldScene .
@@ -1243,8 +1294,15 @@ class SharedControlNode(Node):
                 with self._test_goal_lock:
                     self.active_goal_key = self.test_goal_key
                 b_max = 1.0
+                b_object = 1.0
             else:
                 self.active_goal_key, b_max = self.belief_estimator.get_active_goal()
+                # Grasp-commit confidence is about the OBJECT, not the grasp style:
+                # Blue_Top/Blue_Side split the posterior between two ways to take the
+                # same cylinder, so neither reaches BELIEF_ENTER while both stay
+                # plausible. b_max still drives guidance/telemetry (it is about the
+                # specific pose being guided to); only the FSM gate uses the sum.
+                b_object = self.belief_estimator.get_object_belief(self.active_goal_key)
 
             if self.POLICY_BELIEF_TEST:
                 pi_max = ee_policies[self.active_goal_key]
@@ -1287,6 +1345,9 @@ class SharedControlNode(Node):
             else:
                 ang_error = np.linalg.norm(pin.log3(R_rel))
 
+        # b_object, not b_max: the readout must show the number the FSM gate tests.
+        self._publish_grasp_gate(pos_error, ang_error, b_object)
+
         # Capture and consume the trigger event
         trigger_pulled = self.trigger_cmd
         self.trigger_cmd = False
@@ -1305,7 +1366,7 @@ class SharedControlNode(Node):
             pos_error=pos_error,
             ang_error=ang_error,
             pi_max=pi_max,
-            b_max=b_max,
+            b_max=b_object,
             prediction_enabled=self.PREDICTION,
             active_goal_key=self.active_goal_key,
             active_arm=self.active_arm,
@@ -2421,8 +2482,13 @@ def main(args=None):
     try:
         while rclpy.ok():
             node.plot_manager.update()
-            # plt.pause inherently flushes GUI events and acts as our 10Hz sleep timer
-            plt.pause(0.1)
+            # plt.pause inherently flushes GUI events and acts as our 10Hz sleep timer;
+            # with plotting off there is no GUI to flush, so just sleep (plt.pause on a
+            # figureless session still needs a live backend).
+            if node.enable_plot:
+                plt.pause(0.1)
+            else:
+                time.sleep(0.1)
     except KeyboardInterrupt:
         pass
     finally:
