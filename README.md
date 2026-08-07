@@ -90,10 +90,13 @@ qp_head_visual_servo ──→  own Pinocchio instance (FK + Jacobians)
 ## Build
 
 ```bash
-cd ~/ros2-ws
-colcon build --packages-select triago_control
+cd ~/exchange/ros2-ws
+colcon build --symlink-install
+source /opt/ros/${ROS_DISTRO}/setup.bash
 source install/setup.bash
 ```
+
+`--symlink-install` is load-bearing here: `config/`, `launch/` and the Python nodes are symlinked into `install/`, so plain edits take effect without a rebuild (a new file still needs one). Don't mix build modes in the same `install/` tree — switching requires `rm -rf build/<pkg> install/<pkg>` first.
 
 ## Gazebo Grasp Plugin (IFRA_LinkAttacher)
 
@@ -101,9 +104,9 @@ Required for pick-and-place in simulation. Creates a fixed joint between gripper
 
 ```bash
 # Install (separate repo, not part of triago_control)
-cd ~/ros2-ws/src
+cd ~/exchange/ros2-ws/src
 git clone https://github.com/IFRA-Cranfield/IFRA_LinkAttacher.git
-cd ~/ros2-ws
+cd ~/exchange/ros2-ws
 colcon build --packages-up-to ros2_linkattacher
 source install/setup.bash
 ```
@@ -115,7 +118,7 @@ Add to your Gazebo world file:
 
 Before launching Gazebo:
 ```bash
-export GAZEBO_PLUGIN_PATH=$GAZEBO_PLUGIN_PATH:~/ros2-ws/install/ros2_linkattacher/lib
+export GAZEBO_PLUGIN_PATH=$GAZEBO_PLUGIN_PATH:~/exchange/ros2-ws/install/ros2_linkattacher/lib
 ```
 
 ## Run
@@ -127,26 +130,33 @@ Each command runs in its own terminal (workspace sourced). Robot/control side fi
 **Robot / control side:**
 
 ```bash
-# 1. World: TRIAGo + table + cylinders + yellow placement zone ("no_obstacle")
-ros2 launch triago_gazebo triago_gazebo.launch.py \
-    end_effector_right:=pal-pro-gripper end_effector_left:=pal-pro-gripper \
-    world_name:=no_obstacle
+cd ~/exchange/ros2-ws
+colcon build --symlink-install
+source /opt/ros/${ROS_DISTRO}/setup.bash
+source install/setup.bash
+export GAZEBO_MODEL_PATH=$GAZEBO_MODEL_PATH:~/exchange/ros2-ws/src/pal-packages/pal_gazebo_worlds
 
-# 2. Load default controllers (joint-space velocity controllers, etc.)
-ros2 launch triago_controller_configuration tsid_default_controllers.launch.py use_sim_time:=True
+# 1. Gazebo world + robot spawn + TSID controllers + mobile-base teleop + two RViz
+#    stations (operator station shows the head camera, overview does not).
+#    Replaces the old 4-terminal Gazebo/controllers/RViz sequence.
+ros2 launch triago_control simulation_bringup.launch.py world:=rack_world
 
-# 3. QP CLF-CBF safety controller
-#    (world_name defaults to "no_obstacle", matching step 1 above -- override
-#    both this AND step 4 with -p world_name:=<name> together if you launch a
-#    different Gazebo world; see triago_control/qp_controller/world_loader.py)
-ros2 run triago_control main_qp_controller.py
+# 2. QP CLF-CBF safety controller
+#    world_name must match step 1 -- override BOTH this AND step 3 together if
+#    you launch a different world; see triago_control/qp_controller/world_loader.py
+ros2 run triago_control main_qp_controller.py --ros-args -p world_name:=rack_world
 
-# 4. Shared autonomy + belief evaluation
-ros2 run triago_control main_shared_autonomy.py
+# 3. Shared autonomy + belief evaluation (-p plot:=false suspends its live dashboard)
+ros2 run triago_control main_shared_autonomy.py --ros-args -p world_name:=rack_world -p plot:=false
 
-# 5. RViz visualization
-ros2 launch triago_control visualize.launch.py
+# 4. Head camera tracks the active teleop arm (-p plot:=false suspends its dashboard)
+ros2 run triago_control head_active_arm_tracking.py --ros-args -p plot:=false
+
+# 5. Trial recorder GUI (bag record + per-trial metadata; auto-analyzes on SAVE)
+ros2 run triago_control study_recorder.py
 ```
+
+`world:=rack_world` is `simulation_bringup.launch.py`'s default; pass `world:=no_obstacle` (or any other `config/worlds/*.yaml` name) to launch a different scenario — see [Configuration](#configuration). Launch-file args: `end_effector_right`/`end_effector_left` (default `pal-pro-gripper`), `base_controller`, `rviz_stations` (both default `true`).
 
 **Teleoperation side (haption_teleoperation):**
 
