@@ -16,9 +16,8 @@ Panels:
         - /Marker2
         - /Marker3
         - /QP_Debug_Markers3/Namespaces1
-        - /Marker4
       Splitter Ratio: 0.4910941421985626
-    Tree Height: 1146
+    Tree Height: 241
   - Class: rviz_common/Views
     Expanded:
       - /Current View1
@@ -218,10 +217,20 @@ Visualization Manager:
           Show Axes: false
           Show Trail: false
           Value: true
-        gripper_head_camera_link:
+        camera_head_camera_link:
           Alpha: 1
           Show Axes: false
           Show Trail: false
+          Value: true
+        camera_head_camera_rgbd_bottom_screw_frame:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+        camera_head_camera_rgbd_link:
+          Alpha: 1
+          Show Axes: false
+          Show Trail: false
+          Value: true
         gripper_left_base_finger_left_link:
           Alpha: 1
           Show Axes: false
@@ -529,6 +538,7 @@ Visualization Manager:
         Blended_Reference: true
         Grid: true
         Image: true
+        Marker: true
         PointCloud2: true
         QP_Debug_Markers: true
         Real World Snapshot: true
@@ -583,7 +593,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Best Effort
-        Value: /gripper_head_camera_rgbd/color/image_raw
+        Value: /camera_head_camera_rgbd/color/image_raw
       Value: true
     - Class: rviz_default_plugins/Marker
       Enabled: true
@@ -627,7 +637,8 @@ Visualization Manager:
       Enabled: true
       Name: World_Obstacles_And_Platforms
       Namespaces:
-        {}
+        platform: true
+        workspace: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -692,25 +703,25 @@ Visualization Manager:
   Views:
     Current:
       Class: rviz_default_plugins/Orbit
-      Distance: 1.9510103464126587
+      Distance: 1.4538793563842773
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 0.9006324410438538
-        Y: -0.00267803855240345
-        Z: 0.7584340572357178
+        X: 0.5007227659225464
+        Y: -0.31005164980888367
+        Z: 0.6255196928977966
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.4199998676776886
+      Pitch: 1.1549994945526123
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 3.68316912651062
+      Yaw: 4.728169918060303
     Saved:
       - Class: rviz_default_plugins/Orbit
         Distance: 1.0063155889511108
@@ -797,14 +808,14 @@ Window Geometry:
     collapsed: false
   Displays:
     collapsed: true
-  Height: 1872
+  Height: 1018
   Hide Left Dock: true
   Hide Right Dock: false
   Image:
     collapsed: false
-  QMainWindow State: 000000ff00000000fd000000020000000000000238000006befc0200000003fb000000100044006900730070006c00610079007300000000690000058a0000017800fffffffb0000000a0056006900650077007300000005ff000001280000012300fffffffb0000000c00430061006d00650072006100000003c30000008d0000004500ffffff000000020000050000000106fc0100000001fb0000000a0049006d006100670065020000094c0000006e0000030c00000244000005fa000006be00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd00000002000000000000023800000323fc0200000003fb000000100044006900730070006c0061007900730000000069000001f40000017800fffffffb0000000a005600690065007700730000000269000001230000012300fffffffb0000000c00430061006d00650072006100000003c30000008d0000004500ffffff000000020000050000000106fc0100000001fb0000000a0049006d00610067006503000007200000003600000560000003770000055d0000036800000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
   Views:
     collapsed: true
-  Width: 1530
-  X: 1670
-  Y: 54
+  Width: 1373
+  X: 1827
+  Y: 908

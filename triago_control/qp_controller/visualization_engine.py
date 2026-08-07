@@ -8,7 +8,7 @@ import time
 import numpy as np
 import pinocchio as pin
 from pinocchio.visualize import MeshcatVisualizer
-from visualization_msgs.msg import Marker
+from visualization_msgs.msg import Marker, MarkerArray
 try:
     import hppfcl
 except ImportError:
@@ -59,7 +59,10 @@ class VisualizationEngine:
 
         # --- RViz MARKER PUBLISHERS ---
         self.pub_wall_marker = self.node.create_publisher(Marker, '/qp_debug/virtual_wall_marker', 10)
-        self.pub_cyl_obs_marker = self.node.create_publisher(Marker, '/cylinder_obstacle_marker', 10)
+        # MarkerArray, not Marker: the whole scene must arrive as ONE message. Publishing
+        # N separate Markers overflows RViz's KEEP_LAST subscriber queue once a world has
+        # more obstacles than that depth, silently dropping the oldest ones.
+        self.pub_cyl_obs_marker = self.node.create_publisher(MarkerArray, '/cylinder_obstacle_marker', 10)
 
     # Visual gripper box inflated vs its coincident collision box: identical surfaces z-fight
     # in the GPU depth test (pixel flicker), a strict size margin guarantees zero coincidence.
@@ -291,6 +294,26 @@ class VisualizationEngine:
                 m.color.r, m.color.g, m.color.b, m.color.a = [float(c) for c in obs.color]
             return m
 
+        def create_platform_marker(m_id, plat):
+            """One placement disk, mirroring the Gazebo `placement_area*` model the operator sees."""
+            m = Marker()
+            m.header = header.header
+            m.ns = "platform"
+            m.id = m_id
+            m.type = Marker.CYLINDER
+            m.action = Marker.ADD
+            m.pose.position.x, m.pose.position.y, m.pose.position.z = [float(v) for v in plat.pose]
+            m.pose.orientation.w = 1.0
+            m.scale.x = m.scale.y = float(plat.radius * 2.0)
+            m.scale.z = float(plat.thickness)
+            # Index-based color reproduces every existing world's Gazebo disks: the primary
+            # disk is yellow, any additional one green (single-platform worlds -> one yellow).
+            r, g, b = (1.0, 1.0, 0.0) if m_id == 0 else (0.0, 0.8, 0.0)
+            m.color.r, m.color.g, m.color.b, m.color.a = r, g, b, 0.9
+            return m
+
+        arr = MarkerArray()
+
         if self.world_scene is not None:
             for i, obs in enumerate(self.world_scene.static_obstacles):
                 if obs.role == 'wall':
@@ -298,7 +321,11 @@ class VisualizationEngine:
                 if not obs.collision and obs.role != 'table':
                     continue  # non-colliding, non-table extras: skip (nothing to show yet)
                 cyl_id = geom_id_for_name(obs.name)
-                self.pub_cyl_obs_marker.publish(create_marker(i, obs, cyl_id))
+                arr.markers.append(create_marker(i, obs, cyl_id))
+            # Placement disks: goal references only, never collision geometry, so they are
+            # absent from static_obstacles and must be drawn from the platform specs directly.
+            for i, plat in enumerate(self.world_scene.platforms):
+                arr.markers.append(create_platform_marker(i, plat))
         else:
             # --- Legacy path (no world_scene loaded): unchanged from before. ---
             from types import SimpleNamespace
@@ -310,9 +337,11 @@ class VisualizationEngine:
                                           size=cfg.CYLINDER_SIZE, color=(0.0, 0.0, 1.0, 1.0), role='graspable')
             red_id = getattr(col_manager, 'red_cyl_id', None) if col_manager is not None else None
             blue_id = getattr(col_manager, 'blue_cyl_id', None) if col_manager is not None else None
-            self.pub_cyl_obs_marker.publish(create_marker(0, legacy_table, None))
-            self.pub_cyl_obs_marker.publish(create_marker(1, legacy_red, red_id))
-            self.pub_cyl_obs_marker.publish(create_marker(2, legacy_blue, blue_id))
+            arr.markers.append(create_marker(0, legacy_table, None))
+            arr.markers.append(create_marker(1, legacy_red, red_id))
+            arr.markers.append(create_marker(2, legacy_blue, blue_id))
+
+        self.pub_cyl_obs_marker.publish(arr)
 
     def publish_wall_marker(self):
         """Publishes the virtual wall cube in RViz from the world_scene (fallback: legacy cfg constants)."""
