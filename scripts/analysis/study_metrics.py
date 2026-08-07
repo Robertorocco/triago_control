@@ -18,6 +18,11 @@ Message-array layouts consumed (confirmed against the publishing nodes):
   /qp_debug/qdot_measured(14): [R_joint(7) L_joint(7)] -- EMA-filtered ground truth
   /qp_debug/slacks (2)   : [|slack_R| |slack_L|]
   /qp_debug/lambda_cbf(2): [lambda_R lambda_L]
+  /qp_debug/min_distance : SCALAR closest pair over ALL pairs -- no arm attribution
+  /qp_debug/safety_margin(2): [h_soft_R - d_safe_R, h_soft_L - d_safe_L], PER ARM;
+                           NaN for an arm with no pair inside DISTANCE_FILTER_THRESHOLD
+  /qp_debug/d_safe_dynamic(2): [d_safe_R d_safe_L] per-arm dynamic margin, so the
+                           per-arm SoftMin clearance is  h_soft_X = margin_X + d_safe_X
   /qp_debug/arm_frozen(2): [right_frozen left_frozen]  (0/1; active arm = NOT frozen)
   /shared_autonomy/blend_debug (19): [alpha v_user(6) v_policy(6) v_blend(6)]
   /shared_autonomy/goal_probabilities (N): aligned with goal_names (CSV string)
@@ -45,6 +50,7 @@ T_QDOT_CMD = "/qp_debug/qdot_cmd"
 T_QDOT_MEAS = "/qp_debug/qdot_measured"
 T_MINDIST = "/qp_debug/min_distance"
 T_SAFETY = "/qp_debug/safety_margin"
+T_DSAFE = "/qp_debug/d_safe_dynamic"
 T_LAMBDA_CBF = "/qp_debug/lambda_cbf"
 T_SLACKS = "/qp_debug/slacks"
 T_LOOPFREQ = "/qp_debug/loop_freq"

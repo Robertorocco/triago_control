@@ -291,41 +291,67 @@ def make_triago_dashboard(series, metrics, metadata, arm, t_act, right_active, o
     else:
         _no_data(ax, "Barrier shadow prices")
 
-    # (2,2) Obstacle clearance. /qp_debug/min_distance is the true closest-pair
-    # distance ONLY while a pair is within cfg.DISTANCE_FILTER_THRESHOLD; when
-    # nothing is that close the controller publishes a 1.0 sentinel (and the CBF
-    # margin ~ 1 - d_safe) -- that sentinel is exactly what makes the raw trace
-    # jump to 1. Mask samples at/above the threshold so the trace shows only
-    # genuine proximity, with no discontinuous jump.
+    # (2,2) Obstacle clearance for THIS ARM. The QP keeps two independent per-arm
+    # CBF rows, so this arm's own clearance is its SoftMin aggregate over the pairs
+    # touching its geometry:  h_soft_X = margin_X + d_safe_X, recovered from
+    # /qp_debug/safety_margin (margin, per arm) + /qp_debug/d_safe_dynamic (per-arm
+    # dynamic margin). /qp_debug/min_distance is a SINGLE scalar over ALL pairs with
+    # no arm attribution -- identical in both arms' figures -- so it is kept only as
+    # a faint whole-robot reference, never as this arm's clearance.
+    # Both per-arm arrays are NaN-by-construction while that arm has no pair inside
+    # DISTANCE_FILTER_THRESHOLD, which is "clear", not missing data.
     ax = fig.add_subplot(gs[2, 2])
-    md = series.get(sm.T_MINDIST)
+    idx = sm._LAMBDA_IDX[arm]                       # right=0, left=1 in every 2-array
     thr = float((metadata.get("cfg_snapshot", {}) or {}).get(
         "DISTANCE_FILTER_THRESHOLD", 0.15))
+    sf = series.get(sm.T_SAFETY)
+    ds = series.get(sm.T_DSAFE)
+    margin = np.asarray(sf.col(f"d{idx}"), dtype=float) if (
+        sf and sf.col(f"d{idx}") is not None and len(sf)) else None
+    d_safe = np.asarray(ds.col(f"d{idx}"), dtype=float) if (
+        ds and ds.col(f"d{idx}") is not None and len(ds)) else None
+
+    drew = False
+    if margin is not None:
+        # d_safe rides the same publish tick as margin, but resample defensively:
+        # the two are separate publishers and a dropped sample must not shift them.
+        dsafe_on_sf = (_zoh_cols(sf.t, ds.t, d_safe.reshape(-1, 1))[:, 0]
+                       if d_safe is not None else None)
+        if dsafe_on_sf is not None:
+            clearance = np.where(margin >= thr, np.nan, margin + dsafe_on_sf)
+            if np.any(np.isfinite(clearance)):
+                ax.plot(sf.t, clearance, color=col, lw=1.3,
+                        label=f"{arm} arm clearance")
+                drew = True
+            ax.plot(sf.t, np.where(np.isfinite(clearance), dsafe_on_sf, np.nan),
+                    color="#888", ls="--", lw=0.9, alpha=0.9,
+                    label=r"required $d_{safe}$")
+        m = np.where(margin >= thr, np.nan, margin)
+        if np.any(np.isfinite(m)):
+            ax.plot(sf.t, m, color="#9467bd", lw=0.9, alpha=0.8,
+                    label="CBF margin (clearance - $d_{safe}$)")
+            drew = True
+
+    # Whole-robot reference: closest pair anywhere, both arms and body included.
+    md = series.get(sm.T_MINDIST)
     if md and md.col("value") is not None and len(md):
         d = np.asarray(md.col("value"), dtype=float)
         d = np.where(d >= thr, np.nan, d)
-        drew = bool(np.any(np.isfinite(d)))
-        if drew:
-            ax.plot(md.t, d, color="#2ca02c", lw=1.1, label="min pair distance")
-        sf = series.get(sm.T_SAFETY)
-        if sf and sf.col("value") is not None:
-            m = np.asarray(sf.col("value"), dtype=float)
-            m = np.where(m >= thr, np.nan, m)
-            if np.any(np.isfinite(m)):
-                ax.plot(sf.t, m, color="#888", lw=0.8, alpha=0.8, label="CBF margin")
-                drew = True
-        ax.axhline(0.0, color="#333", ls=":", lw=0.8)   # 0 = contact
-        _shade_grasp(ax, series)
-        _shade_active(ax, t_act, right_active, arm)
-        ax.set_xlabel("t [s]"); ax.set_ylabel("distance [m]")
-        ax.set_title(f"Obstacle clearance (< {thr:g} m)")
-        if drew:
-            _legend(ax)
-        else:
-            ax.text(0.5, 0.5, f"no pair within {thr:g} m", ha="center", va="center",
-                    transform=ax.transAxes, color="#999")
+        if np.any(np.isfinite(d)):
+            ax.plot(md.t, d, color="#2ca02c", lw=0.8, alpha=0.45,
+                    label="whole-robot min (all pairs)")
+            drew = True
+
+    ax.axhline(0.0, color="#333", ls=":", lw=0.8)   # 0 = contact
+    _shade_grasp(ax, series)
+    _shade_active(ax, t_act, right_active, arm)
+    ax.set_xlabel("t [s]"); ax.set_ylabel("distance [m]")
+    ax.set_title(f"Obstacle clearance — {arm} arm (< {thr:g} m)")
+    if drew:
+        _legend(ax)
     else:
-        _no_data(ax, "Obstacle clearance")
+        ax.text(0.5, 0.5, f"no pair within {thr:g} m", ha="center", va="center",
+                transform=ax.transAxes, color="#999")
 
     fig.savefig(out_path)
     plt.close(fig)

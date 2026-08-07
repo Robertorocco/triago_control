@@ -68,6 +68,21 @@ except Exception as _exc:  # pragma: no cover - environment dependent
 # How long to wait for `ros2 bag record` to finalise after SIGINT before forcing.
 _STOP_GRACE_S = 15.0
 
+# Lowest scheduling priority for the post-save analysis. The sim + QP controller
+# are usually STILL RUNNING when SAVE is pressed, and reading a multi-hundred-MB
+# bag through matplotlib is heavy: at normal priority it competes with the 150 Hz
+# control loop, whose executor starvation is a documented failure mode (bunched
+# ticks, lambda_cbf spike -- see .kiro/context.md Sec.10.6). Niced this far down,
+# the control loop always wins the CPU.
+_ANALYZE_NICE = 19
+_ANALYZE_LOG = "analyze.log"
+
+
+def build_analyze_command(bag_dir: str) -> list[str]:
+    """Assemble the niced `analyze_trial.py` argv for one finished trial."""
+    return ["nice", "-n", str(_ANALYZE_NICE),
+            "ros2", "run", "triago_control", "analyze_trial.py", bag_dir]
+
 
 def sanitize_token(text: str) -> str:
     """Reduce free text to a filesystem-safe token (alnum, dash, underscore)."""
@@ -114,6 +129,10 @@ class RecorderApp:
         self.bag_dir: str | None = None
         self.t_start: _dt.datetime | None = None
         self.t_stop: _dt.datetime | None = None
+        # Post-save analysis runs detached, so the GUI stays live and the next
+        # trial can be set up while the previous one is still being plotted.
+        self.analyze_proc: subprocess.Popen | None = None
+        self.analyze_bag_dir: str | None = None
 
         root.title("TRIAGo Study Recorder")
         root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -129,6 +148,8 @@ class RecorderApp:
         self.var_status = tk.StringVar(value="Idle - fill the fields and press START.")
         self.var_cell = tk.StringVar(value="")
         self.var_cellnote = tk.StringVar(value="")
+        self.var_analyze = tk.BooleanVar(value=True)
+        self.var_analyze_status = tk.StringVar(value="")
 
         self._build_widgets()
         self._refresh_cell_display()
@@ -187,8 +208,17 @@ class RecorderApp:
         self.e_notes = ttk.Entry(frm, textvariable=self.var_notes, width=40)
         self.e_notes.grid(row=9, column=1, columnspan=2, sticky="w", **pad)
 
+        self.chk_analyze = ttk.Checkbutton(
+            frm, text="Analyze after SAVE (background, lowest CPU priority)",
+            variable=self.var_analyze)
+        self.chk_analyze.grid(row=10, column=0, columnspan=3, sticky="w", **pad)
+
         self.btn_save = ttk.Button(frm, text="SAVE TRIAL", command=self.on_save)
-        self.btn_save.grid(row=10, column=1, sticky="w", **pad)
+        self.btn_save.grid(row=11, column=1, sticky="w", **pad)
+
+        self.lbl_analyze = ttk.Label(frm, textvariable=self.var_analyze_status,
+                                     foreground="#666")
+        self.lbl_analyze.grid(row=12, column=0, columnspan=3, sticky="w", **pad)
 
     def _refresh_cell_display(self):
         """Show the auto-detected study cell (read-only) + its config flags."""
@@ -232,6 +262,15 @@ class RecorderApp:
 
         bag_dir = sc.bag_path(participant, world, cell_code)
         os.makedirs(sc.participant_dir(participant), exist_ok=True)
+
+        # Never delete a folder the background analysis is still reading.
+        if (self.analyze_proc is not None and self.analyze_proc.poll() is None
+                and self.analyze_bag_dir == bag_dir):
+            messagebox.showerror(
+                "Analysis in progress",
+                f"analyze_trial.py is still reading:\n\n{bag_dir}\n\n"
+                "Wait for it to finish before overwriting this trial.")
+            return
 
         if os.path.exists(bag_dir):
             if not messagebox.askyesno(
@@ -349,6 +388,10 @@ class RecorderApp:
         print(f"[study_recorder] saved metadata -> {meta_path}")
         self.var_status.set(
             f"Saved '{meta['bag_name']}' (success={success}). Ready for next trial.")
+        # Metadata is on disk BEFORE analysis is attempted: a broken/slow analysis
+        # must never cost the trial's provenance.
+        if self.var_analyze.get():
+            self._start_analysis(self.bag_dir)
         # Reset for the next trial (keep participant/world sticky; the cell is
         # auto-detected from config, so nothing to preserve there).
         self.proc = None
@@ -359,6 +402,52 @@ class RecorderApp:
         self.state = self.IDLE
         self._apply_state()
 
+    # ------------------------------------------------------- post-save analysis
+    def _start_analysis(self, bag_dir: str):
+        """Spawn analyze_trial.py on the finished bag, detached and niced."""
+        if self.analyze_proc is not None and self.analyze_proc.poll() is None:
+            self.var_analyze_status.set(
+                "Analysis still running on the previous trial - skipped this one. "
+                "Run analyze_trial.py by hand later.")
+            return
+        # rosbag2 writes metadata.yaml only on a clean finalise; without it the bag
+        # is truncated and analyze_trial would fail on a half-written file.
+        if not os.path.isfile(os.path.join(bag_dir, "metadata.yaml")):
+            self.var_analyze_status.set(
+                "Analysis skipped: bag has no metadata.yaml (did not finalise cleanly).")
+            return
+        cmd = build_analyze_command(bag_dir)
+        try:
+            log = open(os.path.join(bag_dir, _ANALYZE_LOG), "w")
+            self.analyze_proc = subprocess.Popen(
+                cmd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        except (OSError, FileNotFoundError) as exc:
+            self.var_analyze_status.set(f"Analysis could not start: {exc}")
+            return
+        self.analyze_bag_dir = bag_dir
+        self.var_analyze_status.set(
+            f"Analyzing '{os.path.basename(bag_dir)}' in the background ...")
+        print(f"[study_recorder] analyzing -> {' '.join(cmd)}")
+        self._poll_analysis()
+
+    def _poll_analysis(self):
+        if self.analyze_proc is None:
+            return
+        rc = self.analyze_proc.poll()
+        if rc is None:
+            self.root.after(1000, self._poll_analysis)
+            return
+        name = os.path.basename(self.analyze_bag_dir or "")
+        if rc == 0:
+            self.var_analyze_status.set(
+                f"Analysis of '{name}' done - plots + metrics.json written.")
+        else:
+            self.var_analyze_status.set(
+                f"Analysis of '{name}' FAILED (exit {rc}) - see {_ANALYZE_LOG} in the "
+                f"trial folder. The bag itself is intact.")
+        print(f"[study_recorder] analysis finished (exit {rc}) for {name}")
+        self.analyze_proc = None
+
     def _on_close(self):
         if self.state == self.RECORDING:
             if not messagebox.askyesno(
@@ -366,6 +455,16 @@ class RecorderApp:
                     "A recording is still running. Stop it and quit?"):
                 return
             self._stop_process()
+        # The analysis is a detached process: closing the GUI does NOT kill it,
+        # it just finishes unobserved (progress still goes to analyze.log).
+        if self.analyze_proc is not None and self.analyze_proc.poll() is None:
+            if not messagebox.askyesno(
+                    "Analysis in progress",
+                    f"analyze_trial.py is still running on "
+                    f"'{os.path.basename(self.analyze_bag_dir or '')}'.\n\n"
+                    "It will keep running in the background after this window "
+                    "closes. Quit anyway?"):
+                return
         self.root.destroy()
 
 
