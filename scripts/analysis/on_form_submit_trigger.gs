@@ -1,14 +1,16 @@
 /**
  * on_form_submit_trigger.gs
  *
- * Attach this to the SPREADSHEET linked to the post-trial questionnaire
+ * Attach this to the SPREADSHEET linked to the post-condition questionnaire
  * (not to the Form itself). Runs automatically on every new submission:
- *   - appends a "trial_key" column (Participant_World_Condition), matching
- *     study_config.bag_folder_name()'s <world_shortcut>_<cell_code>
- *     convention, so a subjective row can be joined against metrics.json
- *     without a manual formula;
+ *   - appends a "trial_key" column (Participant_Condition) so a subjective
+ *     row can be joined against the objective per-trial data without a
+ *     manual formula. NOTE: this key covers a whole CONDITION (both worlds),
+ *     one level coarser than study_config.bag_folder_name()'s per-trial
+ *     <world_shortcut>_<cell_code> key -- join on Participant+Condition,
+ *     not on the exact per-trial folder name;
  *   - appends a "duplicate?" column flagging if this exact
- *     Participant+World+Condition combination was already submitted before
+ *     Participant+Condition combination was already submitted before
  *     (catches an accidental re-submit or a Latin-square bookkeeping slip
  *     without blocking the submission itself).
  *
@@ -44,9 +46,8 @@ function onFormSubmit(e) {
   headers.forEach(function(h, i) { col[h] = i + 1; });
 
   var participant = sheet.getRange(row, col['Participant ID']).getValue();
-  var world = sheet.getRange(row, col['World']).getValue();
   var condition = sheet.getRange(row, col['Condition']).getValue();
-  var trialKey = participant + '_' + world + '_' + condition;
+  var trialKey = participant + '_' + condition;
 
   // Ensure the two helper columns exist (created once, on first submission).
   var keyCol = headers.indexOf('trial_key') + 1;
