@@ -1,33 +1,51 @@
 # =============================================================================
 # shield_world.yaml
 # -----------------------------------------------------------------------------
-# World 2 of the user-study set: same table + red/blue graspable cylinders +
-# platform as no_obstacle.yaml, PLUS one new static obstacle: a glass safety
-# shield assembly standing between the robot and the table. Goal poses
-# (cylinders, platform) are UNCHANGED from no_obstacle -- this is purely an
-# added obstacle, nothing else about the scene changes.
+# A glass safety shield stands between the robot and the table. Two conveyors
+# flank the table, one on each side, mirror-symmetric about y=0, each with its
+# own green Final placement disk.
 #
-# The shield is also intended as a future VISION obstacle (occludes the head
-# camera's view of part of the table) -- that aspect is NOT addressed here;
-# this pass only covers the CBF/RViz/Meshcat collision-geometry side.
+# TASK: the RIGHT arm picks the red battery with a TOP grasp and places it on
+# Final_R, on the RIGHT conveyor. The LEFT arm picks the blue battery with a
+# TOP grasp and places it on Final_L, on the LEFT conveyor. No handover, no
+# storage rack.
 #
-# Shield geometry (from the Gazebo model "safety_shield_assembly"):
-#   model pose:        [0.70, 0.00, 0.70, 0, 0, 0]
-#   collision sub-pose: [0, 0, 0.05, 0, 0, 0]   (relative to the model)
-#   -> absolute collision box pose: [0.70, 0.00, 0.75, 0, 0, 0]
-#   collision box size: [0.02, 0.35, 0.30]  (thin glass pane)
-# The two corner brackets (bracket_1/bracket_2 in the SDF) are VISUAL ONLY,
-# no <collision> block in the source model -- not represented as separate
-# obstacles here, since this schema only tracks collision-relevant geometry
-# (see world_loader.py's ObstacleSpec).
+# GEOMETRY (all axis-aligned boxes unless noted):
+#   work table:     top at z = 0.65   x in [0.71,1.31]  y in [-0.25,0.25]
+#   cylinders:      x = 0.810, y = +-0.20, z_center = 0.730, length = 0.16
+#                   (matches rack_world.yaml's battery height)
+#   shield:         model pose [0.71,0.00,0.65] + collision sub-pose [0,0,0.035]
+#                   -> absolute collision box [0.71,0.00,0.685]
+#                   size [0.02,0.50,0.27] (thin glass pane, y[-0.25,0.25]:
+#                   the same width as the table, leaving no side window)
+#   conveyor_right: CBF envelope, box center [1.10,-0.85,0.35],
+#                   size [1.30,0.48,0.70] -> top z = 0.70 (table top: 0.65),
+#                   x in [0.45,1.75], y in [-1.09,-0.61]. Belt (visual-only,
+#                   see the .world) is narrower, y in [-1.03,-0.67], centered
+#                   inside.
+#   conveyor_left:  the exact y-mirror of conveyor_right, box center
+#                   [1.10,0.85,0.35], size [1.30,0.48,0.70], y in [0.61,1.09].
+#                   Every decorative part (drums/frame/rollers/legs/motor/
+#                   e-stop) is visual-only in the .world and intentionally
+#                   absent here for BOTH conveyors -- CBF aggregation is
+#                   already the heaviest phase of the 150 Hz loop, so only
+#                   these two collision boxes are paired against the arm
+#                   capsules (see rack_world.yaml's header for precedent).
 #
-# No code changes were needed to add this world: CollisionManager/
-# VisualizationEngine/GoalSet all consume static_obstacles generically (any
-# role other than "wall"/"table" falls into the same generic collision +
-# RViz-marker path the table/cylinders already use).
+# TWO functional placement goals, mirror-symmetric: Final_R on the right
+# conveyor, Final_L on the left. The red battery always goes to Final_R, the
+# blue battery always goes to Final_L; there is no cross-arm handover.
+#
+# The shield and both conveyors are ordinary collision boxes (role:
+# "obstacle"), so CollisionManager (CBF), VisualizationEngine (RViz + Meshcat)
+# and GoalSet consume them generically -- no code changes needed.
 #
 # Matches the Gazebo world launched via:
 #   ros2 launch triago_gazebo triago_gazebo.launch.py ... world_name:=shield_world
+#
+# Run the controllers with:
+#   ros2 run triago_control main_qp_controller.py  --ros-args -p world_name:=shield_world
+#   ros2 run triago_control main_shared_autonomy.py --ros-args -p world_name:=shield_world
 #
 # See triago_control/qp_controller/world_loader.py for the full schema.
 # =============================================================================
@@ -39,45 +57,67 @@ static_obstacles:
   - name: "work_table"
     role: "table"
     shape: "box"
-    pose: [1.0, 0.0, 0.35, 0.0, 0.0, 0.0]
-    size: [0.6, 0.5, 0.7]
+    pose: [1.01, 0.0, 0.325, 0.0, 0.0, 0.0]
+    size: [0.6, 0.5, 0.65]
     color: [0.6, 0.4, 0.2, 0.8]
     collision: true
 
   - name: "red_cylinder"
     role: "graspable"
     shape: "cylinder"
-    pose: [0.800, -0.20, 0.775, 0.0, 0.0, 0.0]
-    size: [0.02, 0.15]          # [radius, length]
+    pose: [0.810, -0.20, 0.730, 0.0, 0.0, 0.0]
+    size: [0.02, 0.16]          # [radius, length]
     color: [1.0, 0.0, 0.0, 1.0]
     collision: true
 
   - name: "blue_cylinder"
     role: "graspable"
     shape: "cylinder"
-    pose: [0.800, 0.20, 0.775, 0.0, 0.0, 0.0]
-    size: [0.02, 0.15]
+    pose: [0.810, 0.20, 0.730, 0.0, 0.0, 0.0]
+    size: [0.02, 0.16]
     color: [0.0, 0.0, 1.0, 1.0]
     collision: true
 
-  # Safety shield assembly -- new for this world. Absolute pose = model pose
-  # [0.70, 0.00, 0.70] + collision sub-pose [0, 0, 0.05] (see header). Sits
-  # right at the table's front edge (table spans x in [0.70, 1.30]), narrower
-  # than the table's own width (0.35m vs the table's 0.50m), from just below
-  # the table top (z=0.60) to 20cm above it (z=0.90).
+  # Safety shield assembly. Absolute pose = model pose [0.71, 0.00, 0.65] +
+  # collision sub-pose [0, 0, 0.035] (see header). Sits right at the table's
+  # front edge and spans the table's FULL width (0.50 m, y[-0.25,0.25]), from
+  # just below the table top (z=0.55) to 17cm above it (z=0.82) -- 3cm
+  # shorter than the panel's original 20cm, base fixed. Matching the table
+  # width leaves no side window beside the pane, so nothing reaches a
+  # cylinder without first clearing the top edge at z=0.82.
   - name: "shield_obstacle"
     role: "obstacle"
     shape: "box"
-    pose: [0.70, 0.00, 0.75, 0.0, 0.0, 0.0]
-    size: [0.02, 0.35, 0.30]
-    color: [0.7, 0.9, 1.0, 1.0]   # light "glass" blue-ish tint (rendered fully
-                                  # opaque regardless -- see visualization_
-                                  # engine.py's color_collision_model, which
-                                  # forces alpha=1.0 on every collision-model
-                                  # color to prevent the translucent-mesh
-                                  # z-fighting/flicker fixed earlier)
+    pose: [0.71, 0.00, 0.685, 0.0, 0.0, 0.0]
+    size: [0.02, 0.50, 0.27]
+    color: [0.7, 0.9, 1.0, 0.8]   # light "glass" blue-ish tint, alpha=0.8 in RViz
+                                  # (the Marker reads this alpha directly). Meshcat
+                                  # ignores it: visualization_engine.py's
+                                  # color_collision_model forces every collision-
+                                  # model color to alpha=1.0 there, to avoid
+                                  # translucent-mesh z-fighting in WebGL.
     collision: true
 
+  # Right conveyor: CBF envelope; every decorative drum/frame/roller/leg
+  # lives only in the .world as visual-only geometry (see the header above).
+  - name: "conveyor_right"
+    role: "obstacle"
+    shape: "box"
+    pose: [1.10, -0.85, 0.35, 0.0, 0.0, 0.0]
+    size: [1.30, 0.48, 0.70]
+    color: [0.25, 0.25, 0.27, 1.0]
+    collision: true
+
+  # Left conveyor: exact y-mirror of conveyor_right.
+  - name: "conveyor_left"
+    role: "obstacle"
+    shape: "box"
+    pose: [1.10, 0.85, 0.35, 0.0, 0.0, 0.0]
+    size: [1.30, 0.48, 0.70]
+    color: [0.25, 0.25, 0.27, 1.0]
+    collision: true
+
+  # Virtual wall: OFF by default (mirrors the old WALL_COLLIDER=False flag).
   - name: "virtual_wall"
     role: "wall"
     shape: "box"
@@ -90,8 +130,17 @@ grasp_roles:
   red: "red_cylinder"
   blue: "blue_cylinder"
 
-platform:
-  pose: [1.000, 0.0, 0.701]
-  radius: 0.15
-  thickness: 0.002
-  place_margin: 0.03
+# TWO functional placement goals, mirror-symmetric about y=0. The red battery
+# always goes to Final_R (right conveyor), the blue battery to Final_L (left
+# conveyor); there is no cross-arm handover in this world.
+platforms:
+  - name: "Final_R"
+    pose: [0.680, -0.85, 0.701]
+    radius: 0.15
+    thickness: 0.002
+    place_margin: 0.03
+  - name: "Final_L"
+    pose: [0.680, 0.85, 0.701]
+    radius: 0.15
+    thickness: 0.002
+    place_margin: 0.03

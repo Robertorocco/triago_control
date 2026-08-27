@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """One-shot bring-up of a full TRIAGo simulation session: Gazebo world, TSID default
-controllers, the mobile-base teleop, and the two RViz stations the operator watches.
+controllers, the mobile-base teleop, and the three RViz stations the operator watches.
 
 Replaces the four-terminal manual sequence (see README / .kiro/context.md §11) with:
 
@@ -37,6 +37,10 @@ CONTROLLER_DELAY_S = 10.0
 # RViz is started after the controllers so the robot model resolves on first draw.
 RVIZ_DELAY_S = CONTROLLER_DELAY_S + 4.0
 
+# The robot-model filter only needs robot_state_publisher up (it waits/retries on its
+# own service call up to 30s regardless), well before RViz needs its filtered topic.
+ROBOT_MODEL_FILTER_DELAY_S = 3.0
+
 
 def generate_launch_description():
     pkg = get_package_share_directory('triago_control')
@@ -46,6 +50,7 @@ def generate_launch_description():
     end_effector_left = LaunchConfiguration('end_effector_left')
     base_controller = LaunchConfiguration('base_controller')
     rviz_stations = LaunchConfiguration('rviz_stations')
+    dim_mode = LaunchConfiguration('dim_mode')
 
     args = [
         DeclareLaunchArgument(
@@ -66,7 +71,11 @@ def generate_launch_description():
         # argument here is validated against ITS choices (['True','False']) too.
         DeclareLaunchArgument(
             'rviz_stations', default_value='true', choices=['true', 'false'],
-            description='Start both RViz stations (operator + overview).'),
+            description='Start all three RViz stations (operator + overview + right tracking).'),
+        DeclareLaunchArgument(
+            'dim_mode', default_value='material', choices=['material', 'remove'],
+            description="How study_robot_model_filter.py treats non-arm-chain links: "
+                        "'material' dims them translucent, 'remove' hides them outright."),
     ]
 
     # 1. Gazebo + robot spawn.
@@ -78,7 +87,7 @@ def generate_launch_description():
             'end_effector_right': end_effector_right,
             'end_effector_left': end_effector_left,
             'world_name': world,
-            # Suppress its own RViz: the two stations below are the only ones wanted.
+            # Suppress its own RViz: the three stations below are the only ones wanted.
             'rviz': 'False',
         }.items())
 
@@ -99,9 +108,21 @@ def generate_launch_description():
              condition=IfCondition(base_controller)),
     ])
 
-    # 4. Two RViz stations. Identical scene content; only `study_operator` carries the
-    #    head-camera image display. Window placement lives in each .rviz file's
-    #    `Window Geometry` block, so move/resize in RViz and save to persist it.
+    # 4. Robot-model filter: republishes robot_description with non-arm-chain links dimmed
+    #    or removed (dim_mode), since RViz's own per-link Alpha/Value overrides don't render
+    #    for this robot's meshes (an Ogre/Collada material-sharing limitation, not fixable
+    #    from a .rviz file). The three RViz stations below point their RobotModel display
+    #    at this filtered topic instead of the real /robot_description.
+    robot_model_filter = TimerAction(period=ROBOT_MODEL_FILTER_DELAY_S, actions=[
+        Node(package='triago_control', executable='study_robot_model_filter.py',
+             name='study_robot_model_filter', output='screen',
+             parameters=[{'use_sim_time': True, 'dim_mode': dim_mode}]),
+    ])
+
+    # 5. Three RViz stations: operator (head-camera image + left-arm tracking view),
+    #    overview (wide scene), right tracking (right-arm tracking view). Window placement
+    #    lives in each .rviz file's `Window Geometry` block, so move/resize in RViz and
+    #    save to persist it.
     def rviz_station(name, config):
         return Node(
             package='rviz2', executable='rviz2', name=name, output='screen',
@@ -112,6 +133,8 @@ def generate_launch_description():
     rviz_group = TimerAction(period=RVIZ_DELAY_S, actions=[
         rviz_station('rviz2_operator', 'study_operator.rviz'),
         rviz_station('rviz2_overview', 'study_overview.rviz'),
+        rviz_station('rviz2_right_tracking', 'study_right_tracking.rviz'),
     ])
 
-    return LaunchDescription(args + [gazebo, controllers, base_node, rviz_group])
+    return LaunchDescription(
+        args + [gazebo, controllers, base_node, robot_model_filter, rviz_group])

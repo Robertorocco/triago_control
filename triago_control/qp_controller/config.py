@@ -43,8 +43,8 @@ CLUTCH = "CLUTCH"
 JOYSTICK = "JOYSTICK"
 
 # Active experiment condition: edit these three to select a study cell.
-CONTROL_MODE   = JOYSTICK      # CLUTCH (position control) | JOYSTICK (velocity control)
-ASSIST_FEEDBACK = True          # channel F: assistive guidance forces on the handle
+CONTROL_MODE   = CLUTCH      # CLUTCH (position control) | JOYSTICK (velocity control)
+ASSIST_FEEDBACK = True        # channel F: assistive guidance forces on the handle
 ASSIST_BLENDING = False      # channel B: reference-level user<->policy blending
 
 # Backward-compat alias: legacy code reads BLENDING to decide reference-topic ownership.
@@ -87,7 +87,7 @@ JOYSTICK_NEUTRAL_ORIENTATION_XYZW = [-0.015140674076974392, 0.8170770406723022,
 JOYSTICK_DEADBAND_LIN = 0.03456      # m   (3.46 cm)
 JOYSTICK_DEADBAND_ANG = 0.23328 * 0.7  # rad (~9.36 deg, 30% smaller: precise orientation twists were hard to impose)
 JOYSTICK_K_TRANS = 1.6               # (m/s) per m of handle linear displacement
-JOYSTICK_K_ROT = 1.5                 # (rad/s) per rad of handle angular displacement
+JOYSTICK_K_ROT = 1.65                # (rad/s) per rad of handle angular displacement, +10% rotation speed
 JOYSTICK_V_MAX_LIN = 0.10            # m/s   hard safety clamp on the commanded linear twist
 JOYSTICK_V_MAX_ANG = 0.50            # rad/s hard safety clamp on the commanded angular twist
 
@@ -99,8 +99,8 @@ JOYSTICK_DAMP_ANG = 0.075            # unitless fraction of handle angular veloc
 
 # --- Home-orientation rebasing scale ---------------------------------------
 # Gripper rotation is divided by this when building the home orientation (gripper 90 deg ->
-# handle 60 deg), fitting the Haption's narrower rotational workspace; never scales the twist.
-JOYSTICK_ROT_HOME_SCALE = 1.5
+# handle ~53 deg), fitting the Haption's narrower rotational workspace; never scales the twist.
+JOYSTICK_ROT_HOME_SCALE = 1.7
 
 # --- Restorative centering spring (joystick force managers) -----------------
 # The homing spring-damper toward the dynamic home pose, unified across all joystick cells.
@@ -191,16 +191,16 @@ RATE_WEIGHT_GRASP = 20.0    # sim default; real-hw tuned value (200) lives on th
 # 3. DYNAMIC SCALING BOUNDARIES
 # =============================================================================
 # Decoupled dynamic slack weighting.
-BASE_WEIGHT_SLACK = 62.5        # slack weight when active against an obstacle
-MAX_WEIGHT_SLACK = 150.0       # free-space slack weight; also pinned on a frozen arm
-BETA = 0.4                     # how fast slack weight returns to baseline as lambda grows
+BASE_WEIGHT_SLACK = 105.75      # slack weight when active against an obstacle
+MAX_WEIGHT_SLACK = 225.0       # free-space slack weight; also pinned on a frozen arm
+BETA = 0.2                     # how fast slack weight returns to baseline as lambda grows
 SLACK_FILTER_TAU = 0.15        # LPF on the shadow prices feeding the scheduler
 WEIGHT_SLACK_FILTER_TAU = 0.2  # 2nd-stage LPF directly on the slack weight
 
 # Dynamic gamma (CLF) scheduling.
 GAMMA_CLF_DEFAULT = 0.75       # static / initial CLF convergence rate
-GAMMA_MIN = 0.5                # lower bound of the scheduled CLF gamma
-GAMMA_MAX = 1.0                # upper bound of the scheduled CLF gamma
+GAMMA_MIN = 0.7                # lower bound of the scheduled CLF gamma
+GAMMA_MAX = 1.1                # upper bound of the scheduled CLF gamma
 BETA_GAMMA = 5.0               # how quickly gamma drops as the collision lambda grows
 GAMMA_FILTER_TAU = 0.125       # LPF time constant for the gamma scheduler
 

@@ -7,22 +7,25 @@ manually in that same file's "Completed" column.
 Design: a participant completes every condition of ONE control-mode block
 (Clutch or Joystick) before switching to the other; never interleaved.
 Three factors are balanced across participants, not just one flat order:
-  (a) which block goes first             -- alternates every participant (50/50)
-  (b) order within the Clutch block      -- all 3! = 6 orderings cycled
-  (c) order within the Joystick block    -- all 3! = 6 orderings cycled
-For a 3-item block, cycling through ALL 6 permutations IS the complete
-Williams (1949) odd-n design (2n = 3! = 6 for n=3) -- full first-order
-carryover balance within each block, not an approximation. Full cycle
-repeats every 6 participants.
+  (a) which block goes first             -- crossed with (b)/(c), not just
+                                             alternated on its own
+  (b) order within the Clutch block      -- all 3! = 6 orderings
+  (c) order within the Joystick block    -- all 3! = 6 orderings
+For a 3-item block, the 6 permutations ARE the complete Williams (1949)
+odd-n design (2n = 3! = 6 for n=3) -- full first-order carryover balance
+within each block. Position and ordering are independent factors: each of
+the 6 orderings appears exactly once with its block leading and once with
+its block trailing per 12-participant cycle, so no ordering is ever locked
+to only one position. Full cycle repeats every 12 participants.
 
-Participant IDs are generated as P00, P01, ... (0-indexed, ID == row number)
+Participant IDs are generated as P01, P02, ... (1-indexed, ID == row number)
 -- not typed in, so there's no way for an ID to drift from its row.
 
 No ROS import (same principle as study_config.py): usable with plain python3,
 no workspace sourcing required.
 
 Usage:
-  python3 study_schedule.py 24      # writes participant_schedule.csv for P00..P23
+  python3 study_schedule.py 24      # writes participant_schedule.csv for P01..P24
 """
 
 from __future__ import annotations
@@ -52,9 +55,11 @@ def build_schedule(n_participants: int) -> list[tuple[str, list[str]]]:
     rows = []
     for i in range(n_participants):
         participant_id = f"P{i+1:02d}"
-        clutch_first = (i % 2 == 0)
-        c_block = list(_CLUTCH_PERMS[i % 6])
-        j_block = list(_JOYSTICK_PERMS[i % 6])
+        r = i % 12  # 12-row block: each ordering appears once leading, once trailing
+        perm_idx = r % 6
+        clutch_first = r < 6
+        c_block = list(_CLUTCH_PERMS[perm_idx])
+        j_block = list(_JOYSTICK_PERMS[perm_idx])
         order = (c_block + j_block) if clutch_first else (j_block + c_block)
         rows.append((participant_id, order))
     return rows

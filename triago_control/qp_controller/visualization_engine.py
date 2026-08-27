@@ -306,9 +306,12 @@ class VisualizationEngine:
             m.pose.orientation.w = 1.0
             m.scale.x = m.scale.y = float(plat.radius * 2.0)
             m.scale.z = float(plat.thickness)
-            # Index-based color reproduces every existing world's Gazebo disks: the primary
-            # disk is yellow, any additional one green (single-platform worlds -> one yellow).
-            r, g, b = (1.0, 1.0, 0.0) if m_id == 0 else (0.0, 0.8, 0.0)
+            # Mirrors each world's Gazebo disk colors: a "Final*" drop-off disk is green, every
+            # other one yellow. Name is checked before index so a world whose FIRST (or only)
+            # disk is a Final station still renders green, matching its `placement_area_final*`
+            # model; the prefix covers per-arm stations like "Final_R"/"Final_L".
+            is_final = plat.name.startswith("Final") or m_id > 0
+            r, g, b = (0.0, 0.8, 0.0) if is_final else (1.0, 1.0, 0.0)
             m.color.r, m.color.g, m.color.b, m.color.a = r, g, b, 0.9
             return m
 

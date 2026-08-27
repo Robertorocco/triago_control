@@ -35,6 +35,7 @@ class CollisionManager:
         self.right_geom_ids = []
         self.left_geom_ids = []
         self.head_geom_ids = []            # quasi-static obstacle capsules (see build_collision_model)
+        self.head_cbf = None               # (J, h_soft, d_safe, active) from the last compute_softmin_jacobian call
         self.body_geom_ids = []
         self.gripper_box_ids = {}          # {'right': id, 'left': id}
         self.workspace_obstacle_ids = []
@@ -440,7 +441,7 @@ class CollisionManager:
                                  margin_targets, attached_objs, attached_adjacency,
                                  ignored_targets, publish_counter=0,
                                  attach_ramp_shifts=None, attached_object_arm=None,
-                                 data=None, cdata=None):
+                                 data=None, cdata=None, idx_head=None):
         """Computes the two per-arm SoftMin CBFs; returns (J_R, h_R, J_L, h_L, d_safe_r, d_safe_l,
         abs_min_distance, active_r, active_l, n_eff_r, n_eff_l), h=1.0 being the idle sentinel."""
         # The async worker passes private data/cdata; witness_*/top_active_pairs are read same-thread.
@@ -452,6 +453,11 @@ class CollisionManager:
         v_norm_l = np.linalg.norm(current_v[idx_left]) if idx_left else 0.0
         d_safe_dynamic_r = cfg.D_SAFE_BASE + (cfg.K_V_SAFE * v_norm_r)
         d_safe_dynamic_l = cfg.D_SAFE_BASE + (cfg.K_V_SAFE * v_norm_l)
+
+        # Head barrier margin thickens with the HEAD's own speed, the term the arm-side
+        # margins structurally cannot see.
+        v_norm_h = np.linalg.norm(current_v[idx_head]) if idx_head else 0.0
+        d_safe_dynamic_h = cfg.D_SAFE_BASE + (cfg.K_V_SAFE * v_norm_h)
 
         # Keep the K closest in-range pairs; track the global-closest witness in the same pass.
         pair_distances = []
@@ -486,6 +492,7 @@ class CollisionManager:
         Jdist_list = []
         route_r_list = []
         route_l_list = []
+        route_h_list = []
         n_for_r_list = []   # per-pair contact normal, SIGNED so it points away
         n_for_l_list = []   # from the obstacle into that arm's own geometry
         jacobian_cache = {}
@@ -500,6 +507,7 @@ class CollisionManager:
                     allowed_grasp_ids.add(gid)
             self._allowed_grasp_ids_cache = allowed_grasp_ids
         allowed_grasp_ids = self._allowed_grasp_ids_cache
+        head_ids = set(self.head_geom_ids)
 
         for d, k, res in active_pairs:
             pair = self.cmodel.collisionPairs[k]
@@ -628,6 +636,7 @@ class CollisionManager:
             Jdist_list.append(J_dist_k)
             route_r_list.append('right' in touched)
             route_l_list.append('left' in touched)
+            route_h_list.append(first in head_ids or second in head_ids)
             n_for_r_list.append(n_for_r)
             n_for_l_list.append(n_for_l)
 
@@ -655,6 +664,12 @@ class CollisionManager:
                            if active_interaction_r else np.zeros(self.model.nv))
             J_soft_sum_l = ((weights[mask_l, None] * Jdist_arr[mask_l]).sum(axis=0)
                            if active_interaction_l else np.zeros(self.model.nv))
+            mask_h = np.asarray(route_h_list, dtype=bool) if idx_head else None
+            if mask_h is not None and mask_h.any():
+                sum_exp_h = float(weights[mask_h].sum())
+                J_soft_sum_h = (weights[mask_h, None] * Jdist_arr[mask_h]).sum(axis=0)
+            else:
+                sum_exp_h, J_soft_sum_h = 0.0, np.zeros(self.model.nv)
             # Same softmax weights on the signed normals: the aggregate "which way is this arm
             # blocked" direction, stall-escape use only.
             n_r_arr = np.asarray(n_for_r_list)           # (M, 3)
@@ -674,6 +689,7 @@ class CollisionManager:
             J_soft_sum_r = np.zeros(self.model.nv)
             J_soft_sum_l = np.zeros(self.model.nv)
             n_eff_r, n_eff_l = None, None
+            sum_exp_h, J_soft_sum_h = 0.0, np.zeros(self.model.nv)
 
         # No active interaction -> that arm's barrier is silent; each SoftMin is independent.
         if not active_interaction_r or sum_exp_r < 1e-6:
@@ -687,6 +703,17 @@ class CollisionManager:
         else:
             J_soft_l = J_soft_sum_l / sum_exp_l
             h_soft_l = -(1.0 / cfg.ALPHA_SOFTMIN) * np.log(sum_exp_l)
+
+        # Head barrier exposed as an attribute so every existing caller's return-tuple
+        # unpacking stays untouched; None whenever the head row was not requested.
+        if idx_head is None:
+            self.head_cbf = None
+        elif sum_exp_h < 1e-6:
+            self.head_cbf = (np.zeros(self.model.nv), 1.0, d_safe_dynamic_h, False)
+        else:
+            self.head_cbf = (J_soft_sum_h / sum_exp_h,
+                             -(1.0 / cfg.ALPHA_SOFTMIN) * np.log(sum_exp_h),
+                             d_safe_dynamic_h, True)
 
         return (J_soft_r, h_soft_r, J_soft_l, h_soft_l, d_safe_dynamic_r, d_safe_dynamic_l,
                abs_min_distance, active_interaction_r, active_interaction_l, n_eff_r, n_eff_l)

@@ -1,6 +1,6 @@
 Panels:
   - Class: rviz_common/Displays
-    Help Height: 138
+    Help Height: 172
     Name: Displays
     Property Tree Widget:
       Expanded:
@@ -17,10 +17,11 @@ Panels:
         - /Marker3
         - /QP_Debug_Markers3/Namespaces1
       Splitter Ratio: 0.4910941421985626
-    Tree Height: 275
+    Tree Height: 241
   - Class: rviz_common/Views
     Expanded:
       - /Current View1
+      - /Right Tracking1
     Name: Views
     Splitter Ratio: 0.5
 Visualization Manager:
@@ -513,7 +514,7 @@ Visualization Manager:
       Enabled: true
       Name: Blended_Reference
       Namespaces:
-        {}
+        blended_reference: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -522,7 +523,7 @@ Visualization Manager:
         Value: /blended_reference_marker
       Value: true
     - Class: rviz_default_plugins/Camera
-      Enabled: true
+      Enabled: false
       Far Plane Distance: 100
       Image Rendering: background and overlay
       Name: Camera
@@ -533,7 +534,7 @@ Visualization Manager:
         History Policy: Keep Last
         Reliability Policy: Best Effort
         Value: /head_arm_rgbd/color/image_raw
-      Value: true
+      Value: false
       Visibility:
         Blended_Reference: true
         Grid: true
@@ -593,7 +594,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Best Effort
-        Value: /gripper_head_camera_rgbd/color/image_raw
+        Value: /camera_head_camera_rgbd/color/image_raw
       Value: false
     - Class: rviz_default_plugins/Marker
       Enabled: true
@@ -625,7 +626,8 @@ Visualization Manager:
       Enabled: true
       Name: QP_Debug_Markers
       Namespaces:
-        {}
+        goal_poses: true
+        grasp_ready_cue: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -637,7 +639,8 @@ Visualization Manager:
       Enabled: true
       Name: World_Obstacles_And_Platforms
       Namespaces:
-        {}
+        platform: true
+        workspace: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -701,26 +704,23 @@ Visualization Manager:
   Value: true
   Views:
     Current:
-      Class: rviz_default_plugins/Orbit
-      Distance: 0.9796814322471619
+      Class: rviz_default_plugins/FPS
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
-      Focal Point:
-        X: 0.7837952971458435
-        Y: -0.02758207358419895
-        Z: 0.5420674085617065
-      Focal Shape Fixed Size: true
-      Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.8749997019767761
-      Target Frame: <Fixed Frame>
-      Value: Orbit (rviz)
-      Yaw: 3.1331357955932617
+      Pitch: 0.599999725818634
+      Position:
+        X: -0.7077645063400269
+        Y: 0.03660479187965393
+        Z: 0.4120030701160431
+      Target Frame: arm_right_7_link
+      Value: FPS (rviz_default_plugins)
+      Yaw: 0.011563549749553204
     Saved:
       - Class: rviz_default_plugins/Orbit
         Distance: 1.0063155889511108
@@ -802,19 +802,53 @@ Visualization Manager:
         Target Frame: <Fixed Frame>
         Value: Orbit (rviz)
         Yaw: 2.2931196689605713
+      - Class: rviz_default_plugins/FPS
+        Enable Stereo Rendering:
+          Stereo Eye Separation: 0.05999999865889549
+          Stereo Focal Distance: 1
+          Swap Stereo Eyes: false
+          Value: false
+        Invert Z Axis: false
+        Name: Right Tracking
+        Near Clip Distance: 0.009999999776482582
+        Pitch: 0.3349999487400055
+        Position:
+          X: -0.6390319466590881
+          Y: 0.20675651729106903
+          Z: 0.2930527329444885
+        Target Frame: arm_right_7_link
+        Value: FPS (rviz_default_plugins)
+        Yaw: 6.249748229980469
+      - Class: rviz_default_plugins/FPS
+        Enable Stereo Rendering:
+          Stereo Eye Separation: 0.05999999865889549
+          Stereo Focal Distance: 1
+          Swap Stereo Eyes: false
+          Value: false
+        Invert Z Axis: false
+        Name: Left Tracking
+        Near Clip Distance: 0.009999999776482582
+        Pitch: 0.3349999487400055
+        Position:
+          X: -0.8409041166305542
+          Y: -0.00683429092168808
+          Z: 0.26362156867980957
+        Target Frame: arm_left_7_link
+        Value: FPS (rviz_default_plugins)
+        Yaw: 6.249748229980469
 Window Geometry:
   Camera:
     collapsed: false
   Displays:
     collapsed: true
-  Height: 1008
+  Height: 1018
   Hide Left Dock: true
   Hide Right Dock: false
   Image:
     collapsed: false
-  QMainWindow State: 000000ff00000000fd0000000200000000000002380000035efc0200000005fb000000100044006900730070006c00610079007300000000690000022f0000017800fffffffb0000000a0056006900650077007300000002a4000001230000012300fffffffb0000000c00430061006d00650072006100000003c30000008d0000004500fffffffb0000000a0049006d006100670065000000036d0000005a0000004500fffffffb0000000c00430061006d00650072006101000003780000004f0000000000000000000000020000050000000106fc0100000001fb0000000a0049006d006100670065020000094c0000006e0000030c00000244000005c8000003a500000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730000000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd00000002000000000000023800000368fc0200000003fb000000100044006900730070006c0061007900730000000069000002390000017800fffffffb0000000a0056006900650077007300000002ae000001230000012300fffffffb0000000c00430061006d00650072006100000003c30000008d0000004500ffffff000000020000050000000106fc0100000001fb0000000a0049006d006100670065020000072000000036000005600000037700000335000003af00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730000000000ffffffff0000000000000000
   Views:
     collapsed: true
-  Width: 1480
-  X: 140
-  Y: 918
+  Width: 821
+  X: 2379
+  Y: 907

@@ -3,7 +3,7 @@
   <world name="bimanual_manipulation_world">
 
     <!-- ================================================================
-         PHYSICS: same tuning as no_obstacle.world, kept identical.
+         PHYSICS: same tuning as no_obstacle.world and rack_world.world.
     ================================================================ -->
     <physics type="ode">
       <gravity>0 0 -9.81</gravity>
@@ -24,6 +24,21 @@
       <max_step_size>0.001</max_step_size>
     </physics>
 
+    <!-- Startup camera: gzclient reads this once at launch, replacing Gazebo's
+         stock default view. Symmetric third-person operator view: centered on
+         the robot's own y=0 centerline (zero yaw, zero roll), directly behind
+         the spawn point (x=-1.5) and a bit above head height (z=2.0), pitched
+         down ~24 deg to look forward along +x: how someone standing behind
+         the robot and looking over it would actually see the workspace.
+         Reposition by hand in gzclient, then File > Save World As over this
+         file to bake in your own preferred pose instead. -->
+    <gui fullscreen="0">
+      <camera name="user_camera">
+        <pose>-1.50 0.00 1.85 0 0.41 0.00</pose>
+        <view_controller>orbit</view_controller>
+      </camera>
+    </gui>
+
     <plugin name="ros2_linkattacher" filename="libgazebo_link_attacher.so"/>
 
     <!-- Standard illumination and ground -->
@@ -31,15 +46,54 @@
     <include><uri>model://ground_plane</uri></include>
 
     <!-- ================================================================
-         WORK TABLE: same pose, size, and material as no_obstacle.world's
-         work_table.
+         SHIELDED TWIN-CONVEYOR SCENARIO (TRIAGo)
+         A glass safety shield stands between the robot and the table,
+         spanning the table's FULL width, so the frontal approach is closed
+         everywhere along it and every grasp has to clear the pane's top edge
+         (z=0.82) before descending. Two conveyors flank the table, one on
+         each side, mirror-symmetric about y=0, each carrying its own green
+         Final placement disk and its own stock crate.
+
+         TASK: the RIGHT arm picks the red battery and places it on Final_R,
+         on the RIGHT conveyor. The LEFT arm picks the blue battery and
+         places it on Final_L, on the LEFT conveyor. No handover, no rack.
+
+         LOAD-BEARING GEOMETRY:
+           work table       pose [1.010,0.0,0.325]  size [0.60,0.50,0.65]
+                             top z=0.65  x[0.71,1.31]  y[-0.25,0.25]
+           shield            model pose [0.71,0.00,0.65]; collision sub-pose
+                             [0,0,0.035] size [0.02,0.50,0.27]
+                             -> absolute collision box [0.71,0.00,0.685]
+                             size [0.02,0.50,0.27], z[0.55,0.82] (base fixed,
+                             3cm trimmed off the top), y[-0.25,0.25]: the
+                             SAME width as the table, so no side window is
+                             left beside it
+           conveyor_right    collision envelope, sub-pose [1.10,-0.85,0.35]
+                             size [1.30,0.48,0.70]  y[-1.09,-0.61]
+           conveyor_left     collision envelope, sub-pose [1.10,0.85,0.35]
+                             size [1.30,0.48,0.70]  y[0.61,1.09]  (exact
+                             y-mirror of conveyor_right; x, z, rpy unchanged)
+           Final_R           [0.680,-0.85,0.701]  r=0.15
+           Final_L           [0.680,0.85,0.701]   r=0.15
+           cylinders         x=0.810  y=+-0.20  z_center=0.730  length=0.16
+                             (matches rack_world.world's battery height)
+
+         Run: ros2 launch triago_gazebo triago_gazebo.launch.py ... world_name:=shield_world
+         Mirrors config/worlds/shield_world.yaml (CBF/collision model) - keep
+         both in sync by hand; decorative scenery below is visual-only and
+         deliberately absent from the YAML.
+    ================================================================ -->
+
+    <!-- ================================================================
+         WORK TABLE: full depth (x=0.60) - nothing sits behind it in this
+         layout, both conveyors sit beside it instead.
     ================================================================ -->
     <model name="work_table">
       <static>true</static>
-      <pose>1.000 0.0 0.35 0 0 0</pose>
+      <pose>1.010 0.0 0.325 0 0 0</pose>
       <link name="link">
         <collision name="col">
-          <geometry><box><size>0.6 0.5 0.7</size></box></geometry>
+          <geometry><box><size>0.60 0.50 0.65</size></box></geometry>
           <surface>
             <contact>
               <ode>
@@ -53,7 +107,7 @@
           </surface>
         </collision>
         <visual name="vis">
-          <geometry><box><size>0.6 0.5 0.7</size></box></geometry>
+          <geometry><box><size>0.60 0.50 0.65</size></box></geometry>
           <material>
             <script>
               <uri>file://media/materials/scripts/gazebo.material</uri>
@@ -64,15 +118,28 @@
       </link>
     </model>
 
-    <!-- Visual placement manifold (Yellow Area), no collision, same as
-         no_obstacle.world -->
-    <model name="placement_area">
+    <!-- FINAL_R platform (green): on the right conveyor belt, inside its
+         [-1.03,-0.67] width with a 0.03 m margin on each side. -->
+    <model name="placement_area_final_right">
       <static>true</static>
-      <pose>1.000 0.0 0.701 0 0 0</pose>
+      <pose>0.680 -0.85 0.701 0 0 0</pose>
       <link name="link">
         <visual name="vis">
           <geometry><cylinder><radius>0.15</radius><length>0.002</length></cylinder></geometry>
-          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Yellow</name></script></material>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Green</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- FINAL_L platform (green): the y-mirror of Final_R, on the left
+         conveyor belt. -->
+    <model name="placement_area_final_left">
+      <static>true</static>
+      <pose>0.680 0.85 0.701 0 0 0</pose>
+      <link name="link">
+        <visual name="vis">
+          <geometry><cylinder><radius>0.15</radius><length>0.002</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Green</name></script></material>
         </visual>
       </link>
     </model>
@@ -82,7 +149,7 @@
     ================================================================ -->
     <model name="red_cylinder">
       <static>false</static>
-      <pose>0.800 -0.20 0.775 0 0 0</pose>
+      <pose>0.810 -0.20 0.730 0 0 0</pose>
       <link name="link">
         <inertial>
           <pose>0 0 0 0 0 0</pose>
@@ -95,7 +162,7 @@
           </inertia>
         </inertial>
         <collision name="col">
-          <geometry><cylinder><radius>0.02</radius><length>0.15</length></cylinder></geometry>
+          <geometry><cylinder><radius>0.02</radius><length>0.16</length></cylinder></geometry>
           <surface>
             <contact>
               <ode>
@@ -111,8 +178,43 @@
           </surface>
         </collision>
         <visual name="vis">
-          <geometry><cylinder><radius>0.02</radius><length>0.15</length></cylinder></geometry>
+          <geometry><cylinder><radius>0.02</radius><length>0.16</length></cylinder></geometry>
           <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Red</name></script></material>
+        </visual>
+
+        <!-- Battery-look details (visual only): grey top cap, gold terminal
+             nub (protrudes above the body's top face z=0.080 - the only
+             element outside the body envelope), dark-grey bottom cap, black
+             label bands + white label patch. -->
+        <visual name="cap_top">
+          <pose>0 0 0.0725 0 0 0</pose>
+          <geometry><cylinder><radius>0.0205</radius><length>0.0149</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
+        </visual>
+        <visual name="terminal_nub">
+          <pose>0 0 0.0843 0 0 0</pose>
+          <geometry><cylinder><radius>0.008</radius><length>0.0085</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Gold</name></script></material>
+        </visual>
+        <visual name="cap_bottom">
+          <pose>0 0 -0.0736 0 0 0</pose>
+          <geometry><cylinder><radius>0.0205</radius><length>0.0128</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="label_band_top">
+          <pose>0 0 0.0373 0 0 0</pose>
+          <geometry><cylinder><radius>0.0206</radius><length>0.0107</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/FlatBlack</name></script></material>
+        </visual>
+        <visual name="label_band_bottom">
+          <pose>0 0 -0.0373 0 0 0</pose>
+          <geometry><cylinder><radius>0.0206</radius><length>0.0107</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/FlatBlack</name></script></material>
+        </visual>
+        <visual name="label_patch">
+          <pose>0 0 0.0 0 0 0</pose>
+          <geometry><cylinder><radius>0.0207</radius><length>0.0320</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/White</name></script></material>
         </visual>
       </link>
     </model>
@@ -122,7 +224,7 @@
     ================================================================ -->
     <model name="blue_cylinder">
       <static>false</static>
-      <pose>0.800 0.20 0.775 0 0 0</pose>
+      <pose>0.810 0.20 0.730 0 0 0</pose>
       <link name="link">
         <inertial>
           <pose>0 0 0 0 0 0</pose>
@@ -135,7 +237,7 @@
           </inertia>
         </inertial>
         <collision name="col">
-          <geometry><cylinder><radius>0.02</radius><length>0.15</length></cylinder></geometry>
+          <geometry><cylinder><radius>0.02</radius><length>0.16</length></cylinder></geometry>
           <surface>
             <contact>
               <ode>
@@ -151,42 +253,919 @@
           </surface>
         </collision>
         <visual name="vis">
-          <geometry><cylinder><radius>0.02</radius><length>0.15</length></cylinder></geometry>
+          <geometry><cylinder><radius>0.02</radius><length>0.16</length></cylinder></geometry>
           <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Blue</name></script></material>
+        </visual>
+
+        <!-- Battery-look details (visual only): same accent styling as
+             red_cylinder; only the body color differs. -->
+        <visual name="cap_top">
+          <pose>0 0 0.0725 0 0 0</pose>
+          <geometry><cylinder><radius>0.0205</radius><length>0.0149</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
+        </visual>
+        <visual name="terminal_nub">
+          <pose>0 0 0.0843 0 0 0</pose>
+          <geometry><cylinder><radius>0.008</radius><length>0.0085</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Gold</name></script></material>
+        </visual>
+        <visual name="cap_bottom">
+          <pose>0 0 -0.0736 0 0 0</pose>
+          <geometry><cylinder><radius>0.0205</radius><length>0.0128</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="label_band_top">
+          <pose>0 0 0.0373 0 0 0</pose>
+          <geometry><cylinder><radius>0.0206</radius><length>0.0107</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/FlatBlack</name></script></material>
+        </visual>
+        <visual name="label_band_bottom">
+          <pose>0 0 -0.0373 0 0 0</pose>
+          <geometry><cylinder><radius>0.0206</radius><length>0.0107</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/FlatBlack</name></script></material>
+        </visual>
+        <visual name="label_patch">
+          <pose>0 0 0.0 0 0 0</pose>
+          <geometry><cylinder><radius>0.0207</radius><length>0.0320</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/White</name></script></material>
         </visual>
       </link>
     </model>
 
     <!-- ================================================================
-         SAFETY SHIELD ASSEMBLY: new for this world. Static glass pane
-         standing at the table's front edge, with two decorative corner
-         brackets (visual only, no collision). Matches
-         config/worlds/shield_world.yaml's "shield_obstacle" entry exactly
-         (absolute collision pose 0.70 0.00 0.75, size 0.02 0.35 0.30).
+         SAFETY SHIELD ASSEMBLY: static machine-guard panel standing at the
+         table's front edge. Its width matches the table's exactly
+         (y[-0.25,0.25]), so it closes the frontal approach across the WHOLE
+         table: nothing reaches a cylinder without clearing the pane's top
+         edge at z=0.82 first. The collision box is load-bearing (mirrored
+         exactly in shield_world.yaml's "shield_obstacle") and every visual
+         below is dressing built around it, carrying NO collision of its own:
+         a steel frame (posts, top/bottom rails, two mullions splitting the
+         glass into three panels), an inset glass pane, a 5-segment hazard
+         band across the top, and two mounting feet below the table top.
     ================================================================ -->
     <model name="safety_shield_assembly">
       <static>true</static>
-      <pose>0.70 0.00 0.70 0 0 0</pose>
+      <pose>0.71 0.00 0.65 0 0 0</pose>
       <link name="link">
         <collision name="shield_col">
-          <pose>0 0 0.05 0 0 0</pose>
-          <geometry><box><size>0.02 0.35 0.30</size></box></geometry>
+          <pose>0 0 0.035 0 0 0</pose>
+          <geometry><box><size>0.02 0.50 0.27</size></box></geometry>
         </collision>
-        <visual name="shield_vis">
-          <pose>0 0 0.05 0 0 0</pose>
-          <geometry><box><size>0.02 0.35 0.30</size></box></geometry>
+
+        <!-- Steel frame: two side posts, top/bottom rails, two mullions. -->
+        <visual name="post_left">
+          <pose>0 0.24 0.035 0 0 0</pose>
+          <geometry><box><size>0.025 0.02 0.27</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="post_right">
+          <pose>0 -0.24 0.035 0 0 0</pose>
+          <geometry><box><size>0.025 0.02 0.27</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="rail_top">
+          <pose>0 0.0 0.16 0 0 0</pose>
+          <geometry><box><size>0.025 0.50 0.02</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="rail_bottom">
+          <pose>0 0.0 -0.09 0 0 0</pose>
+          <geometry><box><size>0.025 0.50 0.02</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="mullion_left">
+          <pose>0 0.153 0.035 0 0 0</pose>
+          <geometry><box><size>0.022 0.015 0.23</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="mullion_right">
+          <pose>0 -0.153 0.035 0 0 0</pose>
+          <geometry><box><size>0.022 0.015 0.23</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+
+        <!-- Inset glass pane, slightly smaller than the collision box so
+             the frame reads as surrounding it. -->
+        <visual name="glass_pane">
+          <pose>0 0.0 0.035 0 0 0</pose>
+          <geometry><box><size>0.012 0.46 0.23</size></box></geometry>
           <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Glass</name></script></material>
         </visual>
 
-        <visual name="bracket_1">
-          <pose>0 0.12 0.02 0 0 0</pose>
-          <geometry><box><size>0.04 0.04 0.04</size></box></geometry>
+        <!-- Hazard band across the top: 5 alternating segments spanning the
+             full 0.50 m width. -->
+        <visual name="hazard_1">
+          <pose>0 -0.20 0.135 0 0 0</pose>
+          <geometry><box><size>0.028 0.10 0.03</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/ZincYellow</name></script></material>
+        </visual>
+        <visual name="hazard_2">
+          <pose>0 -0.10 0.135 0 0 0</pose>
+          <geometry><box><size>0.028 0.10 0.03</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/FlatBlack</name></script></material>
+        </visual>
+        <visual name="hazard_3">
+          <pose>0 0.00 0.135 0 0 0</pose>
+          <geometry><box><size>0.028 0.10 0.03</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/ZincYellow</name></script></material>
+        </visual>
+        <visual name="hazard_4">
+          <pose>0 0.10 0.135 0 0 0</pose>
+          <geometry><box><size>0.028 0.10 0.03</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/FlatBlack</name></script></material>
+        </visual>
+        <visual name="hazard_5">
+          <pose>0 0.20 0.135 0 0 0</pose>
+          <geometry><box><size>0.028 0.10 0.03</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/ZincYellow</name></script></material>
+        </visual>
+
+        <!-- Mounting feet, below the table top so they stay out of the arm's path. -->
+        <visual name="foot_left">
+          <pose>0 0.24 -0.095 0 0 0</pose>
+          <geometry><box><size>0.09 0.05 0.02</size></box></geometry>
           <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
         </visual>
-        <visual name="bracket_2">
-          <pose>0 -0.12 0.02 0 0 0</pose>
-          <geometry><box><size>0.04 0.04 0.04</size></box></geometry>
+        <visual name="foot_right">
+          <pose>0 -0.24 -0.095 0 0 0</pose>
+          <geometry><box><size>0.09 0.05 0.02</size></box></geometry>
           <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- ================================================================
+         CONVEYOR_RIGHT: CBF collision envelope (belt top flush with the
+         belt top z=0.70) carrying a generous visual-only shell -
+         belt, drums, side frames, rollers, legs, motor and an e-stop. Every
+         visual below stays inside the envelope box [0.45,1.75]x[-1.09,-0.61]
+         and never crosses z=0.70 over the belt. Matches config/worlds/
+         shield_world.yaml's "conveyor_right" entry exactly (only the
+         collision box is mirrored there). conveyor_left below is this same
+         model with every sub-pose's y coordinate negated.
+    ================================================================ -->
+    <model name="conveyor_right">
+      <static>true</static>
+      <pose>0 0 0 0 0 0</pose>
+      <link name="link">
+
+        <collision name="col">
+          <pose>1.10 -0.85 0.35 0 0 0</pose>
+          <geometry><box><size>1.30 0.48 0.70</size></box></geometry>
+          <surface>
+            <contact>
+              <ode>
+                <kp>1000000</kp>
+                <kd>100</kd>
+                <max_vel>0.5</max_vel>
+                <min_depth>0.001</min_depth>
+              </ode>
+            </contact>
+            <friction><ode><mu>0.8</mu><mu2>0.8</mu2></ode></friction>
+          </surface>
+        </collision>
+
+        <visual name="belt_slab">
+          <pose>1.10 -0.85 0.690 0 0 0</pose>
+          <geometry><box><size>1.30 0.36 0.02</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/FlatBlack</name></script></material>
+        </visual>
+
+        <!-- End drums: axis along y (roll=90deg), length == belt width, rims
+             flush with the belt top (z=0.70). Radius pokes ~1cm past the
+             envelope's x ends - realistic (real idler drums overhang the
+             frame slightly) and still visual-only. -->
+        <visual name="drum_near">
+          <pose>0.485 -0.85 0.655 1.5708 0 0</pose>
+          <geometry><cylinder><radius>0.045</radius><length>0.36</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
+        </visual>
+        <visual name="drum_far">
+          <pose>1.715 -0.85 0.655 1.5708 0 0</pose>
+          <geometry><cylinder><radius>0.045</radius><length>0.36</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
+        </visual>
+
+        <visual name="frame_near">
+          <pose>1.10 -0.65 0.640 0 0 0</pose>
+          <geometry><box><size>1.30 0.04 0.12</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/ZincYellow</name></script></material>
+        </visual>
+        <visual name="frame_far">
+          <pose>1.10 -1.05 0.640 0 0 0</pose>
+          <geometry><box><size>1.30 0.04 0.12</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/ZincYellow</name></script></material>
+        </visual>
+
+        <!-- Roller ends through the near frame (belt-side face), 8x spaced 0.13 m. -->
+        <visual name="roller_1">
+          <pose>0.60 -0.625 0.655 1.5708 0 0</pose>
+          <geometry><cylinder><radius>0.022</radius><length>0.02</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="roller_2">
+          <pose>0.73 -0.625 0.655 1.5708 0 0</pose>
+          <geometry><cylinder><radius>0.022</radius><length>0.02</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="roller_3">
+          <pose>0.86 -0.625 0.655 1.5708 0 0</pose>
+          <geometry><cylinder><radius>0.022</radius><length>0.02</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="roller_4">
+          <pose>0.99 -0.625 0.655 1.5708 0 0</pose>
+          <geometry><cylinder><radius>0.022</radius><length>0.02</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="roller_5">
+          <pose>1.12 -0.625 0.655 1.5708 0 0</pose>
+          <geometry><cylinder><radius>0.022</radius><length>0.02</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="roller_6">
+          <pose>1.25 -0.625 0.655 1.5708 0 0</pose>
+          <geometry><cylinder><radius>0.022</radius><length>0.02</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="roller_7">
+          <pose>1.38 -0.625 0.655 1.5708 0 0</pose>
+          <geometry><cylinder><radius>0.022</radius><length>0.02</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="roller_8">
+          <pose>1.51 -0.625 0.655 1.5708 0 0</pose>
+          <geometry><cylinder><radius>0.022</radius><length>0.02</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+
+        <!-- 4 legs: top (z=0.58) flush with the side frames' underside. -->
+        <visual name="leg_fl">
+          <pose>0.57 -0.68 0.29 0 0 0</pose>
+          <geometry><box><size>0.06 0.06 0.58</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="leg_fr">
+          <pose>0.57 -1.02 0.29 0 0 0</pose>
+          <geometry><box><size>0.06 0.06 0.58</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="leg_bl">
+          <pose>1.63 -0.68 0.29 0 0 0</pose>
+          <geometry><box><size>0.06 0.06 0.58</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="leg_br">
+          <pose>1.63 -1.02 0.29 0 0 0</pose>
+          <geometry><box><size>0.06 0.06 0.58</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+
+        <visual name="brace_near">
+          <pose>0.57 -0.85 0.08 0 0 0</pose>
+          <geometry><box><size>0.04 0.36 0.04</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/ZincYellow</name></script></material>
+        </visual>
+        <visual name="brace_far">
+          <pose>1.63 -0.85 0.08 0 0 0</pose>
+          <geometry><box><size>0.04 0.36 0.04</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/ZincYellow</name></script></material>
+        </visual>
+
+        <visual name="motor_housing">
+          <pose>1.65 -0.85 0.60 0 0 0</pose>
+          <geometry><box><size>0.10 0.14 0.10</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="motor_gearbox">
+          <pose>1.58 -0.85 0.60 0 1.5708 0</pose>
+          <geometry><cylinder><radius>0.05</radius><length>0.08</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
+        </visual>
+
+        <visual name="estop_plate">
+          <pose>0.57 -0.645 0.45 0 0 0</pose>
+          <geometry><box><size>0.015 0.05 0.08</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/ZincYellow</name></script></material>
+        </visual>
+        <visual name="estop_button">
+          <pose>0.57 -0.635 0.48 0 0 0</pose>
+          <geometry><cylinder><radius>0.015</radius><length>0.02</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Red</name></script></material>
+        </visual>
+
+        <!-- Line colour code on the robot-facing frame: this is the RED line. -->
+        <visual name="line_code_stripe">
+          <pose>0.52 -0.625 0.64 0 0 0</pose>
+          <geometry><box><size>0.12 0.012 0.08</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Red</name></script></material>
+        </visual>
+
+      </link>
+    </model>
+
+    <!-- ================================================================
+         CONVEYOR_LEFT: the exact y-mirror of conveyor_right (every
+         sub-pose's y coordinate negated, x and z unchanged, every rpy
+         unchanged since the rotated parts are cylinders symmetric about
+         their own axis). Matches config/worlds/shield_world.yaml's
+         "conveyor_left" entry exactly.
+    ================================================================ -->
+    <model name="conveyor_left">
+      <static>true</static>
+      <pose>0 0 0 0 0 0</pose>
+      <link name="link">
+
+        <collision name="col">
+          <pose>1.10 0.85 0.35 0 0 0</pose>
+          <geometry><box><size>1.30 0.48 0.70</size></box></geometry>
+          <surface>
+            <contact>
+              <ode>
+                <kp>1000000</kp>
+                <kd>100</kd>
+                <max_vel>0.5</max_vel>
+                <min_depth>0.001</min_depth>
+              </ode>
+            </contact>
+            <friction><ode><mu>0.8</mu><mu2>0.8</mu2></ode></friction>
+          </surface>
+        </collision>
+
+        <visual name="belt_slab">
+          <pose>1.10 0.85 0.690 0 0 0</pose>
+          <geometry><box><size>1.30 0.36 0.02</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/FlatBlack</name></script></material>
+        </visual>
+
+        <visual name="drum_near">
+          <pose>0.485 0.85 0.655 1.5708 0 0</pose>
+          <geometry><cylinder><radius>0.045</radius><length>0.36</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
+        </visual>
+        <visual name="drum_far">
+          <pose>1.715 0.85 0.655 1.5708 0 0</pose>
+          <geometry><cylinder><radius>0.045</radius><length>0.36</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
+        </visual>
+
+        <visual name="frame_near">
+          <pose>1.10 0.65 0.640 0 0 0</pose>
+          <geometry><box><size>1.30 0.04 0.12</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/ZincYellow</name></script></material>
+        </visual>
+        <visual name="frame_far">
+          <pose>1.10 1.05 0.640 0 0 0</pose>
+          <geometry><box><size>1.30 0.04 0.12</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/ZincYellow</name></script></material>
+        </visual>
+
+        <visual name="roller_1">
+          <pose>0.60 0.625 0.655 1.5708 0 0</pose>
+          <geometry><cylinder><radius>0.022</radius><length>0.02</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="roller_2">
+          <pose>0.73 0.625 0.655 1.5708 0 0</pose>
+          <geometry><cylinder><radius>0.022</radius><length>0.02</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="roller_3">
+          <pose>0.86 0.625 0.655 1.5708 0 0</pose>
+          <geometry><cylinder><radius>0.022</radius><length>0.02</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="roller_4">
+          <pose>0.99 0.625 0.655 1.5708 0 0</pose>
+          <geometry><cylinder><radius>0.022</radius><length>0.02</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="roller_5">
+          <pose>1.12 0.625 0.655 1.5708 0 0</pose>
+          <geometry><cylinder><radius>0.022</radius><length>0.02</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="roller_6">
+          <pose>1.25 0.625 0.655 1.5708 0 0</pose>
+          <geometry><cylinder><radius>0.022</radius><length>0.02</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="roller_7">
+          <pose>1.38 0.625 0.655 1.5708 0 0</pose>
+          <geometry><cylinder><radius>0.022</radius><length>0.02</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="roller_8">
+          <pose>1.51 0.625 0.655 1.5708 0 0</pose>
+          <geometry><cylinder><radius>0.022</radius><length>0.02</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+
+        <visual name="leg_fl">
+          <pose>0.57 0.68 0.29 0 0 0</pose>
+          <geometry><box><size>0.06 0.06 0.58</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="leg_fr">
+          <pose>0.57 1.02 0.29 0 0 0</pose>
+          <geometry><box><size>0.06 0.06 0.58</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="leg_bl">
+          <pose>1.63 0.68 0.29 0 0 0</pose>
+          <geometry><box><size>0.06 0.06 0.58</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="leg_br">
+          <pose>1.63 1.02 0.29 0 0 0</pose>
+          <geometry><box><size>0.06 0.06 0.58</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+
+        <visual name="brace_near">
+          <pose>0.57 0.85 0.08 0 0 0</pose>
+          <geometry><box><size>0.04 0.36 0.04</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/ZincYellow</name></script></material>
+        </visual>
+        <visual name="brace_far">
+          <pose>1.63 0.85 0.08 0 0 0</pose>
+          <geometry><box><size>0.04 0.36 0.04</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/ZincYellow</name></script></material>
+        </visual>
+
+        <visual name="motor_housing">
+          <pose>1.65 0.85 0.60 0 0 0</pose>
+          <geometry><box><size>0.10 0.14 0.10</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="motor_gearbox">
+          <pose>1.58 0.85 0.60 0 1.5708 0</pose>
+          <geometry><cylinder><radius>0.05</radius><length>0.08</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
+        </visual>
+
+        <visual name="estop_plate">
+          <pose>0.57 0.645 0.45 0 0 0</pose>
+          <geometry><box><size>0.015 0.05 0.08</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/ZincYellow</name></script></material>
+        </visual>
+        <visual name="estop_button">
+          <pose>0.57 0.635 0.48 0 0 0</pose>
+          <geometry><cylinder><radius>0.015</radius><length>0.02</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Red</name></script></material>
+        </visual>
+
+        <!-- Line colour code on the robot-facing frame: this is the BLUE line. -->
+        <visual name="line_code_stripe">
+          <pose>0.52 0.625 0.64 0 0 0</pose>
+          <geometry><box><size>0.12 0.012 0.08</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Blue</name></script></material>
+        </visual>
+
+      </link>
+    </model>
+
+    <!-- ================================================================
+         BATTERY CHESTS: one crate riding the far end of each belt, holding
+         that line's stock. They are what tells the two conveyors apart at a
+         glance (red batteries on the right line, blue on the left), together
+         with the colour-code stripe on each conveyor's robot-facing frame.
+         Visual-only and ~1.8 m out, far past any reachable pose, so they are
+         deliberately absent from shield_world.yaml like the rest of the
+         scenery. Each crate sits ON the belt (floor at z=0.70) and stays
+         inside its belt's y span.
+    ================================================================ -->
+    <model name="battery_chest_right">
+      <static>true</static>
+      <pose>1.52 -0.85 0 0 0 0</pose>
+      <link name="link">
+        <visual name="chest_floor">
+          <pose>0 0 0.710 0 0 0</pose>
+          <geometry><box><size>0.34 0.34 0.02</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Wood</name></script></material>
+        </visual>
+        <visual name="wall_far">
+          <pose>0.16 0 0.790 0 0 0</pose>
+          <geometry><box><size>0.02 0.34 0.14</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Wood</name></script></material>
+        </visual>
+        <visual name="wall_near">
+          <pose>-0.16 0 0.790 0 0 0</pose>
+          <geometry><box><size>0.02 0.34 0.14</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Wood</name></script></material>
+        </visual>
+        <visual name="wall_outer">
+          <pose>0 -0.16 0.790 0 0 0</pose>
+          <geometry><box><size>0.34 0.02 0.14</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Wood</name></script></material>
+        </visual>
+        <visual name="wall_inner">
+          <pose>0 0.16 0.790 0 0 0</pose>
+          <geometry><box><size>0.34 0.02 0.14</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Wood</name></script></material>
+        </visual>
+
+        <!-- Colour-code placard on the robot-facing wall: RED line stock. -->
+        <visual name="label_plate">
+          <pose>-0.172 0 0.790 0 0 0</pose>
+          <geometry><box><size>0.005 0.14 0.06</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Red</name></script></material>
+        </visual>
+
+        <!-- Stock: 6 red batteries standing on the crate floor, tops peeking
+             just above the 0.14 m rim. -->
+        <visual name="battery_1"><pose>-0.08 -0.10 0.795 0 0 0</pose><geometry><cylinder><radius>0.02</radius><length>0.15</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Red</name></script></material></visual>
+        <visual name="battery_1_cap"><pose>-0.08 -0.10 0.876 0 0 0</pose><geometry><cylinder><radius>0.021</radius><length>0.012</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+        <visual name="battery_2"><pose>-0.08 0.00 0.795 0 0 0</pose><geometry><cylinder><radius>0.02</radius><length>0.15</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Red</name></script></material></visual>
+        <visual name="battery_2_cap"><pose>-0.08 0.00 0.876 0 0 0</pose><geometry><cylinder><radius>0.021</radius><length>0.012</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+        <visual name="battery_3"><pose>-0.08 0.10 0.795 0 0 0</pose><geometry><cylinder><radius>0.02</radius><length>0.15</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Red</name></script></material></visual>
+        <visual name="battery_3_cap"><pose>-0.08 0.10 0.876 0 0 0</pose><geometry><cylinder><radius>0.021</radius><length>0.012</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+        <visual name="battery_4"><pose>0.08 -0.10 0.795 0 0 0</pose><geometry><cylinder><radius>0.02</radius><length>0.15</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Red</name></script></material></visual>
+        <visual name="battery_4_cap"><pose>0.08 -0.10 0.876 0 0 0</pose><geometry><cylinder><radius>0.021</radius><length>0.012</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+        <visual name="battery_5"><pose>0.08 0.00 0.795 0 0 0</pose><geometry><cylinder><radius>0.02</radius><length>0.15</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Red</name></script></material></visual>
+        <visual name="battery_5_cap"><pose>0.08 0.00 0.876 0 0 0</pose><geometry><cylinder><radius>0.021</radius><length>0.012</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+        <visual name="battery_6"><pose>0.08 0.10 0.795 0 0 0</pose><geometry><cylinder><radius>0.02</radius><length>0.15</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Red</name></script></material></visual>
+        <visual name="battery_6_cap"><pose>0.08 0.10 0.876 0 0 0</pose><geometry><cylinder><radius>0.021</radius><length>0.012</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+      </link>
+    </model>
+
+    <model name="battery_chest_left">
+      <static>true</static>
+      <pose>1.52 0.85 0 0 0 0</pose>
+      <link name="link">
+        <visual name="chest_floor">
+          <pose>0 0 0.710 0 0 0</pose>
+          <geometry><box><size>0.34 0.34 0.02</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Wood</name></script></material>
+        </visual>
+        <visual name="wall_far">
+          <pose>0.16 0 0.790 0 0 0</pose>
+          <geometry><box><size>0.02 0.34 0.14</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Wood</name></script></material>
+        </visual>
+        <visual name="wall_near">
+          <pose>-0.16 0 0.790 0 0 0</pose>
+          <geometry><box><size>0.02 0.34 0.14</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Wood</name></script></material>
+        </visual>
+        <visual name="wall_outer">
+          <pose>0 0.16 0.790 0 0 0</pose>
+          <geometry><box><size>0.34 0.02 0.14</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Wood</name></script></material>
+        </visual>
+        <visual name="wall_inner">
+          <pose>0 -0.16 0.790 0 0 0</pose>
+          <geometry><box><size>0.34 0.02 0.14</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Wood</name></script></material>
+        </visual>
+
+        <!-- Colour-code placard on the robot-facing wall: BLUE line stock. -->
+        <visual name="label_plate">
+          <pose>-0.172 0 0.790 0 0 0</pose>
+          <geometry><box><size>0.005 0.14 0.06</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Blue</name></script></material>
+        </visual>
+
+        <!-- Stock: 6 blue batteries, mirroring the right chest's layout. -->
+        <visual name="battery_1"><pose>-0.08 0.10 0.795 0 0 0</pose><geometry><cylinder><radius>0.02</radius><length>0.15</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Blue</name></script></material></visual>
+        <visual name="battery_1_cap"><pose>-0.08 0.10 0.876 0 0 0</pose><geometry><cylinder><radius>0.021</radius><length>0.012</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+        <visual name="battery_2"><pose>-0.08 0.00 0.795 0 0 0</pose><geometry><cylinder><radius>0.02</radius><length>0.15</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Blue</name></script></material></visual>
+        <visual name="battery_2_cap"><pose>-0.08 0.00 0.876 0 0 0</pose><geometry><cylinder><radius>0.021</radius><length>0.012</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+        <visual name="battery_3"><pose>-0.08 -0.10 0.795 0 0 0</pose><geometry><cylinder><radius>0.02</radius><length>0.15</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Blue</name></script></material></visual>
+        <visual name="battery_3_cap"><pose>-0.08 -0.10 0.876 0 0 0</pose><geometry><cylinder><radius>0.021</radius><length>0.012</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+        <visual name="battery_4"><pose>0.08 0.10 0.795 0 0 0</pose><geometry><cylinder><radius>0.02</radius><length>0.15</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Blue</name></script></material></visual>
+        <visual name="battery_4_cap"><pose>0.08 0.10 0.876 0 0 0</pose><geometry><cylinder><radius>0.021</radius><length>0.012</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+        <visual name="battery_5"><pose>0.08 0.00 0.795 0 0 0</pose><geometry><cylinder><radius>0.02</radius><length>0.15</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Blue</name></script></material></visual>
+        <visual name="battery_5_cap"><pose>0.08 0.00 0.876 0 0 0</pose><geometry><cylinder><radius>0.021</radius><length>0.012</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+        <visual name="battery_6"><pose>0.08 -0.10 0.795 0 0 0</pose><geometry><cylinder><radius>0.02</radius><length>0.15</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Blue</name></script></material></visual>
+        <visual name="battery_6_cap"><pose>0.08 -0.10 0.876 0 0 0</pose><geometry><cylinder><radius>0.021</radius><length>0.012</length></cylinder></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+      </link>
+    </model>
+
+    <!-- ================================================================
+         INDUSTRIAL CELL SCENERY (visual only, no <collision> anywhere below -
+         none of it is in shield_world.yaml). Everything stays >=1.3 m
+         horizontally from the robot origin EXCEPT the overhead gantry beam
+         and its ceiling lights: those exist only above z=2.3 m, well above
+         any reachable height, so their horizontal position doesn't matter -
+         it's the gantry's support COLUMNS (floor to ceiling) that keep the
+         1.3 m clearance instead. Cell footprint: back wall x=2.4/2.6,
+         side fences/walls y=+-1.4/+-1.6, open at the front (robot side).
+    ================================================================ -->
+
+    <!-- Paper-thin floor decal (z~1mm): not a 3D obstacle, so it's allowed
+         to run under the robot - ground_plane already provides the real
+         floor collision; this is purely a painted-floor look. -->
+    <model name="cell_floor">
+      <static>true</static>
+      <pose>1.2 0.0 0.001 0 0 0</pose>
+      <link name="link">
+        <visual name="vis">
+          <geometry><box><size>2.8 3.2 0.002</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Hazard-stripe border along the fenced perimeter (back/left/right; the
+         front stays open, matching the fence). -->
+    <model name="cell_hazard_stripes">
+      <static>true</static>
+      <pose>0 0 0.006 0 0 0</pose>
+      <link name="link">
+        <visual name="back_1"><pose>2.35 -1.00 0 0 0 0</pose><geometry><box><size>0.10 0.40 0.01</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/ZincYellow</name></script></material></visual>
+        <visual name="back_2"><pose>2.35 -0.60 0 0 0 0</pose><geometry><box><size>0.10 0.40 0.01</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/FlatBlack</name></script></material></visual>
+        <visual name="back_3"><pose>2.35 -0.20 0 0 0 0</pose><geometry><box><size>0.10 0.40 0.01</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/ZincYellow</name></script></material></visual>
+        <visual name="back_4"><pose>2.35 0.20 0 0 0 0</pose><geometry><box><size>0.10 0.40 0.01</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/FlatBlack</name></script></material></visual>
+        <visual name="back_5"><pose>2.35 0.60 0 0 0 0</pose><geometry><box><size>0.10 0.40 0.01</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/ZincYellow</name></script></material></visual>
+        <visual name="back_6"><pose>2.35 1.00 0 0 0 0</pose><geometry><box><size>0.10 0.40 0.01</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/FlatBlack</name></script></material></visual>
+
+        <visual name="left_1"><pose>0.80 1.35 0 0 0 0</pose><geometry><box><size>0.40 0.10 0.01</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/ZincYellow</name></script></material></visual>
+        <visual name="left_2"><pose>1.20 1.35 0 0 0 0</pose><geometry><box><size>0.40 0.10 0.01</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/FlatBlack</name></script></material></visual>
+        <visual name="left_3"><pose>1.60 1.35 0 0 0 0</pose><geometry><box><size>0.40 0.10 0.01</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/ZincYellow</name></script></material></visual>
+        <visual name="left_4"><pose>2.00 1.35 0 0 0 0</pose><geometry><box><size>0.40 0.10 0.01</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/FlatBlack</name></script></material></visual>
+
+        <visual name="right_1"><pose>0.80 -1.35 0 0 0 0</pose><geometry><box><size>0.40 0.10 0.01</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/ZincYellow</name></script></material></visual>
+        <visual name="right_2"><pose>1.20 -1.35 0 0 0 0</pose><geometry><box><size>0.40 0.10 0.01</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/FlatBlack</name></script></material></visual>
+        <visual name="right_3"><pose>1.60 -1.35 0 0 0 0</pose><geometry><box><size>0.40 0.10 0.01</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/ZincYellow</name></script></material></visual>
+        <visual name="right_4"><pose>2.00 -1.35 0 0 0 0</pose><geometry><box><size>0.40 0.10 0.01</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/FlatBlack</name></script></material></visual>
+      </link>
+    </model>
+
+    <!-- Safety guard fence: posts + 2 rails, back/left/right, open at the
+         front (robot side). Nearest post to the origin is 1.36 m out.
+         DarkGrey (not the ZincYellow used on the conveyors' own frame/braces)
+         so the fence reads as structural steel, not a second hazard marking. -->
+    <model name="safety_fence">
+      <static>true</static>
+      <pose>0 0 0.5 0 0 0</pose>
+      <link name="link">
+        <visual name="post_back_1"><pose>2.40 -1.40 0 0 0 0</pose><geometry><box><size>0.04 0.04 1.0</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material></visual>
+        <visual name="post_back_2"><pose>2.40 -0.70 0 0 0 0</pose><geometry><box><size>0.04 0.04 1.0</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material></visual>
+        <visual name="post_back_3"><pose>2.40 0.00 0 0 0 0</pose><geometry><box><size>0.04 0.04 1.0</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material></visual>
+        <visual name="post_back_4"><pose>2.40 0.70 0 0 0 0</pose><geometry><box><size>0.04 0.04 1.0</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material></visual>
+        <visual name="post_back_5"><pose>2.40 1.40 0 0 0 0</pose><geometry><box><size>0.04 0.04 1.0</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material></visual>
+        <visual name="post_left_1"><pose>0.60 1.40 0 0 0 0</pose><geometry><box><size>0.04 0.04 1.0</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material></visual>
+        <visual name="post_left_2"><pose>1.50 1.40 0 0 0 0</pose><geometry><box><size>0.04 0.04 1.0</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material></visual>
+        <visual name="post_right_1"><pose>0.60 -1.40 0 0 0 0</pose><geometry><box><size>0.04 0.04 1.0</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material></visual>
+        <visual name="post_right_2"><pose>1.50 -1.40 0 0 0 0</pose><geometry><box><size>0.04 0.04 1.0</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material></visual>
+
+        <visual name="rail_back_top"><pose>2.40 0.0 0.4 0 0 0</pose><geometry><box><size>0.03 2.80 0.03</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material></visual>
+        <visual name="rail_back_bottom"><pose>2.40 0.0 -0.2 0 0 0</pose><geometry><box><size>0.03 2.80 0.03</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material></visual>
+        <visual name="rail_left_top"><pose>1.50 1.40 0.4 0 0 0</pose><geometry><box><size>1.80 0.03 0.03</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material></visual>
+        <visual name="rail_left_bottom"><pose>1.50 1.40 -0.2 0 0 0</pose><geometry><box><size>1.80 0.03 0.03</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material></visual>
+        <visual name="rail_right_top"><pose>1.50 -1.40 0.4 0 0 0</pose><geometry><box><size>1.80 0.03 0.03</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material></visual>
+        <visual name="rail_right_bottom"><pose>1.50 -1.40 -0.2 0 0 0</pose><geometry><box><size>1.80 0.03 0.03</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material></visual>
+      </link>
+    </model>
+
+    <!-- Back/side wall panels, set back 0.2 m behind the fence for depth.
+         Flat Grey (matches cell_floor), not the textured PaintedWall material:
+         that texture has a yellow-to-orange gradient baked into the image
+         itself (cream at the top fading to burnt-orange at the bottom), which
+         reads as a lighting artifact but isn't one. -->
+    <model name="cell_walls">
+      <static>true</static>
+      <pose>0 0 1.0 0 0 0</pose>
+      <link name="link">
+        <visual name="wall_back"><pose>2.60 0.0 0 0 0 0</pose><geometry><box><size>0.05 3.2 2.0</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+        <visual name="wall_left"><pose>1.55 1.60 0 0 0 0</pose><geometry><box><size>2.10 0.05 2.0</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+        <visual name="wall_right"><pose>1.55 -1.60 0 0 0 0</pose><geometry><box><size>2.10 0.05 2.0</size></box></geometry><material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material></visual>
+      </link>
+    </model>
+
+    <!-- Overhead gantry: 2 floor-to-ceiling columns (respect the 1.3 m rule)
+         carry a back beam, a cantilever beam over the table, a branch beam
+         spanning BOTH conveyors, a cable tray, and 3 light-fixture housings
+         (table + one per conveyor). The beams/tray/fixtures sit at z>=2.35 m -
+         above any reachable height - which is why they're allowed to run out
+         over the workspace: the ceiling lights need to actually be above what
+         they light. -->
+    <model name="overhead_gantry">
+      <static>true</static>
+      <pose>0 0 0 0 0 0</pose>
+      <link name="link">
+        <visual name="column_left">
+          <pose>2.30 1.30 1.2 0 0 0</pose>
+          <geometry><cylinder><radius>0.05</radius><length>2.4</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
+        </visual>
+        <visual name="column_right">
+          <pose>2.30 -1.30 1.2 0 0 0</pose>
+          <geometry><cylinder><radius>0.05</radius><length>2.4</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
+        </visual>
+        <visual name="beam_back">
+          <pose>2.30 0.0 2.45 0 0 0</pose>
+          <geometry><box><size>0.10 2.70 0.10</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
+        </visual>
+        <visual name="beam_centerline">
+          <pose>1.55 0.0 2.45 0 0 0</pose>
+          <geometry><box><size>1.50 0.10 0.10</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
+        </visual>
+        <visual name="beam_branch_conveyor">
+          <pose>1.45 0.0 2.45 0 0 0</pose>
+          <geometry><box><size>0.10 1.80 0.10</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
+        </visual>
+        <visual name="cable_tray">
+          <pose>1.55 0.0 2.38 0 0 0</pose>
+          <geometry><box><size>1.40 0.15 0.04</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="light_fixture_table">
+          <pose>1.00 0.0 2.38 0 0 0</pose>
+          <geometry><cylinder><radius>0.06</radius><length>0.05</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/WhiteGlow</name></script></material>
+        </visual>
+        <visual name="light_fixture_conveyor_right">
+          <pose>1.45 -0.90 2.38 0 0 0</pose>
+          <geometry><cylinder><radius>0.06</radius><length>0.05</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/WhiteGlow</name></script></material>
+        </visual>
+        <visual name="light_fixture_conveyor_left">
+          <pose>1.45 0.90 2.38 0 0 0</pose>
+          <geometry><cylinder><radius>0.06</radius><length>0.05</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/WhiteGlow</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Real point lights matching the fixture housings above (modest
+         attenuation - meant to lift the render, not floodlight it). -->
+    <light type="point" name="ceiling_light_table">
+      <pose>1.00 0.0 2.30 0 0 0</pose>
+      <diffuse>0.9 0.9 0.85 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <attenuation>
+        <range>10</range>
+        <constant>0.4</constant>
+        <linear>0.08</linear>
+        <quadratic>0.01</quadratic>
+      </attenuation>
+      <cast_shadows>false</cast_shadows>
+    </light>
+    <light type="point" name="ceiling_light_conveyor_right">
+      <pose>1.45 -0.90 2.30 0 0 0</pose>
+      <diffuse>0.9 0.9 0.85 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <attenuation>
+        <range>10</range>
+        <constant>0.4</constant>
+        <linear>0.08</linear>
+        <quadratic>0.01</quadratic>
+      </attenuation>
+      <cast_shadows>false</cast_shadows>
+    </light>
+    <light type="point" name="ceiling_light_conveyor_left">
+      <pose>1.45 0.90 2.30 0 0 0</pose>
+      <diffuse>0.9 0.9 0.85 1</diffuse>
+      <specular>0.2 0.2 0.2 1</specular>
+      <attenuation>
+        <range>10</range>
+        <constant>0.4</constant>
+        <linear>0.08</linear>
+        <quadratic>0.01</quadratic>
+      </attenuation>
+      <cast_shadows>false</cast_shadows>
+    </light>
+
+    <!-- Control cabinet: body + HMI screen + 3 pilot lights. -->
+    <model name="control_cabinet">
+      <static>true</static>
+      <pose>0 0 0 0 0 0</pose>
+      <link name="link">
+        <visual name="body">
+          <pose>2.20 1.20 0.70 0 0 0</pose>
+          <geometry><box><size>0.5 0.4 1.4</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Grey</name></script></material>
+        </visual>
+        <visual name="hmi_panel">
+          <pose>1.94 1.20 1.00 0 0 0</pose>
+          <geometry><box><size>0.02 0.25 0.20</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Turquoise</name></script></material>
+        </visual>
+        <visual name="indicator_red">
+          <pose>1.94 1.10 1.15 0 1.5708 0</pose>
+          <geometry><cylinder><radius>0.02</radius><length>0.02</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/RedGlow</name></script></material>
+        </visual>
+        <visual name="indicator_yellow">
+          <pose>1.94 1.15 1.15 0 1.5708 0</pose>
+          <geometry><cylinder><radius>0.02</radius><length>0.02</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/YellowGlow</name></script></material>
+        </visual>
+        <visual name="indicator_green">
+          <pose>1.94 1.20 1.15 0 1.5708 0</pose>
+          <geometry><cylinder><radius>0.02</radius><length>0.02</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/GreenGlow</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Andon / stack tower light on a post. -->
+    <model name="andon_tower">
+      <static>true</static>
+      <pose>0 0 0 0 0 0</pose>
+      <link name="link">
+        <visual name="post">
+          <pose>1.80 1.30 0.75 0 0 0</pose>
+          <geometry><cylinder><radius>0.02</radius><length>1.5</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="lens_green">
+          <pose>1.80 1.30 1.55 0 0 0</pose>
+          <geometry><cylinder><radius>0.04</radius><length>0.08</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/GreenGlow</name></script></material>
+        </visual>
+        <visual name="lens_yellow">
+          <pose>1.80 1.30 1.65 0 0 0</pose>
+          <geometry><cylinder><radius>0.04</radius><length>0.08</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/YellowGlow</name></script></material>
+        </visual>
+        <visual name="lens_red">
+          <pose>1.80 1.30 1.75 0 0 0</pose>
+          <geometry><cylinder><radius>0.04</radius><length>0.08</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/RedGlow</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Pallet + crate stack (staging area). -->
+    <model name="pallet_stack">
+      <static>true</static>
+      <pose>0 0 0 0 0 0</pose>
+      <link name="link">
+        <visual name="pallet">
+          <pose>2.20 -1.20 0.04 0 0 0</pose>
+          <geometry><box><size>0.8 0.6 0.08</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/WoodPallet</name></script></material>
+        </visual>
+        <visual name="crate_1">
+          <pose>2.05 -1.20 0.23 0 0 0</pose>
+          <geometry><box><size>0.35 0.35 0.30</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Wood</name></script></material>
+        </visual>
+        <visual name="crate_2">
+          <pose>2.35 -1.20 0.23 0 0 0</pose>
+          <geometry><box><size>0.35 0.35 0.30</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Wood</name></script></material>
+        </visual>
+        <visual name="crate_top">
+          <pose>2.20 -1.20 0.53 0 0 0.4</pose>
+          <geometry><box><size>0.32 0.32 0.28</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Wood</name></script></material>
+        </visual>
+      </link>
+    </model>
+
+    <!-- Wall-mounted battery charging rack, echoing the Task-1 battery look. -->
+    <model name="battery_charging_rack">
+      <static>true</static>
+      <pose>0 0 0 0 0 0</pose>
+      <link name="link">
+        <visual name="shelf">
+          <pose>1.00 1.50 0.90 0 0 0</pose>
+          <geometry><box><size>0.9 0.10 0.03</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="bracket_left">
+          <pose>0.60 1.50 0.825 0 0 0</pose>
+          <geometry><box><size>0.03 0.10 0.15</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="bracket_right">
+          <pose>1.40 1.50 0.825 0 0 0</pose>
+          <geometry><box><size>0.03 0.10 0.15</size></box></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/DarkGrey</name></script></material>
+        </visual>
+        <visual name="battery_1">
+          <pose>0.65 1.50 0.96 0 0 0</pose>
+          <geometry><cylinder><radius>0.018</radius><length>0.09</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Red</name></script></material>
+        </visual>
+        <visual name="battery_2">
+          <pose>0.775 1.50 0.96 0 0 0</pose>
+          <geometry><cylinder><radius>0.018</radius><length>0.09</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Blue</name></script></material>
+        </visual>
+        <visual name="battery_3">
+          <pose>0.90 1.50 0.96 0 0 0</pose>
+          <geometry><cylinder><radius>0.018</radius><length>0.09</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Red</name></script></material>
+        </visual>
+        <visual name="battery_4">
+          <pose>1.025 1.50 0.96 0 0 0</pose>
+          <geometry><cylinder><radius>0.018</radius><length>0.09</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Blue</name></script></material>
+        </visual>
+        <visual name="battery_5">
+          <pose>1.15 1.50 0.96 0 0 0</pose>
+          <geometry><cylinder><radius>0.018</radius><length>0.09</length></cylinder></geometry>
+          <material><script><uri>file://media/materials/scripts/gazebo.material</uri><name>Gazebo/Red</name></script></material>
         </visual>
       </link>
     </model>

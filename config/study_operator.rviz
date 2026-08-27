@@ -21,6 +21,7 @@ Panels:
   - Class: rviz_common/Views
     Expanded:
       - /Current View1
+      - /Right Tracking1
     Name: Views
     Splitter Ratio: 0.5
 Visualization Manager:
@@ -54,7 +55,7 @@ Visualization Manager:
         Durability Policy: Volatile
         History Policy: Keep Last
         Reliability Policy: Reliable
-        Value: /robot_description
+        Value: /robot_description_filtered
       Enabled: true
       Links:
         All Links Enabled: true
@@ -513,7 +514,7 @@ Visualization Manager:
       Enabled: true
       Name: Blended_Reference
       Namespaces:
-        {}
+        blended_reference: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -625,7 +626,8 @@ Visualization Manager:
       Enabled: true
       Name: QP_Debug_Markers
       Namespaces:
-        {}
+        goal_poses: true
+        grasp_ready_cue: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -702,26 +704,23 @@ Visualization Manager:
   Value: true
   Views:
     Current:
-      Class: rviz_default_plugins/Orbit
-      Distance: 1.4538793563842773
+      Class: rviz_default_plugins/FPS
       Enable Stereo Rendering:
         Stereo Eye Separation: 0.05999999865889549
         Stereo Focal Distance: 1
         Swap Stereo Eyes: false
         Value: false
-      Focal Point:
-        X: 0.5007227659225464
-        Y: -0.31005164980888367
-        Z: 0.6255196928977966
-      Focal Shape Fixed Size: true
-      Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 1.1549994945526123
-      Target Frame: <Fixed Frame>
-      Value: Orbit (rviz)
-      Yaw: 4.728169918060303
+      Pitch: 0.694999635219574
+      Position:
+        X: -0.6669754385948181
+        Y: -0.05386029928922653
+        Z: 0.5037040710449219
+      Target Frame: arm_left_7_link
+      Value: FPS (rviz_default_plugins)
+      Yaw: 6.274749755859375
     Saved:
       - Class: rviz_default_plugins/Orbit
         Distance: 1.0063155889511108
@@ -803,6 +802,40 @@ Visualization Manager:
         Target Frame: <Fixed Frame>
         Value: Orbit (rviz)
         Yaw: 2.2931196689605713
+      - Class: rviz_default_plugins/FPS
+        Enable Stereo Rendering:
+          Stereo Eye Separation: 0.05999999865889549
+          Stereo Focal Distance: 1
+          Swap Stereo Eyes: false
+          Value: false
+        Invert Z Axis: false
+        Name: Right Tracking
+        Near Clip Distance: 0.009999999776482582
+        Pitch: 0.3349999487400055
+        Position:
+          X: -0.6390319466590881
+          Y: 0.20675651729106903
+          Z: 0.2930527329444885
+        Target Frame: arm_right_7_link
+        Value: FPS (rviz_default_plugins)
+        Yaw: 6.249748229980469
+      - Class: rviz_default_plugins/FPS
+        Enable Stereo Rendering:
+          Stereo Eye Separation: 0.05999999865889549
+          Stereo Focal Distance: 1
+          Swap Stereo Eyes: false
+          Value: false
+        Invert Z Axis: false
+        Name: Left Tracking
+        Near Clip Distance: 0.009999999776482582
+        Pitch: 0.3349999487400055
+        Position:
+          X: -0.8409041166305542
+          Y: -0.00683429092168808
+          Z: 0.26362156867980957
+        Target Frame: arm_left_7_link
+        Value: FPS (rviz_default_plugins)
+        Yaw: 6.249748229980469
 Window Geometry:
   Camera:
     collapsed: false
@@ -813,9 +846,9 @@ Window Geometry:
   Hide Right Dock: false
   Image:
     collapsed: false
-  QMainWindow State: 000000ff00000000fd00000002000000000000023800000323fc0200000003fb000000100044006900730070006c0061007900730000000069000001f40000017800fffffffb0000000a005600690065007700730000000269000001230000012300fffffffb0000000c00430061006d00650072006100000003c30000008d0000004500ffffff000000020000050000000106fc0100000001fb0000000a0049006d00610067006503000007200000003600000560000003770000055d0000036800000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730100000000ffffffff0000000000000000
+  QMainWindow State: 000000ff00000000fd000000020000000000000238000003affc0200000003fb000000100044006900730070006c0061007900730000000022000002800000017800fffffffb0000000a0056006900650077007300000002ae000001230000012300fffffffb0000000c00430061006d00650072006100000003c30000008d0000004500ffffff000000020000050000000106fc0100000001fb0000000a0049006d006100670065030000072000000036000005600000037700000311000003af00000004000000040000000800000008fc0000000100000002000000010000000a0054006f006f006c00730000000000ffffffff0000000000000000
   Views:
     collapsed: true
-  Width: 1373
-  X: 1827
+  Width: 785
+  X: 1617
   Y: 908

@@ -17,6 +17,7 @@ ament_python_install_package(${PROJECT_NAME})
 install(PROGRAMS
   scripts/visualize_live_shadow.py
   scripts/workspace_mapper.py
+  scripts/study_robot_model_filter.py
   scripts/qp_arm_teleop/base_controller.py
   scripts/qp_arm_teleop/plotter.py
   scripts/qp_arm_teleop/offline_plotter.py

@@ -12,7 +12,7 @@ that:
 
   1. CENTERING  — the active arm's end-effector is kept in the centre of the
                   camera field of view (optical axis pointed at the hand).
-  2. STAND-OFF  — the camera keeps a fixed working distance of ~0.8 m from the
+  2. STAND-OFF  — the camera keeps a fixed working distance of ~0.7 m from the
                   active hand (close enough for a useful close-up, far enough to
                   see the whole gripper + a grasp target).
 
@@ -24,13 +24,13 @@ This node is a sibling of `qp_head_visual_servo.py` and shares its structure
 (independent QP, own velocity controller, no shared state with the arm QP,
 head chain is NOT part of the arm decision vector). The differences:
 
-  * It tracks a SINGLE point (the active arm tool link) instead of the centroid
-    of both hands.
-  * The desired stand-off distance is TARGET_DISTANCE (0.8 m) instead of 1.0 m.
+  * It tracks a SINGLE point (the active arm's TCP/grasp frame,
+    gripper_*_grasping_link) instead of the centroid of both hands.
+  * The desired stand-off distance is TARGET_DISTANCE (0.7 m) instead of 1.0 m.
   * The active side is selected live from /shared_autonomy/active_arm.
   * A live Matplotlib plotting THREAD (in this same file) reports tracking
     performance: pixel-centering error, angular-centering error, and the
-    stand-off distance held vs. the 0.8 m target.
+    stand-off distance held vs. the 0.7 m target.
 
 CONTROL (2.5D visual servoing, kinematic target)
 ------------------------------------------------
@@ -50,31 +50,34 @@ the view could drift to any roll (including upside-down). A SOFT preference
 aligns the image-right axis (camera X) with the world "right" direction
 (WORLD_RIGHT = world -Y): the signed roll error `theta = atan2(d_y, d_x)`, where
 `d = R_cam^T * WORLD_RIGHT`, is regulated by a roll rate `wz = K_ROLL_ALIGN*theta`
-about the optical axis (dtheta/dt = -wz). It is added as a LOW-WEIGHT
-least-squares term in the QP cost (NOT an equality row), so it only consumes the
-redundancy left after centering + stand-off and can never override tracking; a
-centering gate additionally fades it out during FOV acquisition, and a gimbal
-guard disables it when world-right is ~parallel to the optical axis. The optical
-axis itself stays completely free (the head may view the hand from above or
-below) — the image simply won't roll past vertical / go upside-down.
+about the optical axis (dtheta/dt = -wz). It is added as a least-squares term in
+the QP cost (NOT an equality row), so it only consumes the redundancy left after
+centering + stand-off and can never override tracking; a centering gate
+additionally fades it out during FOV acquisition, and a gimbal guard disables it
+when world-right is ~parallel to the optical axis. The optical axis itself stays
+completely free (the head may view the hand from above or below) — the image
+simply won't roll past vertical / go upside-down.
 
 APPROACH-AXIS ALIGNMENT (soft viewpoint / orbit preference)
 -----------------------------------------------------------
 Optional preference to align the optical axis (+Z) with the active gripper's
-approach axis (its tool-frame +X) — so the head "looks along where the hand is
+approach axis (gripper_*_grasping_link's local +X, the same TCP approach-axis
+convention goal_set.py uses) — so the head "looks along where the hand is
 reaching" (e.g. a top-down view for a top grasp). Centering already owns the
 optical-axis DIRECTION (it must point at the hand), so this is NOT servoed as an
 orientation: aligning +Z with the approach axis is equivalent to placing the
-camera ON the approach line, one stand-off behind the gripper:
+camera ON the approach line, one stand-off behind the gripper. The orbit target
+is additionally blended toward overhead by a tunable `top_view_bias`:
 
     p_cam_des = p_hand - TARGET_DISTANCE * x_gripper(world)
 
-A low-weight least-squares bias on the camera's LINEAR velocity toward that
-on-sphere point orbits the head to the aligned viewpoint, while centering keeps
-the hand framed and stand-off holds the distance. It is subordinate to tracking
-(centering gate + modest weight, never an equality) exactly like the roll term,
-and resolves in the null space of centering+stand-off. Toggle via ENABLE_
-APPROACH_ALIGN / the `approach_align` ROS param.
+A least-squares bias on the camera's LINEAR velocity toward that on-sphere point
+orbits the head to the aligned viewpoint, while centering keeps the hand framed
+and stand-off holds the distance. It stays soft and centering-gated (never an
+equality, so it can't override tracking or the FOV barriers), but is weighted to
+win the null space left after centering+stand-off — aligning onto the approach
+axis is a primary operator-facing requirement, not a minor preference. Toggle
+via ENABLE_APPROACH_ALIGN / the `approach_align` ROS param.
 
 CHAIN LEAN (soft redundancy resolution toward the active side)
 --------------------------------------------------------------
@@ -96,11 +99,50 @@ JOINT_WEIGHTS, so the cost reads 0.5*||dq - dq_target||^2_W and the proximal
 weights cancel instead of throttling the gain. Toggle via ENABLE_CHAIN_LEAN / the
 `chain_lean` ROS param.
 
+HEAD-VS-ARM COLLISION CBF (hard safety constraint)
+----------------------------------------------------------------------
+The arm QP already avoids the head, but its dynamic margin (d_safe_dynamic =
+D_SAFE_BASE + K_V_SAFE*||v_arm||) sees only the ARM's own speed, so a fast-
+moving head is an unmodelled disturbance to that barrier. This adds the
+symmetric half: the same SoftMin CBF the arms use (see collision_manager.py),
+built over head-vs-arm pairs only (define_collision_pairs never checks the
+head against the world) and sliced down to this QP's head joints. Unlike the
+roll/approach/lean preferences above, it is a HARD inequality row, not a
+cost term -- it is the actual limit the soft approach-align pull orbits up
+against. Deliberately NOT symmetric with the arm's own barrier: GAMMA_CBF_HEAD
+< cfg.GAMMA_CBF and D_SAFE_HEAD_EXTRA stacks onto d_safe_h, so the head backs
+off earlier/harder than the arm does for the same encounter -- a close call
+costs camera tracking performance first, not arm task performance. Toggle via
+ENABLE_HEAD_CBF / the `head_cbf` ROS param.
+
+ARM-SWITCH HOMING (suspends tracking, not a preference)
+--------------------------------------------------------
+On an active-arm switch the visual task is suspended and the head is servoed
+to a compact home configuration first, rather than swinging across from
+wherever the previous arm left the chain -- re-entering tracking from a
+stretched chain is unreliable. The phase ends on joint-error tolerance or a
+hard timeout, whichever comes first, and tracking then resumes normally. The
+joint-limit and head-collision CBFs stay active throughout; only the visual
+equality and the roll/approach preferences are suspended. Home defaults to
+HOME_POSE_DEFAULT, a captured neutral pose, overridable via the `home_pose`
+ROS param; the target is then Y-biased toward whichever arm is about to be
+tracked (right -> more negative Y, left -> more positive Y, matching
+WORLD_RIGHT), computed once via a bounded local correction from that seed.
+Toggle via ENABLE_SWITCH_HOMING / the `switch_homing` ROS param.
+
 RUN:
     ros2 run triago_control head_active_arm_tracking.py
     ros2 run triago_control head_active_arm_tracking.py --ros-args -p plot:=false
     ros2 run triago_control head_active_arm_tracking.py --ros-args -p debug:=true
     ros2 run triago_control head_active_arm_tracking.py --ros-args -p chain_lean:=false
+    ros2 run triago_control head_active_arm_tracking.py --ros-args -p approach_weight:=80.0
+    ros2 run triago_control head_active_arm_tracking.py --ros-args -p top_view_bias:=0.5
+    ros2 run triago_control head_active_arm_tracking.py --ros-args -p max_velocity:=0.45
+    ros2 run triago_control head_active_arm_tracking.py --ros-args -p posture_gain:=0.08
+    ros2 run triago_control head_active_arm_tracking.py --ros-args -p head_cbf:=false
+    ros2 run triago_control head_active_arm_tracking.py --ros-args -p lambda_visual:=3.0
+    ros2 run triago_control head_active_arm_tracking.py --ros-args -p switch_homing:=false
+    ros2 run triago_control head_active_arm_tracking.py --ros-args -p home_pose:="[0.0, 0.3, 0.0, 1.2, 0.0, 0.6, 0.0]"
 """
 
 import os
@@ -129,6 +171,9 @@ try:
 except ImportError:
     import pinocchio.hppfcl as hppfcl
 
+import triago_control.qp_controller.config as cfg
+from triago_control.qp_controller.collision_manager import CollisionManager
+
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
@@ -141,8 +186,9 @@ HEAD_JOINTS = ['arm_head_1_joint', 'arm_head_2_joint', 'arm_head_3_joint',
 
 # Frames
 CAMERA_FRAME = 'gripper_head_camera_rgbd_color_optical_frame'
+TCP_FRAMES = {'right': cfg.RIGHT_TCP_FRAME, 'left': cfg.LEFT_TCP_FRAME}
 ARM_FRAMES = {
-    'right': 'arm_right_tool_link',
+    'right': 'arm_right_tool_link',   # wrist fallback, used only if the TCP/grasp frame can't be resolved
     'left':  'arm_left_tool_link',
 }
 
@@ -154,26 +200,73 @@ CAM_CX, CAM_CY = 640.0, 360.0
 # Targets: keep the active hand at the image centre, TARGET_DISTANCE away.
 TARGET_U = CAM_CX
 TARGET_V = CAM_CY
-TARGET_DISTANCE = 0.8   # [m] desired stand-off from the active hand (80 cm)
+TARGET_DISTANCE = 0.7   # [m] desired stand-off from the active hand (70 cm)
 
 # QP gains
-LAMBDA_VISUAL = 1.0     # CLF tracking gain (pixel + depth convergence rate)
+LAMBDA_VISUAL = 2.5     # CLF convergence gain; with the cap, sets the crossover error cap/lambda below which motion stops saturating
 GAMMA_FOV = 5.0         # FOV barrier (CBF) gain
-MAX_VELOCITY = 0.15     # [rad/s] per-head-joint velocity cap (slow & safe)
+MAX_VELOCITY = 0.20     # [rad/s] per-head-joint velocity cap; ROS param default
 
 # Slack weights: pixels are O(100), metres are O(0.1). Scale the depth slack up
 # so a 1 cm depth error is treated comparably to a ~100 px image error.
 W_SLACK_PIXELS = 1.0
 W_SLACK_DEPTH = W_SLACK_PIXELS * 1e4
+# PBVS reuses the same three slack variables for an ANGULAR VELOCITY (O(1) rad/s),
+# so the pixel weights would price look-at tracking below the posture field and the
+# head would settle mid-range without ever acquiring the hand. All three components
+# are one vector: they must share one weight, scaled for non-pixel units.
+W_SLACK_PBVS = 1e4
 
 FOV_MARGIN = 50.0       # [px] distance from the image edge that triggers the CBF
 
-# Per-joint velocity regularization (heavier on proximal/base joints so the
-# head moves "heavier" from the shoulder and light at the wrist).
-JOINT_WEIGHTS = np.array([50.0, 40.0, 30.0, 10.0, 5.0, 1.0, 1.0])
+# Uniform per-joint velocity regularization: a proximal-to-distal ramp prices the
+# shoulder out of reach of every soft viewpoint term, leaving the wrist to serve
+# centering alone.
+JOINT_WEIGHTS = np.full(7, 5.0)
 
-# Secondary postural centering spring (null-space, keeps joints mid-range).
-K_POSTURE = 0.05
+# Joint-limit repulsive potential field (same formulation as the arm QP's posture
+# field in qp_formulator.py): near-zero mid-range, diverging at a limit. A joint
+# parked against its limit is throttled to ~zero by the velocity CBF below, which
+# is what leaves a stretched chain unable to swing across on an arm switch.
+K_POSTURE_GRADIENT = 0.05   # gain on the negative potential gradient
+V_MAX_POSTURE = 0.15        # [rad/s] clamp on the posture reference; half the velocity cap, so posture can never claim the whole budget
+POSTURE_EPS = 1e-3          # keeps p strictly inside (-1,1); at a limit the raw cube flips sign
+
+# --- Arm-switch homing -----------------------------------------------------
+# An arm switch re-enters tracking from a known compact configuration instead of
+# swinging across from wherever the previous arm left the chain. Tracking is
+# suspended for this phase; the joint-limit and collision CBFs stay active.
+ENABLE_SWITCH_HOMING = True
+K_HOME = 1.5             # joint-space servo gain toward the home pose [1/s]
+HOME_TOL = 0.12          # [rad] max-abs joint error that ends the phase
+HOME_TIMEOUT_S = 5.0     # [s] hard cap so a blocked home never strands tracking
+HOME_POSE_DEFAULT = [-1.5700, -2.3000, 0.0000, -2.1000, -0.0000, -1.2000, 0.0000]   # captured in sim; real hardware needs its own capture via the startup [Pose] log
+
+# The arm-switch home is biased toward whichever arm is about to be tracked,
+# computed once per side from the captured seed via a bounded local Jacobian
+# correction (not general IK -- a small, well-conditioned nudge from an
+# already-good pose), reusing chain-lean's exact single-row damped-pseudo-
+# inverse pattern. WORLD_RIGHT establishes world -Y as the robot's right, so
+# right biases toward more negative Y.
+HOME_Y_BIAS = 0.20             # [m] lateral camera-Y shift toward the tracked arm's side, applied at homing
+HOME_Y_BIAS_ITERS = 30         # bounded local correction from the seed pose -- not general IK
+HOME_Y_BIAS_TOL = 0.002        # [m] convergence tolerance
+HOME_Y_BIAS_DAMPING = 1e-3     # damped-pinv regularizer, same role as LEAN_DAMPING
+HOME_Y_BIAS_STEP_MAX = 0.15    # [rad] per-iteration clamp, keeps the correction well-behaved
+
+# --- Head-vs-arm collision CBF -------------------------------------------
+# The arm QP already avoids the head, but its margin reflects only the ARM's own
+# speed, so a moving head is an unmodelled disturbance to that barrier. This is the
+# symmetric half: the same SoftMin barrier the arms use, over head-vs-arm pairs only
+# (define_collision_pairs never pairs the head with the world), sliced at the head
+# joints. Approach-align pulls the camera onto the gripper's approach line, which is
+# exactly where the arm is -- this is the hard limit that pull resolves against.
+# Deliberately asymmetric vs. the arm's own barrier: the head is made MORE cautious
+# than the arm (bigger margin, stiffer gain) so a close encounter is resolved by the
+# head giving up tracking performance first, not by the arm giving up task performance.
+ENABLE_HEAD_CBF = True
+GAMMA_CBF_HEAD = 0.35            # < cfg.GAMMA_CBF (0.70): brakes earlier/softer than the arms
+D_SAFE_HEAD_EXTRA = 0.03         # [m] extra margin stacked onto d_safe, head side only
 
 # --- Soft roll-alignment ("up-righting") ----------------------------------
 # Preference (NOT a hard task): keep the image-right axis (camera X) aligned as
@@ -185,7 +278,7 @@ K_POSTURE = 0.05
 # never override tracking (unlike a hard equality row, which broke acquisition).
 WORLD_RIGHT = np.array([0.0, -1.0, 0.0])   # robot's right in the FK root frame
 K_ROLL_ALIGN = 1.0          # roll-alignment servo gain [1/s]
-W_ROLL_ALIGN = 10.0         # cost weight (subordinate to centering; tune here)
+W_ROLL_ALIGN = 50.0         # cost weight — 10x JOINT_WEIGHTS, the wrist's roll authority over joint damping
 ROLL_WZ_MAX = 0.3           # [rad/s] clamp on the requested roll rate
 ROLL_ALIGN_EPS = 0.1        # gimbal guard: skip when world-right ~parallel to optical axis
 ROLL_GATE_ANGLE_DEG = 30.0  # leveling authority fades out as the hand goes off-axis...
@@ -193,21 +286,26 @@ ROLL_GATE_FLOOR = 0.15      # ...down to this floor (gentle leveling during acqu
 
 # --- Soft approach-axis alignment (viewpoint / orbit preference) ----------
 # Preference (NOT a hard task): orbit the camera around the hand so the optical
-# axis (+Z) aligns with the gripper's approach axis (tool-frame +X). Centering
-# already owns the optical-axis DIRECTION, so aligning +Z with the approach axis
-# is equivalent to placing the camera ON the approach line, one stand-off behind
-# the gripper:  p_cam_des = p_hand - TARGET_DISTANCE * x_gripper. A low-weight
-# least-squares bias on the camera's LINEAR velocity toward that on-sphere point
-# orbits the head to the aligned viewpoint; centering keeps the hand framed and
-# stand-off holds the distance. Subordinate to tracking (gated + modest weight),
-# resolved in the null space of centering+stand-off — same spirit as the roll
-# term. A hard version would fight centering, so this must stay a soft cost.
+# axis (+Z) aligns with the gripper's approach axis (gripper_*_grasping_link's
+# local +X). Centering already owns the optical-axis DIRECTION, so aligning +Z
+# with the approach axis is equivalent to placing the camera ON the approach
+# line, one stand-off behind the gripper:  p_cam_des = p_hand - TARGET_DISTANCE
+# * x_gripper. A least-squares bias on the camera's LINEAR velocity toward that
+# on-sphere point orbits the head to the aligned viewpoint; centering keeps the
+# hand framed and stand-off holds the distance. Still soft and gated (never an
+# equality, so it can't override tracking), but weighted to win the null space
+# of centering+stand-off — aligning onto the approach axis is a primary
+# operator-facing requirement. A hard version would fight centering, so this
+# must stay a soft cost. The orbit axis itself is blended toward straight-
+# overhead by the tunable TOP_VIEW_BIAS (0 = pure reach-axis, 1 = always top-down).
 ENABLE_APPROACH_ALIGN = True
-K_APPROACH_ALIGN = 1.0          # camera-position servo gain [1/s]
-W_APPROACH_ALIGN = 5.0          # cost weight (subordinate to centering; tune here)
+K_APPROACH_ALIGN = 1.5          # camera-position servo gain [1/s]
+W_APPROACH_ALIGN = 50.0         # cost weight — 10x JOINT_WEIGHTS; default for the approach_weight ROS param
 APPROACH_V_MAX = 0.3            # [m/s] clamp on the requested orbit velocity
-APPROACH_GATE_ANGLE_DEG = 25.0  # fades out as the hand leaves the optical axis...
+APPROACH_GATE_ANGLE_DEG = 40.0  # fades out as the hand leaves the optical axis...
 APPROACH_GATE_FLOOR = 0.0       # ...to zero (never fights FOV acquisition / PBVS)
+WORLD_DOWN = np.array([0.0, 0.0, -1.0])   # world -Z in the FK root frame (base_footprint)
+TOP_VIEW_BIAS = 0.3   # blend toward straight-overhead framing (0=pure reach-axis, 1=always top-down)
 
 # --- Soft chain lean toward the active arm (redundancy resolution) --------
 # Preference (NOT a hard task): the head arm's PROXIMAL joints should carry the
@@ -249,7 +347,15 @@ class HeadActiveArmTracker(Node):
         self.declare_parameter('plot', True)
         self.declare_parameter('target_distance', TARGET_DISTANCE)
         self.declare_parameter('approach_align', ENABLE_APPROACH_ALIGN)
+        self.declare_parameter('approach_weight', W_APPROACH_ALIGN)
+        self.declare_parameter('top_view_bias', TOP_VIEW_BIAS)
         self.declare_parameter('chain_lean', ENABLE_CHAIN_LEAN)
+        self.declare_parameter('lambda_visual', LAMBDA_VISUAL)
+        self.declare_parameter('max_velocity', MAX_VELOCITY)
+        self.declare_parameter('posture_gain', K_POSTURE_GRADIENT)
+        self.declare_parameter('head_cbf', ENABLE_HEAD_CBF)
+        self.declare_parameter('switch_homing', ENABLE_SWITCH_HOMING)
+        self.declare_parameter('home_pose', HOME_POSE_DEFAULT)
         # CAMERA_FRAME (module default) is the SIM URDF's optical-frame name --
         # real hardware names it differently (main_head.py's real diagnostics
         # show 'head_arm_rgbd_depth_optical_frame', not 'gripper_head_camera_
@@ -264,8 +370,16 @@ class HeadActiveArmTracker(Node):
         self.debug = bool(self.get_parameter('debug').value)
         self.target_distance = float(self.get_parameter('target_distance').value)
         self.approach_align = bool(self.get_parameter('approach_align').value)
+        self.approach_weight = float(self.get_parameter('approach_weight').value)
+        self.top_view_bias = float(self.get_parameter('top_view_bias').value)
         self.chain_lean = bool(self.get_parameter('chain_lean').value)
+        self.lambda_visual = float(self.get_parameter('lambda_visual').value)
+        self.max_velocity = float(self.get_parameter('max_velocity').value)
+        self.posture_gain = float(self.get_parameter('posture_gain').value)
         self.camera_frame = self.get_parameter('camera_frame').value
+        self.head_cbf_enabled = bool(self.get_parameter('head_cbf').value)
+        self.switch_homing = bool(self.get_parameter('switch_homing').value)
+        self._home_pose_param = list(self.get_parameter('home_pose').value)
         self.fid_lean = None               # resolved in setup_pinocchio()
 
         # --- State ---
@@ -274,6 +388,13 @@ class HeadActiveArmTracker(Node):
         self.active_arm = 'right'          # default; overwritten by topic
         self._ctrl_started = []            # controllers WE activated (restore_controllers reverses)
         self._ctrl_stopped = []            # controllers WE deactivated
+        self.col = None                        # collision manager; built in setup_pinocchio
+        self.last_dq_full = None               # last commanded head velocity, full-nv (CBF margin input)
+        self.homing_until = 0.0            # wall-clock deadline; <=0 when not homing
+        self.home_pose = None              # resolved in setup_pinocchio()
+        self.home_pose_right = None        # Y-biased home targets, resolved on the first ready tick
+        self.home_pose_left = None
+        self._logged_pose = False          # one-shot flag for the pose-capture log line
 
         # --- Telemetry buffers (shared with the plotting thread via lock) ---
         self.plot_lock = threading.Lock()
@@ -305,14 +426,16 @@ class HeadActiveArmTracker(Node):
             Float64MultiArray, '/head_active_tracking/qdot', 10)
         self.pub_cartesian_cmd = self.create_publisher(
             TwistStamped, '/head_active_tracking/cartesian_cmd', 10)
-        # Telemetry for offline_plotter.py (9 floats): u_err_px, v_err_px,
-        # depth_err_m, ang/roll/approach_err_deg, dist_m, in_fov, active_arm.
+        # Telemetry for offline_plotter.py (11 floats): u_err_px, v_err_px,
+        # depth_err_m, ang/roll/approach_err_deg, dist_m, in_fov, active_arm, h_head,
+        # homing (1.0 during the arm-switch homing phase).
         self.pub_telemetry = self.create_publisher(
             Float64MultiArray, '/head_active_tracking/telemetry', 10)
 
         # RViz debug
         self.pub_ray = self.create_publisher(Marker, '/head_active_tracking/camera_ray', 10)
         self.pub_target = self.create_publisher(Marker, '/head_active_tracking/target', 10)
+        self.pub_approach_target = self.create_publisher(Marker, '/head_active_tracking/approach_axis_target', 10)
 
         # Auto-switch to the velocity controller
         self.check_and_switch_controllers()
@@ -405,6 +528,11 @@ class HeadActiveArmTracker(Node):
         self.q_real = pin.neutral(self.model)
         self._ensure_camera_frame()
 
+        self.arm_frames = {}
+        for side, tcp_name in TCP_FRAMES.items():
+            resolved = self._ensure_grasping_frame(tcp_name, f'gripper_{side}_base_link')
+            self.arm_frames[side] = resolved if resolved else ARM_FRAMES[side]
+
         # Lean frame is an ordinary URDF link, so a miss means a renamed chain --
         # degrade to wrist-only tracking rather than crashing the control loop.
         if self.chain_lean:
@@ -440,6 +568,80 @@ class HeadActiveArmTracker(Node):
                 self.head_v_idx.append(self.model.joints[jid].idx_v)
             else:
                 self.get_logger().error(f"[FATAL] Joint {name} not found in URDF!")
+
+        self._resolve_home_pose()
+
+        # self.data was rebuilt by the frame injectors above; the CollisionManager must be
+        # constructed last so its distance queries run against the final frame set.
+        self._setup_collision_model()
+
+    def _setup_collision_model(self):
+        """Builds the head-vs-arm collision model for the CBF (arm-side geometry included
+        only so those pairs exist)."""
+        if not self.head_cbf_enabled:
+            return
+        if not self.model.existFrame(cfg.HEAD_CHAIN[0]):
+            self.get_logger().warn("Head chain not in URDF; disabling the head CBF.")
+            self.head_cbf_enabled = False
+            return
+        self.col = CollisionManager(self.model, self.data)
+        right_offsets = self.col.calculate_offsets(cfg.RIGHT_CHAIN, 'gripper_right_base_link')
+        left_offsets = self.col.calculate_offsets(cfg.LEFT_CHAIN, 'gripper_left_base_link')
+        head_offsets = self.col.calculate_offsets(cfg.HEAD_CHAIN, cfg.HEAD_TOOL_LINK)
+        self.col.build_collision_model(right_offsets, left_offsets, head_offsets)
+        self.col.define_collision_pairs()
+        self._prune_to_head_pairs()
+        self.last_dq_full = np.zeros(self.model.nv)
+
+    def _prune_to_head_pairs(self):
+        """Drops every collision pair not involving head geometry: computeDistances is the
+        dominant per-tick cost and only head-vs-arm pairs feed this QP's barrier."""
+        head_ids = set(self.col.head_geom_ids)
+        n_before = len(self.col.cmodel.collisionPairs)
+        drop = [k for k in range(n_before)
+                if self.col.cmodel.collisionPairs[k].first not in head_ids
+                and self.col.cmodel.collisionPairs[k].second not in head_ids]
+        try:
+            # Reverse order keeps the remaining indices valid, same as collision_manager.py's
+            # own pair removal.
+            for k in sorted(drop, reverse=True):
+                self.col.cmodel.removeCollisionPair(self.col.cmodel.collisionPairs[k])
+        except Exception as e:
+            # Pruning is only a cost optimization: the barrier is routed by head membership
+            # either way, so a full pair set stays correct, just slower.
+            self.get_logger().warn(f"Head CBF pair pruning skipped ({e}); using all pairs.")
+        # Mirrors collision_manager.py's own createData() sites: nearest_points must be
+        # requested explicitly or the CBF's contact-normal extraction degrades silently.
+        self.col.cdata = self.col.cmodel.createData()
+        for req in self.col.cdata.distanceRequests:
+            req.enable_nearest_points = True
+        self.get_logger().info(
+            f"[Init] Head CBF over {len(self.col.cmodel.collisionPairs)} collision pairs "
+            f"(pruned from {n_before}).")
+
+    def _resolve_home_pose(self):
+        """Home = the `home_pose` param, defaulting to HOME_POSE_DEFAULT (the captured
+        neutral pose); joint mid-range is only the wrong-length/explicit-empty
+        fallback."""
+        if len(self._home_pose_param) == len(HEAD_JOINTS):
+            self.home_pose = np.array([float(v) for v in self._home_pose_param])
+            self.get_logger().info(f"[Init] Head home pose (param): {np.round(self.home_pose, 3)}")
+            return
+        if self._home_pose_param:
+            self.get_logger().warn(
+                f"home_pose needs {len(HEAD_JOINTS)} values, got "
+                f"{len(self._home_pose_param)}; using joint mid-range.")
+        mids = []
+        for jn in HEAD_JOINTS:
+            idx_q = self.model.joints[self.model.getJointId(jn)].idx_q
+            if jn in self.soft_limits:
+                q_min, q_max = self.soft_limits[jn]
+            else:
+                q_max = self.model.upperPositionLimit[idx_q]
+                q_min = self.model.lowerPositionLimit[idx_q]
+            mids.append(0.5 * (q_max + q_min) if abs(q_max) < 100.0 and abs(q_min) < 100.0 else 0.0)
+        self.home_pose = np.array(mids)
+        self.get_logger().info(f"[Init] Head home pose (joint mid-range): {np.round(self.home_pose, 3)}")
 
     def _ensure_camera_frame(self, parent_body_name='arm_head_tool_link'):
         """Inject self.camera_frame into the model if the URDF lacks it.
@@ -480,6 +682,34 @@ class HeadActiveArmTracker(Node):
             f"[Init] Injected frame '{self.camera_frame}' into Pinocchio "
             f"model (parent: {parent_body_name}).")
 
+    def _ensure_grasping_frame(self, tcp_name, parent_body_name):
+        """Inject tcp_name into the model if the real TRIAGo URDF lacks it (mirrors
+        robot_kinematics.py's _ensure_grasping_frames -- same measured offset)."""
+        if self.model.existFrame(tcp_name):
+            return tcp_name  # sim: already native to the URDF
+        if not self.model.existFrame(parent_body_name):
+            self.get_logger().warn(
+                f"Cannot inject '{tcp_name}': parent frame '{parent_body_name}' "
+                f"not found; falling back to the wrist frame.")
+            return None
+        R_offset = pin.rpy.rpyToMatrix(0.0, -1.5708, 0.0)
+        t_offset = np.array([0.0, 0.0, 0.157])
+        placement = pin.SE3(R_offset, t_offset)
+        parent_frame_id = self.model.getFrameId(parent_body_name)
+        parent_joint_id = self.model.frames[parent_frame_id].parentJoint
+        parent_placement = self.model.frames[parent_frame_id].placement
+        frame_placement = parent_placement * placement
+        new_frame = pin.Frame(
+            tcp_name, parent_joint_id, parent_frame_id,
+            frame_placement, pin.FrameType.OP_FRAME,
+        )
+        self.model.addFrame(new_frame)
+        self.data = self.model.createData()
+        self.get_logger().info(
+            f"[Init] Injected frame '{tcp_name}' into Pinocchio model "
+            f"(parent: {parent_body_name}).")
+        return tcp_name
+
     # ------------------------------------------------------------------ #
     # Callbacks
     # ------------------------------------------------------------------ #
@@ -489,6 +719,8 @@ class HeadActiveArmTracker(Node):
             self.active_arm = side
             self.get_logger().info(f"Active arm switched -> {side.upper()} "
                                    f"(tracking {ARM_FRAMES[side]})")
+            if self.switch_homing:
+                self.homing_until = time.time() + HOME_TIMEOUT_S
 
     def joint_cb(self, msg):
         if not hasattr(self, 'model'):
@@ -531,6 +763,52 @@ class HeadActiveArmTracker(Node):
         Ls[2, 4] = x * Z
         return Ls
 
+    def _log_current_head_pose(self):
+        """One-shot dump of the live head configuration in BOTH joint space (copy-pasteable
+        as home_pose) and Cartesian space (camera pose in the FK root frame, for reference
+        only -- the home mechanism itself is joint-space), so a preferred home pose can be
+        captured by posing the head and reading this line. Runs its own FK: called before
+        solve_and_publish's own FK update on the very first tick, so self.data cannot be
+        trusted yet."""
+        pin.forwardKinematics(self.model, self.data, self.q_real)
+        pin.updateFramePlacements(self.model, self.data)
+        q = np.array([self.q_real[self.model.joints[self.model.getJointId(jn)].idx_q]
+                      for jn in HEAD_JOINTS])
+        vals = ", ".join(f"{v:.4f}" for v in q)
+        T_cam = self.data.oMf[self.model.getFrameId(self.camera_frame)]
+        xyz = T_cam.translation
+        rpy = pin.rpy.matrixToRpy(T_cam.rotation)
+        self.get_logger().info(f"[Pose] Current head configuration -> -p home_pose:=\"[{vals}]\"")
+        self.get_logger().info(
+            f"[Pose] Camera Cartesian (base_footprint): "
+            f"xyz=[{xyz[0]:.4f}, {xyz[1]:.4f}, {xyz[2]:.4f}] "
+            f"rpy=[{rpy[0]:.4f}, {rpy[1]:.4f}, {rpy[2]:.4f}]  (reference only, not a home_pose input)")
+
+    def _bias_home_toward_y(self, q_base, y_target):
+        """Bounded local correction from q_base (NOT general IK): nudges the camera's
+        world-Y toward y_target via the same damped single-row Jacobian step chain-lean
+        uses, iterated to convergence. Safe even if imperfect -- it only ever feeds a QP
+        cost target, never overrides the joint-limit/collision hard constraints."""
+        q = q_base.copy()
+        fid_cam = self.model.getFrameId(self.camera_frame)
+        q_full = self.q_real.copy()
+        idx_q_list = [self.model.joints[self.model.getJointId(jn)].idx_q for jn in HEAD_JOINTS]
+        for _ in range(HOME_Y_BIAS_ITERS):
+            for i, idx_q in enumerate(idx_q_list):
+                q_full[idx_q] = q[i]
+            pin.forwardKinematics(self.model, self.data, q_full)
+            pin.updateFramePlacements(self.model, self.data)
+            y_err = y_target - float(self.data.oMf[fid_cam].translation[1])
+            if abs(y_err) < HOME_Y_BIAS_TOL:
+                break
+            J_y = pin.computeFrameJacobian(
+                self.model, self.data, q_full, fid_cam,
+                pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)[1, self.head_v_idx]
+            step = np.clip(J_y * y_err / (float(J_y @ J_y) + HOME_Y_BIAS_DAMPING),
+                           -HOME_Y_BIAS_STEP_MAX, HOME_Y_BIAS_STEP_MAX)
+            q = q + step
+        return q
+
     # ------------------------------------------------------------------ #
     # Main solve
     # ------------------------------------------------------------------ #
@@ -538,16 +816,63 @@ class HeadActiveArmTracker(Node):
         if not self.is_ready:
             return
 
+        if not self._logged_pose:
+            self._log_current_head_pose()
+            base_y = float(self.data.oMf[self.model.getFrameId(self.camera_frame)].translation[1])
+            self.home_pose_right = self._bias_home_toward_y(self.home_pose, base_y - HOME_Y_BIAS)
+            self.home_pose_left = self._bias_home_toward_y(self.home_pose, base_y + HOME_Y_BIAS)
+            self.get_logger().info(
+                f"[Homing] Right-biased target: {np.round(self.home_pose_right, 3)}")
+            self.get_logger().info(
+                f"[Homing] Left-biased target:  {np.round(self.home_pose_left, 3)}")
+            self._logged_pose = True
+
         # 1. FK
         pin.forwardKinematics(self.model, self.data, self.q_real)
         pin.updateFramePlacements(self.model, self.data)
 
+        # Head-vs-arm CBF: same SoftMin barrier the arm QP uses, sliced at the head joints.
+        head_cbf_row = None
+        h_head = float('nan')
+        if self.head_cbf_enabled and self.col is not None:
+            self.col.update_geometry(self.q_real)
+            self.col.compute_softmin_jacobian(
+                self.last_dq_full, [], [], {}, [], {}, set(),
+                idx_head=self.head_v_idx)
+            if self.col.head_cbf is not None:
+                J_h, h_soft_h, d_safe_h, active_h = self.col.head_cbf
+                h_head = float(h_soft_h)
+                if active_h:
+                    # Extra margin stacked on top of the arm-computed d_safe_h: the head treats
+                    # the arm as "bigger" than the arm treats the head, so it backs off sooner.
+                    head_cbf_row = (np.asarray(J_h)[self.head_v_idx],
+                                    -GAMMA_CBF_HEAD * (h_soft_h - (d_safe_h + D_SAFE_HEAD_EXTRA)))
+
         fid_cam = self.model.getFrameId(self.camera_frame)
-        arm_frame = ARM_FRAMES[self.active_arm]
+        arm_frame = self.arm_frames[self.active_arm]
         fid_hand = self.model.getFrameId(arm_frame)
 
         T_cam = self.data.oMf[fid_cam]
         T_hand = self.data.oMf[fid_hand]
+
+        # Homing phase: an arm switch re-enters tracking from the home configuration.
+        # Ends on tolerance or timeout, whichever comes first; the CBFs stay active
+        # throughout, only the visual task is suspended.
+        home_target = self.home_pose
+        if self.home_pose_right is not None and self.home_pose_left is not None:
+            home_target = self.home_pose_right if self.active_arm == 'right' else self.home_pose_left
+        homing = False
+        if self.homing_until > 0.0:
+            q_head = np.array([self.q_real[self.model.joints[self.model.getJointId(jn)].idx_q]
+                               for jn in HEAD_JOINTS])
+            home_err = float(np.max(np.abs(home_target - q_head)))
+            if home_err < HOME_TOL or time.time() > self.homing_until:
+                self.homing_until = 0.0
+                self.get_logger().info(
+                    f"[Homing] Complete (max joint err {home_err:.3f} rad); tracking "
+                    f"{self.active_arm.upper()}.")
+            else:
+                homing = True
 
         # 2. Active hand in camera frame
         P_cam = T_cam.inverse().act(T_hand.translation)   # [x, y, z] optical frame
@@ -584,18 +909,22 @@ class HeadActiveArmTracker(Node):
 
         # Soft approach-axis alignment (viewpoint / orbit preference): the camera
         # should end up on the gripper's approach line so the optical axis (+Z)
-        # coincides with the tool-frame +X. Centering owns the axis DIRECTION, so
-        # we instead bias the camera POSITION toward the on-sphere point
-        # p_cam_des = p_hand - D * x_gripper (one stand-off behind the gripper).
-        # The resulting desired LINEAR velocity (mapped into the camera frame) is
-        # added as a low-weight, centering-gated LS term below. Reports the
-        # optical-axis-vs-approach-axis angle for telemetry.
+        # coincides with gripper_*_grasping_link's local +X. Centering owns the
+        # axis DIRECTION, so we instead bias the camera POSITION toward the
+        # on-sphere point p_cam_des = p_hand - D * x_gripper (one stand-off behind
+        # the gripper), where the orbit axis is itself blended toward straight-
+        # overhead by top_view_bias. The resulting desired LINEAR velocity
+        # (mapped into the camera frame) is added as a centering-gated LS term
+        # below. approach_err_deg stays the raw, unbiased angle for telemetry.
         x_grip_w = np.asarray(T_hand.rotation)[:, 0]     # gripper approach axis (world)
         z_cam_w = R_cam[:, 2]                            # current optical axis (world)
         approach_err_deg = float(np.degrees(
             np.arccos(np.clip(float(z_cam_w @ x_grip_w), -1.0, 1.0))))
         if self.approach_align:
-            p_cam_des = np.asarray(T_hand.translation) - self.target_distance * x_grip_w
+            x_orbit = (1.0 - self.top_view_bias) * x_grip_w + self.top_view_bias * WORLD_DOWN
+            n_orbit = float(np.linalg.norm(x_orbit))
+            x_orbit = x_orbit / n_orbit if n_orbit > 1e-6 else x_grip_w
+            p_cam_des = np.asarray(T_hand.translation) - self.target_distance * x_orbit
             v_des_w = K_APPROACH_ALIGN * (p_cam_des - np.asarray(T_cam.translation))
             nv = float(np.linalg.norm(v_des_w))
             if nv > APPROACH_V_MAX:
@@ -629,7 +958,9 @@ class HeadActiveArmTracker(Node):
         H[9, 9] = W_SLACK_DEPTH      # depth slack
         g = np.zeros(n_vars)
 
-        # Secondary postural centering spring (null-space)
+        # Joint-limit repulsive potential field (null-space): pushes each joint away
+        # from whichever limit it is nearest, so a stretched chain keeps velocity
+        # headroom under the CBF below instead of being throttled to ~zero.
         dq_posture = np.zeros(self.nq_head)
         for i, jn in enumerate(HEAD_JOINTS):
             jid = self.model.getJointId(jn)
@@ -641,8 +972,13 @@ class HeadActiveArmTracker(Node):
                 q_max = self.model.upperPositionLimit[idx_q]
                 q_min = self.model.lowerPositionLimit[idx_q]
             if (q_max - q_min) > 0.01 and abs(q_max) < 100.0 and abs(q_min) < 100.0:
-                q_center = 0.5 * (q_max + q_min)
-                dq_posture[i] = -K_POSTURE * (q_i - q_center)
+                half_range = 0.5 * (q_max - q_min)
+                mid = 0.5 * (q_max + q_min)
+                p = float(np.clip((q_i - mid) / half_range,
+                                  -1.0 + POSTURE_EPS, 1.0 - POSTURE_EPS))
+                grad = 2.0 / (1.0 - p) ** 3 - 2.0 / (1.0 + p) ** 3   # dH/dp
+                dq_posture[i] = float(np.clip(-self.posture_gain * grad,
+                                              -V_MAX_POSTURE, V_MAX_POSTURE))
 
         # Chain lean: drive the elbow's WORLD-y toward the active hand's side, so
         # the proximal joints follow the arm switch instead of leaving the chain
@@ -661,33 +997,51 @@ class HeadActiveArmTracker(Node):
                 pin.ReferenceFrame.LOCAL_WORLD_ALIGNED)[1, self.head_v_idx]
             dq_lean = J_lean * v_lean / (float(J_lean @ J_lean) + LEAN_DAMPING)
 
-        g[:7] = H[:7, :7] @ (dq_posture + dq_lean)
+        if homing:
+            # No visual task: the cost target is the joint-space servo toward home
+            # instead of the posture+lean field, computed from q_head above.
+            dq_home = np.clip(K_HOME * (home_target - q_head),
+                              -self.max_velocity, self.max_velocity)
+            g[:7] = H[:7, :7] @ dq_home
+        else:
+            g[:7] = H[:7, :7] @ (dq_posture + dq_lean)
 
-        # Soft roll-alignment task: add (W/2) * (wz_cam - wz_align)^2 to the cost,
-        # where wz_cam = J_cam[5,:] @ dq is the camera roll rate about the optical
-        # axis. Added AFTER the posture term so posture uses damping only; this
-        # term shapes just the null-space roll and leaves the primary
-        # centering/stand-off equality untouched.
-        J_roll = J_cam[5, :]
-        H[:7, :7] += W_ROLL_ALIGN * np.outer(J_roll, J_roll)
-        g[:7] += W_ROLL_ALIGN * wz_align * J_roll
+        if not homing:
+            # Soft roll-alignment task: add (W/2) * (wz_cam - wz_align)^2 to the cost,
+            # where wz_cam = J_cam[5,:] @ dq is the camera roll rate about the optical
+            # axis. Added AFTER the posture term so posture uses damping only; this
+            # term shapes just the null-space roll and leaves the primary
+            # centering/stand-off equality untouched. Skipped during homing: with no
+            # visual task these viewpoint preferences are meaningless and would fight
+            # the retract to home.
+            J_roll = J_cam[5, :]
+            H[:7, :7] += W_ROLL_ALIGN * np.outer(J_roll, J_roll)
+            g[:7] += W_ROLL_ALIGN * wz_align * J_roll
 
-        # Soft approach-axis (orbit) task: add (w_eff/2) * ||J_lin @ dq - v_des_cam||^2
-        # to the cost, where J_lin = J_cam[:3,:] is the camera LINEAR velocity and
-        # v_des_cam drives the camera onto the gripper approach line. w_eff folds in
-        # the centering gate so the term vanishes off-axis (never fights acquisition
-        # / PBVS). Like the roll term, this only shapes the redundancy left after
-        # centering + stand-off and cannot override the primary equality.
-        if self.approach_align and approach_gate > 0.0:
-            J_lin = J_cam[:3, :]
-            w_eff = W_APPROACH_ALIGN * approach_gate
-            H[:7, :7] += w_eff * (J_lin.T @ J_lin)
-            g[:7] += w_eff * (J_lin.T @ v_des_cam)
+            # Soft approach-axis (orbit) task: add (w_eff/2) * ||J_lin @ dq - v_des_cam||^2
+            # to the cost, where J_lin = J_cam[:3,:] is the camera LINEAR velocity and
+            # v_des_cam drives the camera onto the gripper approach line. w_eff folds in
+            # the centering gate so the term vanishes off-axis (never fights acquisition
+            # / PBVS). Like the roll term, this only shapes the redundancy left after
+            # centering + stand-off and cannot override the primary equality. Skipped
+            # during homing for the same reason as the roll term above.
+            if self.approach_align and approach_gate > 0.0:
+                J_lin = J_cam[:3, :]
+                w_eff = self.approach_weight * approach_gate
+                H[:7, :7] += w_eff * (J_lin.T @ J_lin)
+                g[:7] += w_eff * (J_lin.T @ v_des_cam)
 
         C, b = [], []
 
         # 5. State machine
-        if in_fov:
+        if homing:
+            # No visual task while homing: no equality rows, only the inequalities
+            # (joint-limit box + head-collision CBF) added below constrain the solve.
+            A_eq = np.zeros((0, n_vars))
+            b_eq = np.zeros(0)
+            meq = 0
+            pub_error = np.zeros(3)
+        elif in_fov:
             # --- IBVS: 2.5D centering + stand-off regulation --------------
             e_visual = np.array([u_h - TARGET_U,
                                  v_h - TARGET_V,
@@ -698,7 +1052,7 @@ class HeadActiveArmTracker(Node):
             A_eq = np.zeros((3, n_vars))
             A_eq[:, :7] = J_task
             A_eq[:, 7:] = -np.eye(3)
-            b_eq = -LAMBDA_VISUAL * e_visual
+            b_eq = -self.lambda_visual * e_visual
 
             # FOV barriers on the tracked hand (keep it inside the frame)
             grad_u = Ls[0, :] @ J_cam
@@ -709,21 +1063,29 @@ class HeadActiveArmTracker(Node):
             C.append(np.concatenate([-grad_v, np.zeros(3)])); b.append(-GAMMA_FOV * ((CAM_H - FOV_MARGIN) - v_h))
 
             pub_error = e_visual
+            meq = 3
         else:
             # --- PBVS: rotate the optical axis onto the hand -------------
             P_norm = np.linalg.norm(P_cam)
             dir_vec = P_cam / P_norm if P_norm > 0.01 else np.array([0.0, 0.0, 1.0])
             z_axis = np.array([0.0, 0.0, 1.0])
-            omega_des = LAMBDA_VISUAL * np.cross(z_axis, dir_vec)
+            omega_des = self.lambda_visual * np.cross(z_axis, dir_vec)
             if dir_vec[2] < -0.95:   # hand directly behind: break the singularity
-                omega_des[1] = LAMBDA_VISUAL
+                omega_des[1] = self.lambda_visual
 
             J_rot = J_cam[3:, :]
             A_eq = np.zeros((3, n_vars))
             A_eq[:, :7] = J_rot
             A_eq[:, 7:] = -np.eye(3)
             b_eq = omega_des
+            # Re-price the shared slack variables for this branch's angular-velocity units.
+            H[7, 7] = H[8, 8] = H[9, 9] = W_SLACK_PBVS
             pub_error = omega_des
+            meq = 3
+
+        if head_cbf_row is not None:
+            J_row, b_row = head_cbf_row
+            C.append(np.concatenate([J_row, np.zeros(3)])); b.append(b_row)
 
         # 6. Joint-limit / velocity CBF (always active)
         for i, jn in enumerate(HEAD_JOINTS):
@@ -737,16 +1099,16 @@ class HeadActiveArmTracker(Node):
                 q_min = self.model.lowerPositionLimit[idx_q]
 
             if (q_max - q_min) < 0.01 or abs(q_max) > 100.0 or abs(q_min) > 100.0:
-                upper_bound = MAX_VELOCITY
-                lower_bound = -MAX_VELOCITY
+                upper_bound = self.max_velocity
+                lower_bound = -self.max_velocity
             else:
                 range_total = q_max - q_min
                 safe_buf = min(0.15, range_total * 0.1)
                 local_gamma = 2.0
                 v_req_upper = local_gamma * (q_max - q_i - safe_buf)
                 v_req_lower = -local_gamma * (q_i - q_min - safe_buf)
-                upper_bound = min(MAX_VELOCITY, v_req_upper)
-                lower_bound = max(-MAX_VELOCITY, v_req_lower)
+                upper_bound = min(self.max_velocity, v_req_upper)
+                lower_bound = max(-self.max_velocity, v_req_lower)
                 if lower_bound >= upper_bound:
                     mid = 0.5 * (upper_bound + lower_bound)
                     upper_bound, lower_bound = mid + 0.01, mid - 0.01
@@ -762,12 +1124,17 @@ class HeadActiveArmTracker(Node):
         # 7. Solve
         try:
             res = quadprog.solve_qp(H, g, np.hstack((A_eq.T, C_mat)),
-                                    np.hstack((b_eq, b_vec)), meq=3)
+                                    np.hstack((b_eq, b_vec)), meq=meq)
             dq_opt = res[0][:7]
         except ValueError:
-            self.get_logger().warn("[QP] Infeasible! Commanding zero velocity.",
-                                   throttle_duration_sec=0.5)
+            self.get_logger().warn(
+                f"[QP] Infeasible! Commanding zero velocity. (h_head={h_head:.3f})",
+                throttle_duration_sec=0.5)
             dq_opt = np.zeros(7)
+
+        if self.last_dq_full is not None:
+            self.last_dq_full[:] = 0.0
+            self.last_dq_full[self.head_v_idx] = dq_opt
 
         # Opt-in tracking dump (-p debug:=true). Hand + camera pose are in
         # base_footprint, so both are sanity-checkable against known robot
@@ -800,7 +1167,7 @@ class HeadActiveArmTracker(Node):
         self.pub_cartesian_cmd.publish(tw)
 
         # 9. RViz debug markers
-        self._publish_markers(P_cam)
+        self._publish_markers(P_cam, arm_frame)
 
         # 10. Telemetry publish (see pub_telemetry's layout comment)
         u_err = (u_h - TARGET_U) if u_h is not None else float('nan')
@@ -811,6 +1178,8 @@ class HeadActiveArmTracker(Node):
             float(ang_err_deg), float(roll_align_err_deg), float(approach_err_deg),
             float(dist), 1.0 if in_fov else 0.0,
             1.0 if self.active_arm == 'right' else 0.0,
+            float(h_head),
+            1.0 if homing else 0.0,
         ]))
 
         # 11. Push telemetry to the plotting buffers
@@ -825,7 +1194,7 @@ class HeadActiveArmTracker(Node):
             self.buf_in_fov.append(1.0 if in_fov else 0.0)
             self.buf_active.append(1.0 if self.active_arm == 'right' else 0.0)
 
-    def _publish_markers(self, P_cam):
+    def _publish_markers(self, P_cam, arm_frame):
         # Target sphere at the tracked hand (camera frame)
         m = Marker()
         m.header.frame_id = self.camera_frame
@@ -848,6 +1217,20 @@ class HeadActiveArmTracker(Node):
         ray.color.r, ray.color.g, ray.color.b, ray.color.a = 0.0, 1.0, 0.0, 0.5
         self.pub_ray.publish(ray)
 
+        # Active gripper's approach axis (arm_frame's local +X, the codebase-wide TCP
+        # convention -- see goal_set.py) -- this is what the orbit preference targets;
+        # parallel to the green optical ray means alignment has converged.
+        appr = Marker()
+        appr.header.frame_id = arm_frame
+        appr.ns = "approach_axis_target"; appr.id = 2
+        appr.type = Marker.ARROW; appr.action = Marker.ADD
+        q0 = Point(); q0.x = q0.y = q0.z = 0.0
+        q1 = Point(); q1.x = 0.3; q1.y = 0.0; q1.z = 0.0
+        appr.points = [q0, q1]
+        appr.scale.x, appr.scale.y, appr.scale.z = 0.01, 0.03, 0.05
+        appr.color.r, appr.color.g, appr.color.b, appr.color.a = 1.0, 1.0, 0.0, 0.9
+        self.pub_approach_target.publish(appr)
+
 
 # =============================================================================
 # LIVE PLOTTING THREAD
@@ -856,7 +1239,7 @@ def plotting_thread(node: HeadActiveArmTracker, stop_event: threading.Event):
     """Runs a live Matplotlib dashboard of tracking performance in its own thread.
 
     Shows CENTERING (pixel + angular error, target = 0) and the STAND-OFF
-    DISTANCE held vs. the 0.8 m target. Fully decoupled from the control loop:
+    DISTANCE held vs. the 0.7 m target. Fully decoupled from the control loop:
     it only reads the node's telemetry buffers under a lock, so a slow/absent
     display never stalls the controller. Any failure (e.g. no X display) is
     logged and the controller keeps running headless.

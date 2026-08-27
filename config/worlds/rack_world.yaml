@@ -16,19 +16,22 @@
 # placement can be made from the top.
 #
 # GEOMETRY (all axis-aligned boxes unless noted):
-#   work table:   top at z = 0.70   x in [0.70,1.30]  y in [-0.25,0.25]
-#   cylinders:    x = 0.80, y = +-0.20, z_center = 0.775 (top ~0.85)
-#   rack shelf:   center [1.00, 0.0, 1.12], size [0.66,0.94,0.04]
-#                 -> underside at z = 1.10, x in [0.67,1.33], y in [-0.47,0.47]
-#   2 rack legs (rear):   size [0.05,0.05,1.10], z-center 0.55, x=1.30, y=+-0.42
-#   1 rack leg (front-center): size [0.05,0.05,0.40], center [0.725,0.0,0.90],
+#   work table:   top at z = 0.70   x in [0.67,1.27]  y in [-0.21,0.21]
+#                 (trimmed 4cm off each of the R/-y and L/+y sides from the
+#                 original y in [-0.25,0.25], to open up the SIDE-grasp corridor)
+#   cylinders:    x = 0.77, y = +-0.17, z_center = 0.780, length = 0.16 (1cm
+#                 taller than the original 0.15, bottom kept flush with the table)
+#   rack shelf:   center [0.97, 0.0, 1.12], size [0.66,0.94,0.04]
+#                 -> underside at z = 1.10, x in [0.64,1.30], y in [-0.47,0.47]
+#   2 rack legs (rear):   size [0.05,0.05,1.10], z-center 0.55, x=1.27, y=+-0.42
+#   1 rack leg (front-center): size [0.05,0.05,0.40], center [0.695,0.0,0.90],
 #                 stands ON the table (base at table top z=0.70)
-#   conveyor:     single CBF envelope, box center [1.10,-0.90,0.35] (net of
+#   conveyor:     single CBF envelope, box center [1.10,-0.85,0.35] (net of
 #                 two shifts from the original [1.35,-0.85,0.35]: -0.30 in x
 #                 then +0.05 in x / -0.05 in y),
 #                 size [1.30,0.48,0.70] -> top z = 0.70 (== table top),
-#                 x in [0.45,1.75], y in [-1.14,-0.66]. Belt (visual-only, see
-#                 the .world) is narrower, y in [-1.08,-0.72], centered inside.
+#                 x in [0.45,1.75], y in [-1.09,-0.61]. Belt (visual-only, see
+#                 the .world) is narrower, y in [-1.03,-0.67], centered inside.
 #                 Every decorative part (drums/frame/rollers/legs/motor/e-stop)
 #                 is visual-only in the .world and intentionally absent here --
 #                 CBF aggregation is already the heaviest phase of the 150 Hz
@@ -36,14 +39,16 @@
 #                 arm capsules (see shield_world.yaml's header for precedent).
 #
 # TWO functional placement goals (multi-platform, like handover_world):
-#   Handover: [1.03,-0.01,0.701] r=0.09 -- on the table centreline, disk
-#             spanning x[0.94,1.12] y[-0.10,+0.08]: near enough the front table
-#             edge that BOTH arms reach it without extending. Clears the
-#             front-center rack leg footprint x[0.70,0.75] y[-0.03,0.03] by
-#             0.19 m, the red cylinder [0.80,-0.20] by 0.19 m, the blue one by
-#             0.20 m, and stays fully on the table (front edge x=0.70).
-#   Final:    [0.650,-0.90,0.701] r=0.15 -- on the conveyor belt. Disk spans
-#             y in [-1.05,-0.75], inside the belt's [-1.08,-0.72] with a 0.03 m
+#   Handover: [0.95,-0.08,0.701] r=0.07 -- 5cm closer to the robot, 8cm
+#             decentred right (-y) of the table centreline, radius shrunk 2cm
+#             from its original 0.09. Disk spans x[0.88,1.02] y[-0.15,-0.01].
+#             Clears the front-center rack leg footprint x[0.67,0.72]
+#             y[-0.03,0.03] by 0.17 m, the red cylinder [0.77,-0.17] by
+#             0.11 m, the blue one by 0.22 m, the table's trimmed right edge
+#             (y=-0.21) by 0.06 m, and stays fully on the table (front edge
+#             clearance 0.21 m, x>=0.67).
+#   Final:    [0.700,-0.85,0.701] r=0.15 -- on the conveyor belt. Disk spans
+#             y in [-1.00,-0.70], inside the belt's [-1.03,-0.67] with a 0.03 m
 #             margin each side. radius/thickness/place_margin copied verbatim
 #             from this world's old single `platform:` entry.
 #
@@ -68,24 +73,24 @@ static_obstacles:
   - name: "work_table"
     role: "table"
     shape: "box"
-    pose: [1.0, 0.0, 0.35, 0.0, 0.0, 0.0]
-    size: [0.6, 0.5, 0.7]
+    pose: [0.97, 0.0, 0.35, 0.0, 0.0, 0.0]
+    size: [0.6, 0.42, 0.7]
     color: [0.6, 0.4, 0.2, 0.8]
     collision: true
 
   - name: "red_cylinder"
     role: "graspable"
     shape: "cylinder"
-    pose: [0.800, -0.20, 0.775, 0.0, 0.0, 0.0]
-    size: [0.02, 0.15]          # [radius, length]
+    pose: [0.770, -0.17, 0.780, 0.0, 0.0, 0.0]
+    size: [0.02, 0.16]          # [radius, length]
     color: [1.0, 0.0, 0.0, 1.0]
     collision: true
 
   - name: "blue_cylinder"
     role: "graspable"
     shape: "cylinder"
-    pose: [0.800, 0.20, 0.775, 0.0, 0.0, 0.0]
-    size: [0.02, 0.15]
+    pose: [0.770, 0.17, 0.780, 0.0, 0.0, 0.0]
+    size: [0.02, 0.16]
     color: [0.0, 0.0, 1.0, 1.0]
     collision: true
 
@@ -95,20 +100,20 @@ static_obstacles:
   - name: "rack_shelf"
     role: "obstacle"
     shape: "box"
-    pose: [1.00, 0.0, 1.12, 0.0, 0.0, 0.0]
+    pose: [0.97, 0.0, 1.12, 0.0, 0.0, 0.0]
     size: [0.66, 0.94, 0.04]
     color: [0.55, 0.55, 0.58, 1.0]
     collision: true
 
   # --- Storage rack: two REAR vertical legs (floor -> shelf) ---------------- #
-  # Only the back pair remains (x=1.30, y=+-0.42, outside the |y|<=0.25 table and
+  # Only the back pair remains (x=1.27, y=+-0.42, outside the |y|<=0.25 table and
   # the |y|=0.20 cylinder line). The two front legs were removed because they
   # stood near the robot and collided with it at spawn; the shelf now cantilevers
   # forward from these rear posts, leaving the front/side reach fully clear.
   - name: "rack_leg_back_left"
     role: "obstacle"
     shape: "box"
-    pose: [1.30, -0.42, 0.55, 0.0, 0.0, 0.0]
+    pose: [1.27, -0.42, 0.55, 0.0, 0.0, 0.0]
     size: [0.05, 0.05, 1.10]
     color: [0.40, 0.40, 0.42, 1.0]
     collision: true
@@ -116,13 +121,13 @@ static_obstacles:
   - name: "rack_leg_back_right"
     role: "obstacle"
     shape: "box"
-    pose: [1.30, 0.42, 0.55, 0.0, 0.0, 0.0]
+    pose: [1.27, 0.42, 0.55, 0.0, 0.0, 0.0]
     size: [0.05, 0.05, 1.10]
     color: [0.40, 0.40, 0.42, 1.0]
     collision: true
 
   # --- Storage rack: front-center support post (stands ON the table) -------- #
-  # At the front edge (x=0.725, front face flush with the table end x=0.70),
+  # At the front edge (x=0.695, front face flush with the table end x=0.67),
   # centered between the two cylinders (y=0), from the table top (z=0.70) up to
   # the shelf underside (z=1.10). The table carries it, so it avoids the spawn
   # collision the old floor-standing front corner legs caused. It sits at y=0,
@@ -131,9 +136,9 @@ static_obstacles:
   - name: "rack_leg_front_center"
     role: "obstacle"
     shape: "box"
-    pose: [0.725, 0.0, 0.90, 0.0, 0.0, 0.0]
+    pose: [0.695, 0.0, 0.90, 0.0, 0.0, 0.0]
     size: [0.05, 0.05, 0.40]
-    color: [0.40, 0.40, 0.42, 1.0]
+    color: [0.40, 0.40, 0.42, 0.6]
     collision: true
 
   # --- Conveyor: single CBF envelope; every decorative drum/frame/roller/leg
@@ -141,7 +146,7 @@ static_obstacles:
   - name: "conveyor"
     role: "obstacle"
     shape: "box"
-    pose: [1.10, -0.90, 0.35, 0.0, 0.0, 0.0]
+    pose: [1.10, -0.85, 0.35, 0.0, 0.0, 0.0]
     size: [1.30, 0.48, 0.70]
     color: [0.25, 0.25, 0.27, 1.0]
     collision: true
@@ -167,12 +172,12 @@ grasp_roles:
 #   - Final:    on the conveyor belt. Where both batteries ultimately land.
 platforms:
   - name: "Handover"
-    pose: [1.030, -0.01, 0.701]
-    radius: 0.09
+    pose: [0.950, -0.08, 0.701]
+    radius: 0.07
     thickness: 0.002
     place_margin: 0.03
   - name: "Final"
-    pose: [0.650, -0.90, 0.701]
+    pose: [0.700, -0.85, 0.701]
     radius: 0.15
     thickness: 0.002
     place_margin: 0.03

@@ -99,11 +99,11 @@ class GraspStateMachine:
     #   LESS-negative threshold demands LESS overlap = EASIER to satisfy.
     #   - TOP  (-0.03): vertical approach; the arm can't seat the fingers deeply, so accept
     #     shallow overlap (a -0.0365 m reading now succeeds).
-    #   - SIDE (-0.05): horizontal approach lets the fingers bracket the cylinder wall, so
+    #   - SIDE (-0.04): horizontal approach lets the fingers bracket the cylinder wall, so
     #     require deeper seating for a firmer, less slip-prone grasp.
     #   Both are reachable within the relaxed gripper<->cylinder CBF (GRASP_CBF_MARGIN=-0.08).
     #   Selected by grasp type via _contact_depth_threshold().
-    GRASP_CONTACT_DEPTH_TOP = -0.045
+    GRASP_CONTACT_DEPTH_TOP = -0.03
     # Tracks GRASP_INSERTION_TRAVEL_SIDE: the two are coupled, since a shallower
     # insertion ends the advance further out and so reads a less-negative overlap.
     # Shortening the side travel to 0.068 tops the reading out near -0.045, which
@@ -127,7 +127,7 @@ class GraspStateMachine:
     GRASP_APPROACH_TIMEOUT_S = 15.0  # approach can be slow with the relaxed CBF
 
     # Force-controlled closure parameters
-    GRIP_CLOSE_VELOCITY = 0.01   # rad/s — very slow closure (~13s to close)
+    GRIP_CLOSE_VELOCITY = 0.02   # rad/s — slow closure (0.05 rad over CLOSURE_WAIT_S)
     GRIP_FINAL_POSITION = 0.045
     GRIP_FORCE_TARGET = 4.0       # N — target grip force on Fx axis
     GRIP_FORCE_CONTACT = 1.5      # N — threshold to detect first contact
@@ -571,7 +571,7 @@ class GraspStateMachine:
     # a fixed closure time, after which the cylinder is welded to the gripper
     # via the Gazebo LinkAttacher plugin (handled by main_shared_autonomy on
     # the ATTACH gripper_cmd).
-    CLOSURE_WAIT_S = 5.0  # seconds of slow closure before attaching
+    CLOSURE_WAIT_S = 2.5  # seconds of slow closure before attaching
 
     def _grasp_close(self, inp: TickInput) -> TickOutput:
         self._transition("GRASP_CLOSE")
@@ -626,9 +626,9 @@ class GraspStateMachine:
     # Slow, short vertical lift just to break contact with the table before the
     # shared-autonomy placement phase takes over. Raised per request so the lift
     # is clearly felt on the handle and clears the object further:
-    # 0.03 m/s * 3.0 s = 0.09 m (~9 cm).
-    LIFT_VELOCITY = 0.03    # m/s upward (slow)
-    LIFT_DURATION = 3.0     # s  -> 0.03 * 3.0 = 0.09 m = 9 cm lift
+    # 0.06 m/s * 1.5 s = 0.09 m (~9 cm).
+    LIFT_VELOCITY = 0.06    # m/s upward (slow)
+    LIFT_DURATION = 1.5     # s  -> 0.06 * 1.5 = 0.09 m = 9 cm lift
     LIFT_HEIGHT = LIFT_VELOCITY * LIFT_DURATION  # for logging only
 
     def _lift(self, inp: TickInput) -> TickOutput:
@@ -729,8 +729,8 @@ class GraspStateMachine:
     # overlapping the object it just placed, which is what wedges the arm. Same
     # failure and same remedy as ABORT_RETREAT below, whose numbers these mirror.
     RELEASE_RETREAT_DISTANCE = 0.14   # m — guaranteed EE clearance before handing back
-    RELEASE_RETREAT_VELOCITY = 0.05   # m/s — decisive, matches the abort retreat
-    RELEASE_RETREAT_MAX_S = 7.0       # s — hard cap (covers 14 cm + tracking lag)
+    RELEASE_RETREAT_VELOCITY = 0.10   # m/s — decisive; twice the abort retreat's pace
+    RELEASE_RETREAT_MAX_S = 3.5       # s — hard cap (covers 14 cm + tracking lag)
 
     def _release_lift(self, inp: TickInput) -> TickOutput:
         """Dual of the post-CLOSE LIFT, executed after the object is released.
