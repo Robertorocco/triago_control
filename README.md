@@ -136,9 +136,9 @@ source /opt/ros/${ROS_DISTRO}/setup.bash
 source install/setup.bash
 export GAZEBO_MODEL_PATH=$GAZEBO_MODEL_PATH:~/exchange/ros2-ws/src/pal-packages/pal_gazebo_worlds
 
-# 1. Gazebo world + robot spawn + TSID controllers + mobile-base teleop + two RViz
-#    stations (operator station shows the head camera, overview does not).
-#    Replaces the old 4-terminal Gazebo/controllers/RViz sequence.
+# 1. Gazebo world + robot spawn + TSID controllers + mobile-base teleop + three RViz
+#    stations (operator: head camera + left-arm tracking; overview: wide scene;
+#    right-arm tracking) + the robot-model filter that dims non-arm links.
 ros2 launch triago_control simulation_bringup.launch.py world:=rack_world
 
 # 2. QP CLF-CBF safety controller
@@ -164,14 +164,16 @@ ros2 run triago_control study_recorder.py
 # 6. Haption device server (150 Hz)
 ros2 run haption_teleoperation virtuose_server_node
 
-# 7. Clutch-indexing teleop (owns /arm_right/cartesian_reference)
+# 7. Clutch-indexing teleop. With ASSIST_BLENDING on it publishes the operator twist to
+#    /arm_*/user_cartesian_reference, and main_shared_autonomy.py becomes the sole
+#    writer of /arm_*/cartesian_reference; with blending off, this node owns that topic.
 ros2 run haption_teleoperation teleop_triago_clutch.py
 
-# 8. Force feedback to the operator (Virtual-Fixture guidance)
-ros2 run haption_teleoperation haptic_force_manager_CF.py
+# 8. Force feedback for the active cell -- must match config.py's condition triple
+ros2 run haption_teleoperation haptic_force_manager_CFB.py
 ```
 
-> The active force-feedback node above is `haptic_force_manager_CF.py`. It consumes `/shared_autonomy/{goal_names, goal_probabilities, user_policy, active_goal_pose, grasp_active}` published by `main_shared_autonomy.py` to compute the guidance wrench sent to the Haption device.
+> **The active cell is set in `config.py` (§1b), not here.** It is currently `CONTROL_MODE=CLUTCH`, `ASSIST_FEEDBACK=True`, `ASSIST_BLENDING=True` — cell **CFB** (full guidance), hence `haptic_force_manager_CFB.py` above. Change the flags and step 8 must change with them: every teleop and force-manager node calls `cfg.validate_condition(...)` at startup and hard-errors on a mismatch, so a mis-launched pair fails loudly rather than silently recording the wrong condition. The force manager consumes `/shared_autonomy/{goal_names, goal_probabilities, user_policy, active_goal_pose, grasp_active}` published by `main_shared_autonomy.py` to compute the guidance wrench sent to the Haption device.
 >
 > **Force-manager naming convention.** Every force manager is `haptic_force_manager_<CELL>`, where `<CELL>` encodes the active study condition as letters: **C** = CLUTCH or **J** = JOYSTICK (the control mode, always first), then **F** if `ASSIST_FEEDBACK` is on, then **B** if `ASSIST_BLENDING` is on. The no-assist baseline is just the mode letter. The full 2x2x2 factorial (8 study cells):
 >
@@ -223,10 +225,14 @@ ros2 run triago_control drift_evaluator_node.py # Tracking error analysis
 
 All tunable parameters live in `triago_control/qp_controller/config.py`:
 
+- **Study condition** (§1b): `CONTROL_MODE`, `ASSIST_FEEDBACK`, `ASSIST_BLENDING` — the 2x2x2 cell selector, also read by `haption_teleoperation`
 - **Feature flags**: `DISABLE_CBF`, `DYNAMIC_SLACK_WEIGHT`, `COMPARISON_CLF`, etc.
 - **Safety gains**: `ALPHA_SOFTMIN`, `GAMMA_CBF`, `D_SAFE_BASE`, `K_V_SAFE`
 - **Control loop**: `CONTROL_FREQ_DEFAULT` (Hz), `PUBLISH_EVERY_N`
 - **Workspace geometry**: obstacle positions, capsule radius, wall dimensions
+- **Per-world posture overrides**: `POSTURE_TARGET_BY_WORLD`, `POSTURE_TARGET_WEIGHT_BY_WORLD`, `WRIST_BRANCH_MIN_BY_WORLD` — keyed by world name, they retarget the posture field and latch a virtual joint floor to keep `arm_*_6_joint` out of its unrecoverable IK branch
+
+Goal-manifold shaping lives with the geometry in `shared_autonomy/goal_set.py` (grasp standoffs, azimuth/roll confidence bands, `GOAL_DIRECTION_FILTER_TAU`), not in `config.py`.
 
 ## Simulation vs. Real Hardware (Auto-Detection)
 

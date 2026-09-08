@@ -6,43 +6,53 @@
  * form can be resubmitted many times per participant:
  *   - Before You Begin   -- one-shot, filled once at the very start: age,
  *                           gender, dominant hand, prior teleop experience
- *   - Condition <code>   -- 6 equivalent sections (one per non-tutorial
- *                           condition), each carrying the trimmed NASA-TLX +
- *                           HRI item set from post_trial_questionnaire.tex
+ *   - Condition <code>   -- 6 sections (one per non-tutorial condition):
+ *                           trimmed NASA-TLX + HRI items (post_trial_questionnaire.tex)
  *   - End of Session     -- one-shot, filled once after the 6th condition:
- *                           best strategy overall, ranking grids for the 3
- *                           clutch- and 3 joystick-assisted conditions, and
- *                           an open comments field
+ *                           best strategy, ranking grids, an open comments field
  *
- * Each visit to the form is exactly one submission covering exactly one of
- * the three kinds above -- the landing page's routing question sends the
- * response straight to the right section and the form submits at the end of
- * that section, so unrelated questions are never shown.
+ * Each visit is exactly one submission: the landing-page question routes
+ * straight to the matching section, and only that section is ever shown.
  *
  * HOW TO RUN (one-time setup, ~30 seconds):
  *   1. Go to https://script.google.com -> New project.
  *   2. Delete the placeholder code, paste this whole file in.
  *   3. Click Run (the play button) on buildPostTrialForm.
- *   4. First run asks for permission (it needs to create a Form in your
- *      Drive) -- Google will warn "unverified app" since this is your own
- *      script, not a public one; click Advanced -> Go to project (unsafe).
- *   5. Check the Execution log (View > Logs, or Ctrl+Enter) for two links:
- *      the EDIT url (to look at/tweak the form) and the LIVE url (what you
- *      actually hand to participants / open at the operator station).
+ *   4. First run asks for permission (it creates a Form in your Drive) --
+ *      Google warns "unverified app"; click Advanced -> Go to project (unsafe).
+ *   5. Check the Execution log (View > Logs, or Ctrl+Enter) for the EDIT url
+ *      (tweak the form) and the LIVE url (hand to participants / operator station).
  *   6. In the form's Responses tab, click the green Sheets icon once to
  *      create the linked spreadsheet every submission will land in.
  *
- * NOTE: running this always calls FormApp.create and mints a brand-new
- * form/URL -- it does not edit an existing live form in place. If you
- * already have a live form from an earlier version of this script, running
- * this again gives you a second, separate form with its own response sheet.
- * Point participants at whichever one you keep using.
+ * NOTE: this always mints a brand-new Form/URL via FormApp.create; it never
+ * edits an existing form in place, so re-running it creates a second, separate form.
  */
 
 var CONDITION_CODES = ['CF', 'CB', 'CFB', 'JF', 'JB', 'JFB']; // C and J excluded: tutorial-only
 
+// Participant-facing names -- internal codes never appear on the form itself.
+var CONDITION_LABELS = {
+  CF: 'CLUTCH FEEDBACK',
+  CB: 'CLUTCH BLENDING',
+  CFB: 'CLUTCH FEEDBACK+BLENDING',
+  JF: 'JOYSTICK FEEDBACK',
+  JB: 'JOYSTICK BLENDING',
+  JFB: 'JOYSTICK FEEDBACK+BLENDING'
+};
+
+// Reminds the participant what they just tried, in control-mode/feedback/blending terms.
+var CONDITION_DESCRIPTIONS = {
+  CF: 'Clutch (position) control. You felt haptic force feedback; your commands were not blended with the robot\'s suggestions.',
+  CB: 'Clutch (position) control. No force feedback; your commands were blended with the robot\'s suggestions.',
+  CFB: 'Clutch (position) control. You felt haptic force feedback and your commands were blended with the robot\'s suggestions.',
+  JF: 'Joystick (velocity) control. You felt haptic force feedback; your commands were not blended with the robot\'s suggestions.',
+  JB: 'Joystick (velocity) control. No force feedback; your commands were blended with the robot\'s suggestions.',
+  JFB: 'Joystick (velocity) control. You felt haptic force feedback and your commands were blended with the robot\'s suggestions.'
+};
+
 function buildPostTrialForm() {
-  var form = FormApp.create('TRIAGo Shared-Autonomy Study Questionnaire');
+  var form = FormApp.create('User Study Questionnaire');
   form.setDescription(
     'One form for the whole session. Use it once before your first ' +
     'condition, once after each of the 6 conditions, and once at the very ' +
@@ -90,6 +100,8 @@ function buildPostTrialForm() {
   var pickerPage = form.addPageBreakItem()
       .setTitle('Condition Report')
       .setHelpText('Which condition did you just finish?');
+  // Closed-choice field, not free text: the condition code can't be
+  // mistyped, so it stays a reliable join key against the trial data.
   var conditionItem = form.addMultipleChoiceItem()
       .setTitle('Condition just completed')
       .setRequired(true);
@@ -97,7 +109,9 @@ function buildPostTrialForm() {
   // --- Sections 3-8: one equivalent block per condition ---
   var conditionPages = {};
   CONDITION_CODES.forEach(function(code) {
-    var page = form.addPageBreakItem().setTitle('Condition ' + code);
+    var page = form.addPageBreakItem()
+        .setTitle(CONDITION_LABELS[code])
+        .setHelpText(CONDITION_DESCRIPTIONS[code]);
     addSevenPointScale(form, '1. Mental Demand -- How mentally demanding was the task?',
                        'Very Low', 'Very High');
     addSevenPointScale(form, '2. Physical Demand -- How physically demanding was the task?',
@@ -126,9 +140,9 @@ function buildPostTrialForm() {
       .setChoiceValues(['Clutch (Position)', 'Joystick (Velocity)'])
       .setRequired(true);
   addRankingGrid(form, 'Rank the three clutch-assisted teleoperation conditions you experienced today, from most to least preferred.',
-                 ['Clutch Feedback (CF)', 'Clutch Blended (CB)', 'Clutch Feedback Blended (CFB)']);
+                 [CONDITION_LABELS.CF, CONDITION_LABELS.CB, CONDITION_LABELS.CFB]);
   addRankingGrid(form, 'Rank the three joystick-assisted teleoperation conditions you experienced today, from most to least preferred.',
-                 ['Joystick Feedback (JF)', 'Joystick Blended (JB)', 'Joystick Feedback Blended (JFB)']);
+                 [CONDITION_LABELS.JF, CONDITION_LABELS.JB, CONDITION_LABELS.JFB]);
   form.addParagraphTextItem()
       .setTitle('Do you have any additional comments or observations regarding the teleoperation strategies you experienced today?')
       .setRequired(false);
@@ -142,7 +156,7 @@ function buildPostTrialForm() {
   ]);
 
   conditionItem.setChoices(CONDITION_CODES.map(function(code) {
-    return conditionItem.createChoice(code, conditionPages[code]);
+    return conditionItem.createChoice(CONDITION_LABELS[code], conditionPages[code]);
   }));
 
   Logger.log('EDIT URL (for you): ' + form.getEditUrl());

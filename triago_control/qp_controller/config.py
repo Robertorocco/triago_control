@@ -15,37 +15,22 @@ DYNAMIC_CBF = False             # dynamically remove pairs for interaction
 DYNAMIC_SLACK_WEIGHT = True    # raise slack weight in free space, drop it near obstacles
 COMPARISON_CLF = True           # normalized (unit-error) scalar CLF formulation
 DYNAMIC_GAMMA_CLF = False       # vary CLF convergence rate with the safety margin
-DYNAMIC_POSTURE_WEIGHT = False  # per-joint posture weight rises with that joint's own limit lambda; also drops lambda_jl from the slack/gamma driver (OFF = today)
+DYNAMIC_POSTURE_WEIGHT = False  # per-joint posture weight rises with that joint's own limit lambda; when enabled, also drops lambda_jl from the slack/gamma driver
 SIMULATE_IDEAL_KINEMATICS = False  # True = pure-math digital twin instead of measured state
 ORIENTATION_CTRL = True         # True = 6DOF (pos+ori), False = 3DOF (pos only)
 
 # =============================================================================
 # 1b. EXPERIMENT CONDITION SELECTOR (2x2x2 user-study factorial)
 # =============================================================================
-# Three orthogonal factors select one of 8 study cells:
-#   CONTROL_MODE    -- CLUTCH (position control) vs JOYSTICK (velocity control)
-#   ASSIST_FEEDBACK -- channel F: assistive guidance forces on the handle
-#   ASSIST_BLENDING -- channel B: reference-level user<->policy blending (robot side)
-#
-#   MODE      F      B      condition          force manager
-#   CLUTCH    False  False  Sync only          haptic_force_manager_C
-#   CLUTCH    True   False  Guided feedback    haptic_force_manager_CF
-#   CLUTCH    False  True   Guided blending    haptic_force_manager_CB
-#   CLUTCH    True   True   Full guidance      haptic_force_manager_CFB
-#   JOYSTICK  False  False  Sync only          haptic_force_manager_J
-#   JOYSTICK  True   False  Guided feedback    haptic_force_manager_JF
-#   JOYSTICK  False  True   Guided blending    haptic_force_manager_JB
-#   JOYSTICK  True   True   Full guidance      haptic_force_manager_JFB
-#
-# Every teleop/force-manager node calls validate_condition() at startup and hard-errors
-# on mismatch, so a mis-launched experiment fails loudly instead of running the wrong cell.
+# CONTROL_MODE x ASSIST_FEEDBACK x ASSIST_BLENDING selects one of 8 study cells and its
+# matching haptic_force_manager_<cell> node (see README.md); validate_condition() hard-errors on mismatch.
 CLUTCH = "CLUTCH"
 JOYSTICK = "JOYSTICK"
 
 # Active experiment condition: edit these three to select a study cell.
 CONTROL_MODE   = CLUTCH      # CLUTCH (position control) | JOYSTICK (velocity control)
 ASSIST_FEEDBACK = True        # channel F: assistive guidance forces on the handle
-ASSIST_BLENDING = False      # channel B: reference-level user<->policy blending
+ASSIST_BLENDING = True      # channel B: reference-level user<->policy blending
 
 # Backward-compat alias: legacy code reads BLENDING to decide reference-topic ownership.
 BLENDING = ASSIST_BLENDING
@@ -71,19 +56,16 @@ def validate_condition(node_name, control_mode=None, feedback=None, blending=Non
             "or launch the correct node for this condition.")
 
 # --- Joystick home pose (Haption base frame) -------------------------------
-# Fixed home position; home ORIENTATION tracks the gripper via a per-arm reference delta
-# captured once at first activation, angle-compressed by JOYSTICK_ROT_HOME_SCALE, never re-anchored.
-# Device workspace is x[0.14,0.36] y[-0.24,0.22] z[-0.18,0.18] m; this operator rest pose keeps at
-# least 9.7 cm of handle travel on every axis, the tightest direction being +x.
+# Fixed home position; home ORIENTATION tracks the gripper via a per-arm delta captured once at
+# first activation (JOYSTICK_ROT_HOME_SCALE-compressed, never re-anchored). Workspace keeps >=9.7 cm on every axis.
 JOYSTICK_NEUTRAL_POSITION_M = [0.2624, 0.0103, -0.0729]
 # Neutral handle quaternion, measured on the device at the operator's comfortable rest orientation.
 JOYSTICK_NEUTRAL_ORIENTATION_XYZW = [-0.015140674076974392, 0.8170770406723022,
                                      0.06124841421842575, 0.5730659365653992]
 
 # --- Displacement -> twist mapping (teleop_triago_joystick.py) --------------
-# Twist magnitude is proportional to the handle's distance from home past a radial deadband.
-# Each deadband must stay above the centering spring's settle precision, or the residual
-# settle-oscillation of a released handle is read as spurious user input.
+# Twist magnitude is proportional to distance from home past a radial deadband; each deadband must
+# exceed the centering spring's settle precision, or a released handle's residual oscillation reads as input.
 JOYSTICK_DEADBAND_LIN = 0.03456      # m   (3.46 cm)
 JOYSTICK_DEADBAND_ANG = 0.23328 * 0.7  # rad (~9.36 deg, 30% smaller: precise orientation twists were hard to impose)
 JOYSTICK_K_TRANS = 1.6               # (m/s) per m of handle linear displacement
@@ -114,10 +96,8 @@ JOYSTICK_SPRING_KD_ANG = 0.075       # Nm/(rad/s)
 JOYSTICK_HOME_POSE_TOPIC = "/joystick/home_pose"
 
 # --- Twist arbitration (main_shared_autonomy.compute_alpha) -----------------
-# Authority alpha on the policy in v_blend = (1-alpha)*v_user + alpha*pi_policy, driven only by
-# the alignment s in [-1,1] between user and policy twists (two-sided ramp, continuous at s=0):
-#   s >= 0: alpha = MIN + (MAX-MIN)*s   |   s < 0: alpha = MIN*(1+s)  ->  0 at full opposition.
-# A still user (twist inside the deadband) uses the reduced IDLE authority (gentle crawl).
+# Authority alpha on the policy in v_blend = (1-alpha)*v_user + alpha*pi_policy, from the alignment
+# s in [-1,1]: s>=0 -> alpha=MIN+(MAX-MIN)*s; s<0 -> alpha=MIN*(1+s); still user -> IDLE.
 ALIGN_ALPHA_MIN = 0.2                # policy weight at perpendicular alignment (s=0)
 ALIGN_ALPHA_MAX = 0.8                # policy weight at full active agreement (s=1)
 ALIGN_ALPHA_IDLE = 0.35             # policy weight when the user is still
@@ -167,19 +147,29 @@ W_CENTER = 0.96                # posture-task weight in the QP cost (used only w
 POSTURE_GRASP_SCALE = 0.05     # posture weight scale during autonomous precision phases
 POSTURE_SCALE_TAU = 0.2        # s first-order ramp for the posture-scale switch
 
-# Dynamic per-joint posture weight (DYNAMIC_POSTURE_WEIGHT). Same exp(-beta*lambda^2)
-# tolerance kernel as the slack schedule, blended in the OPPOSITE direction: slack
-# decays MAX->BASE as lambda grows, posture climbs BASE->MAX with that joint's own
-# joint-limit shadow price, concentrating reconfiguration authority on the joint
-# actually fighting its limit.
+# Dynamic per-joint posture weight (DYNAMIC_POSTURE_WEIGHT flag): same exp(-beta*lambda^2) kernel
+# as the slack schedule but blended oppositely, so the joint fighting its limit gets more authority.
 BASE_WEIGHT_POSTURE = 0.8      # posture weight when the joint is idle (lambda_jl ~ 0)
-MAX_WEIGHT_POSTURE = 1.5       # posture weight when the joint is hard against its limit
+MAX_WEIGHT_POSTURE = 1.2       # posture weight when the joint is hard against its limit
 BETA_POSTURE = 0.05            # kernel sensitivity (own knee; lambda_jl range differs from lambda_cbf)
 POSTURE_WEIGHT_FILTER_TAU = 0.2  # 2nd-stage LPF on the posture weight (symmetric with WEIGHT_SLACK_FILTER_TAU)
 
-# Rate damping: + RATE_WEIGHT * ||dq - dq_measured||^2 on the arm joints anchors the
-# task-null wrist DOFs to the arm's real state each tick (kills qdot oscillation).
-# Anchoring on the QP's own last output instead is a self-referential low-pass: rejected.
+# --- Wrist-branch escape: recovery pull (targets/weights) + latched floor (min) -------------
+# arm_*_6_joint's asymmetric range lets it fall into a disconnected IK branch the CLF can't escape;
+# POSTURE_TARGET_BY_WORLD pulls it back until it crosses WRIST_BRANCH_MIN_BY_WORLD, which then latches.
+POSTURE_TARGET_BY_WORLD = {
+    'shield_world': {'arm_right_6_joint': 2.07, 'arm_left_6_joint': 1.88},
+}
+POSTURE_TARGET_WEIGHT_BY_WORLD = {
+    'shield_world': {'arm_right_6_joint': 10.0, 'arm_left_6_joint': 10.0},
+}
+WRIST_BRANCH_MIN_BY_WORLD = {
+    'shield_world': 0.35,
+}
+WRIST_BRANCH_JOINTS = ('arm_right_6_joint', 'arm_left_6_joint')
+
+# Rate damping: + RATE_WEIGHT * ||dq - dq_measured||^2 on the arm joints anchors the task-null
+# wrist DOFs to the arm's real state each tick, killing qdot oscillation (vs. a self-referential low-pass if anchored on the QP's own last output).
 ENABLE_RATE_DAMPING = True
 RATE_DAMPING_VS_MEASURED = True
 RATE_WEIGHT = 50.0          # sim default; real-hw tuned value (500) lives on the real-hw branch
@@ -191,8 +181,8 @@ RATE_WEIGHT_GRASP = 20.0    # sim default; real-hw tuned value (200) lives on th
 # 3. DYNAMIC SCALING BOUNDARIES
 # =============================================================================
 # Decoupled dynamic slack weighting.
-BASE_WEIGHT_SLACK = 105.75      # slack weight when active against an obstacle
-MAX_WEIGHT_SLACK = 225.0       # free-space slack weight; also pinned on a frozen arm
+BASE_WEIGHT_SLACK = 150.75      # slack weight when active against an obstacle
+MAX_WEIGHT_SLACK = 250.0       # free-space slack weight; also pinned on a frozen arm
 BETA = 0.2                     # how fast slack weight returns to baseline as lambda grows
 SLACK_FILTER_TAU = 0.15        # LPF on the shadow prices feeding the scheduler
 WEIGHT_SLACK_FILTER_TAU = 0.2  # 2nd-stage LPF directly on the slack weight
@@ -200,7 +190,7 @@ WEIGHT_SLACK_FILTER_TAU = 0.2  # 2nd-stage LPF directly on the slack weight
 # Dynamic gamma (CLF) scheduling.
 GAMMA_CLF_DEFAULT = 0.75       # static / initial CLF convergence rate
 GAMMA_MIN = 0.7                # lower bound of the scheduled CLF gamma
-GAMMA_MAX = 1.1                # upper bound of the scheduled CLF gamma
+GAMMA_MAX = 1.2                # upper bound of the scheduled CLF gamma
 BETA_GAMMA = 5.0               # how quickly gamma drops as the collision lambda grows
 GAMMA_FILTER_TAU = 0.125       # LPF time constant for the gamma scheduler
 

@@ -10,8 +10,17 @@ import triago_control.qp_controller.config as cfg
 class QPFormulator:
     """Assembles H, g, C, b, solves the CLF-CBF-QP and tracks shadow prices."""
 
-    def __init__(self, model):
+    def __init__(self, model, posture_targets=None, posture_target_weights=None, wrist_branch_min=None):
         self.model = model
+        # {joint_name: q_target} relocating the posture field's minimum off the range midpoint.
+        self.posture_targets = dict(posture_targets or {})
+        # {joint_name: multiplier} scaling that joint's posture weight independent of WHERE it points --
+        # lets a retargeted joint win against CLF/rate-damping without touching every other joint's W_CENTER.
+        self.posture_target_weights = dict(posture_target_weights or {})
+        # {joint_name: q_floor} -- joint-limit-CBF floor that arms permanently once the joint
+        # crosses it (posture_targets pulls it there first; see config.py's WRIST_BRANCH_MIN_BY_WORLD).
+        self.wrist_branch_min = dict(wrist_branch_min or {})
+        self._wrist_branch_armed = {name: False for name in self.wrist_branch_min}
         self.n_joints = model.nv       # Full robot velocity dimension
         self.n_slacks = 2              # One scalar CLF slack per arm (right, left)
         self.n_total = self.n_joints + self.n_slacks
@@ -27,8 +36,11 @@ class QPFormulator:
         self.last_lambda_joints_right = 0.0
         self.last_lambda_joints_left = 0.0
 
-        # Lazy cache for the posture-field joint indexing (built on first solve).
-        self._posture_cache = None
+        # One-shot console-announcement tracking for the posture field (see _posture_indices):
+        # not cached, since a joint's effective target/weight depends on its live armed state.
+        self._posture_announced = set()
+        self._posture_weight_announced = set()
+        self._posture_unknown_warned = False
 
         # Lazy active-arm mask for the rate-damping term (must stay masked to the arm joints).
         self._rate_mask = None
@@ -48,9 +60,8 @@ class QPFormulator:
         self._lam_jr_f = 0.0
         self._lam_jl_f = 0.0
 
-        # DYNAMIC_POSTURE_WEIGHT state: the FULL per-joint joint-limit shadow-price vector
-        # (previous tick + its input-stage LPF) and the 2nd-stage LPF on the per-joint posture
-        # weight, so the joint actually fighting its limit gets more reconfiguration authority.
+        # DYNAMIC_POSTURE_WEIGHT state: per-joint joint-limit shadow-price vector (input-stage LPF)
+        # and the 2nd-stage LPF'd posture weight, giving the joint fighting its limit more authority.
         self.last_lambda_joints_vec = np.zeros(self.n_joints)
         self._lam_jl_vec_f = np.zeros(self.n_joints)
         self._w_posture_vec_f = np.full(self.n_joints, cfg.BASE_WEIGHT_POSTURE)
@@ -91,15 +102,14 @@ class QPFormulator:
             return None, None
 
     def _posture_indices(self, kin):
-        """Lazily build & cache the per-joint arrays for the posture field.
+        """Builds the per-joint posture-field arrays. Recomputed every tick (not cached) because a
+        wrist-branch joint's effective target/weight depends on its live armed state (see __init__).
 
-        Returns (v_idx, q_idx, mids, half_ranges) over the ACTIVE arm joints that
-        are single-DOF and have finite limits. Cached after the first call since
-        the model topology and active arm-joint set are static.
+        Returns (v_idx, q_idx, centers, half_lo, half_hi, weight_mult) over the active-arm joints
+        that are single-DOF and have finite limits. `centers` may sit off the range midpoint,
+        making the two half-widths unequal -- what keeps the potential diverging at both real limits.
         """
-        if self._posture_cache is not None:
-            return self._posture_cache
-        v_idx, q_idx, mids, half_ranges = [], [], [], []
+        v_idx, q_idx, centers, half_lo, half_hi, weight_mult = [], [], [], [], [], []
         active_v = set(kin.idx_right + kin.idx_left)
         for joint in self.model.joints:
             if joint.id == 0 or joint.nq != 1:
@@ -113,14 +123,40 @@ class QPFormulator:
             rng = q_u - q_l
             if rng < 1e-6:
                 continue
+            name = self.model.names[joint.id]
+            override_active = not self._wrist_branch_armed.get(name, False)
+            center = 0.5 * (q_u + q_l)
+            if override_active and name in self.posture_targets:
+                # Keep the target strictly inside the limits so neither half-width collapses.
+                margin = 0.05 * rng
+                center = float(np.clip(self.posture_targets[name], q_l + margin, q_u - margin))
+                if name not in self._posture_announced:
+                    tag = "recovery target (until it arms the wrist-branch floor)" \
+                        if name in self.wrist_branch_min else "field target"
+                    print(f"\033[96m[Posture] {name}: {tag} {center:+.3f} rad "
+                          f"(midpoint {0.5 * (q_u + q_l):+.3f}).\033[0m")
+                    self._posture_announced.add(name)
+            mult = float(self.posture_target_weights.get(name, 1.0)) if override_active else 1.0
+            if mult != 1.0 and name not in self._posture_weight_announced:
+                print(f"\033[96m[Posture] {name}: weight x{mult:.2f}"
+                      f"{' until it arms' if name in self.wrist_branch_min else ''}.\033[0m")
+                self._posture_weight_announced.add(name)
             v_idx.append(joint.idx_v)
             q_idx.append(joint.idx_q)
-            mids.append(0.5 * (q_u + q_l))
-            half_ranges.append(0.5 * rng)
-        self._posture_cache = (
-            np.array(v_idx, dtype=int), np.array(q_idx, dtype=int),
-            np.array(mids, dtype=float), np.array(half_ranges, dtype=float))
-        return self._posture_cache
+            centers.append(center)
+            half_lo.append(center - q_l)
+            half_hi.append(q_u - center)
+            weight_mult.append(mult)
+        if not self._posture_unknown_warned:
+            unknown = (set(self.posture_targets) | set(self.posture_target_weights)) - set(self.model.names)
+            if unknown:
+                print(f"\033[93m[Posture] posture_targets/posture_target_weights names not in "
+                      f"the model, ignored: {sorted(unknown)}\033[0m")
+            self._posture_unknown_warned = True
+        return (np.array(v_idx, dtype=int), np.array(q_idx, dtype=int),
+                np.array(centers, dtype=float),
+                np.array(half_lo, dtype=float), np.array(half_hi, dtype=float),
+                np.array(weight_mult, dtype=float))
 
     def _schedule_weights(self, dt):
         """Updates per-arm slack weights and CLF gamma from the LPF'd shadow prices of the last solve."""
@@ -132,9 +168,8 @@ class QPFormulator:
         # Input-stage LPF on the FULL per-joint joint-limit shadow price (drives the dynamic posture weight).
         self._lam_jl_vec_f = filter_alpha * self._lam_jl_vec_f + (1.0 - filter_alpha) * self.last_lambda_joints_vec
 
-        # Per-arm worst shadow price driving the slack/gamma schedule. With DYNAMIC_POSTURE_WEIGHT
-        # the joint-limit price is REMOVED here (it drives the posture weight instead), so the slack
-        # no longer yields tracking near a joint limit -- the arm reconfigures the joint and keeps tracking.
+        # Per-arm worst shadow price driving the slack/gamma schedule; under DYNAMIC_POSTURE_WEIGHT the
+        # joint-limit price is removed here (it drives posture weight instead) so slack keeps tracking near a limit.
         if cfg.DYNAMIC_POSTURE_WEIGHT:
             max_shadow_r = self._lam_col_r_f
             max_shadow_l = self._lam_col_l_f
@@ -304,16 +339,18 @@ class QPFormulator:
             damp_vec[kin.idx_left] = 2.0 * cfg.DAMP
         H_brake = np.diag(damp_vec)
 
-        # Posture field: v_ref = -K_GRADIENT * dH/dp with H(p) = 1/(1-p)^2 + 1/(1+p)^2 on the
-        # normalized position p = (q-mid)/half_range -- near-zero mid-range, diverges at limits.
-        # Cost-only: the hard CLF/CBF/limit constraints are untouched.
+        # Posture field: v_ref = -K_GRADIENT * dH/dp, H(p) = 1/(1-p)^2 + 1/(1+p)^2 on p =
+        # (q-center)/half_width -- near-zero at center, diverges at limits; cost-only (hard CLF/CBF/limit constraints untouched).
         mask_center = np.zeros(self.n_joints)
         v_ref_center = np.zeros(self.n_joints)
-        v_idx, q_idx, mids, half_ranges = self._posture_indices(kin)
+        v_idx, q_idx, centers, half_lo, half_hi, weight_mult = self._posture_indices(kin)
         if v_idx.size > 0:
             # Clamp p strictly inside (-1,1): at/over a limit the raw cube flips sign and pushes OUT.
             EPS = 1e-3
-            p = (kin.current_q[q_idx] - mids) / half_ranges
+            # Each side normalized by its own half-width, so p reaches +-1 exactly at the real
+            # limits even when the center is off-midpoint. dH/dp = 0 at p = 0 keeps this C1.
+            q_rel = kin.current_q[q_idx] - centers
+            p = q_rel / np.where(q_rel >= 0.0, half_hi, half_lo)
             p = np.clip(p, -1.0 + EPS, 1.0 - EPS)
             gap_hi = 1.0 - p     # > 0 by the clamp
             gap_lo = 1.0 + p     # > 0 by the clamp
@@ -322,12 +359,8 @@ class QPFormulator:
             mask_center[v_idx] = 1.0
             v_ref_center[v_idx] = v
 
-        # Effective posture weight, scaled down during autonomous precision phases.
-        # Nominal (flag off): uniform W_CENTER. Dynamic (DYNAMIC_POSTURE_WEIGHT): each joint's
-        # weight climbs BASE_WEIGHT_POSTURE -> MAX_WEIGHT_POSTURE with its OWN filtered joint-limit
-        # shadow price -- same exp(-beta*lambda^2) kernel as the slack schedule, blended in the
-        # opposite direction -- so the joint fighting its limit gets more reconfiguration authority.
-        # Selected at v_idx only (never mask-multiplied against a full vector: 0*nan == nan).
+        # Effective posture weight: uniform W_CENTER, or (DYNAMIC_POSTURE_WEIGHT) each joint's own
+        # shadow price climbs it BASE->MAX. Selected at v_idx only -- mask-multiplying a full vector risks 0*nan.
         w_center_vec = np.zeros(self.n_joints)
         if cfg.DYNAMIC_POSTURE_WEIGHT and v_idx.size > 0:
             lam = self._lam_jl_vec_f[v_idx]
@@ -339,15 +372,15 @@ class QPFormulator:
             w_center_vec[v_idx] = self._w_posture_vec_f[v_idx] * self.posture_scale
         else:
             w_center_vec[v_idx] = cfg.W_CENTER * self.posture_scale
+        w_center_vec[v_idx] = w_center_vec[v_idx] * weight_mult
         H_center = np.diag(mask_center * w_center_vec)
         g_center = -(mask_center * w_center_vec) * v_ref_center
         # Per-arm representative (max over that arm's joints) for the fig4 telemetry trace.
         self.posture_weight_r = float(np.max(w_center_vec[kin.idx_right])) if kin.idx_right else cfg.W_CENTER * self.posture_scale
         self.posture_weight_l = float(np.max(w_center_vec[kin.idx_left])) if kin.idx_left else cfg.W_CENTER * self.posture_scale
 
-        # Rate damping ||dq - dq_measured||^2, arm joints ONLY: locked joints are pinned to dq=0 by
-        # two opposing box rows, and an unmasked rate gradient contests that pin -- two linearly
-        # dependent rows enter quadprog's active set and the dual method fails outright.
+        # Rate damping ||dq - dq_measured||^2, arm joints ONLY: a locked joint is pinned to dq=0 by
+        # two opposing box rows, and an unmasked rate gradient there creates linearly dependent rows that fail quadprog's active set.
         if self._rate_mask is None:
             self._rate_mask = np.zeros(self.n_joints)
             if kin.idx_right:
@@ -359,9 +392,8 @@ class QPFormulator:
                 dq_prev_rate = kin.current_v
             else:
                 dq_prev_rate = self.last_dq_safe
-            # Relaxed RATE_WEIGHT_GRASP on the boosted arm and whenever tracking error is large:
-            # full RATE_WEIGHT anchored to a near-zero measured velocity self-reinforces a freeze
-            # (every command pulled back to ~zero); full anti-oscillation weight only matters near convergence.
+            # Relaxed RATE_WEIGHT_GRASP on the boosted arm or when tracking error is large: anchoring
+            # full RATE_WEIGHT to near-zero measured velocity self-reinforces a freeze; it only matters near convergence.
             err_r = float(np.linalg.norm(e_r[:3]))
             err_l = float(np.linalg.norm(e_l[:3]))
             rate_weight_r = (cfg.RATE_WEIGHT_GRASP
@@ -482,6 +514,18 @@ class QPFormulator:
             q_l = self.model.lowerPositionLimit[idx_q]
             q_now = kin.current_q[idx_q]
             v_now = kin.current_v[idx_v]
+
+            # Latched virtual floor (see __init__): only applied once the joint has crossed above
+            # it under its own motion -- else the CBF row would demand an infeasible inverted box.
+            name = self.model.names[joint.id]
+            floor = self.wrist_branch_min.get(name)
+            if floor is not None:
+                if not self._wrist_branch_armed[name] and q_now >= floor:
+                    self._wrist_branch_armed[name] = True
+                    print(f"\033[96m[WristBranch] {name}: floor engaged at {floor:+.3f} rad "
+                          f"(crossed it at q={q_now:+.3f}).\033[0m")
+                if self._wrist_branch_armed[name]:
+                    q_l = max(q_l, floor)
 
             # Velocity-aware buffer: a fast joint starts braking earlier (base + K_v * |v|).
             dynamic_buffer = cfg.JOINT_LIMIT_BUFFER_BASE + (cfg.JOINT_LIMIT_K_V * abs(v_now))
