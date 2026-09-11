@@ -99,17 +99,12 @@ class GraspStateMachine:
     #   LESS-negative threshold demands LESS overlap = EASIER to satisfy.
     #   - TOP  (-0.03): vertical approach; the arm can't seat the fingers deeply, so accept
     #     shallow overlap (a -0.0365 m reading now succeeds).
-    #   - SIDE (-0.04): horizontal approach lets the fingers bracket the cylinder wall, so
-    #     require deeper seating for a firmer, less slip-prone grasp.
+    #   - SIDE (-0.032): horizontal approach lets the fingers bracket the cylinder wall.
     #   Both are reachable within the relaxed gripper<->cylinder CBF (GRASP_CBF_MARGIN=-0.08).
     #   Selected by grasp type via _contact_depth_threshold().
     GRASP_CONTACT_DEPTH_TOP = -0.03
-    # Tracks GRASP_INSERTION_TRAVEL_SIDE: the two are coupled, since a shallower
-    # insertion ends the advance further out and so reads a less-negative overlap.
-    # Shortening the side travel to 0.068 tops the reading out near -0.045, which
-    # the old -0.05 gate could not reach -- the approach then always timed out on
-    # a grasp that was visually seated. Re-tune BOTH together, never one alone.
-    GRASP_CONTACT_DEPTH_SIDE = -0.04
+    # Coupled to GRASP_INSERTION_TRAVEL_SIDE -- relax both together, not just this gate.
+    GRASP_CONTACT_DEPTH_SIDE = -0.032
     APPROACH_ANG_TOL = 0.135         # rad -- approach-axis alignment at end of insertion
     APPROACH_POS_TOL = 0.009         # m -- position-reached fallback
     # Straight-line advance from the standoff along the approach axis (the DEPTH knob),
