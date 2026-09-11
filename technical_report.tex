@@ -761,23 +761,25 @@ The operator commands the robot through a Haption Desktop 6D Compact, a six-degr
 \subsection{Device frame and driver-side wrench}
 \label{sec:device}
 
-The device base frame and the robot base frame differ by a pure $180^{\circ}$ rotation about the vertical axis. Writing $\Phi = R_z(\pi) = \operatorname{diag}(-1,-1,1)$, every 3-vector (linear or axial) maps as
+\textbf{Frame convention.} The device base frame and the robot base frame differ by a pure $180^{\circ}$ rotation about the vertical axis, so $\Phi = R_z(\pi) = \operatorname{diag}(-1,-1,1)$ simply flips the sign of the $x$- and $y$-components of any 3-vector (linear or axial), leaving the vertical component unchanged:
 \begin{equation}
 v^{\text{robot}} = \Phi\, v^{\text{dev}},
 \qquad
 F^{\text{dev}} = \Phi\, F^{\text{robot}},
 \label{eq:flip}
 \end{equation}
-and because $R_z(\pi)$ is its own inverse and transpose, the same map carries motion commands (device $\to$ robot) and rendered wrenches (robot $\to$ device). The device's rotational workspace is narrower than its linear one and unevenly ranged across its wrist axes, so the rotational range, not the linear one, is the binding constraint on the hand-to-gripper map; the home-orientation compression of~\eqref{eq:homerot} is what keeps a full gripper reorientation inside it.
+and because flipping twice returns the original vector, $\Phi$ undoes itself, so the same flip converts a velocity device $\to$ robot and a wrench robot $\to$ device: one formula, both directions.
 
-Two terms apply to every rendered wrench regardless of condition. A constant viscous damper $(-K_d^{\text{lin}} v_h,\, -K_d^{\text{ang}} \omega_h)$, with $v_h$ and $\omega_h$ the handle linear and angular velocity, opposes handle motion. A damper is velocity feedback, and it is passive only when the opposing wrench is applied in the same tick in which the velocity is measured; it is therefore formed at the device driver, within the tick, and added to whichever wrench the active force law supplies. No force law of Section~\ref{sec:rendering} carries a damping term of its own, so viscosity enters exactly once, identically in every condition. A rate limiter then bounds the change of the commanded wrench between successive ticks,
+\textbf{Viscous damping.} Every rendered wrench, in every condition, carries a constant viscous damper $(-K_d^{\text{lin}} v_h,\, -K_d^{\text{ang}} \omega_h)$ opposing handle motion, with $v_h$ and $\omega_h$ the handle linear and angular velocity. A damper is velocity feedback: it is passive only if the opposing wrench is applied in the same tick in which the velocity is measured, so it is computed at the device driver, within the tick, and added on top of whichever wrench the active force law supplies.
+
+\textbf{Rate limiting.} The commanded wrench is also slew-limited between successive ticks,
 \begin{equation}
 \| F_k - F_{k-1} \| \le \dot{F}_{\max}\,\Delta t,
 \qquad
 \| \tau_k - \tau_{k-1} \| \le \dot{\tau}_{\max}\,\Delta t,
 \label{eq:slew}
 \end{equation}
-with $F_k, \tau_k$ the commanded force and torque at tick $k$ and $\dot F_{\max}, \dot\tau_{\max}$ the slew bounds. Bounding the increment as a vector lets a transition between force laws keep its direction rather than skew axis by axis as each component saturates. The limiter acts before the damper is added, so the damper's same-tick passivity is untouched. A rate limiter, not a low-pass filter, is the correct instrument: it is transparent to any signal changing more slowly than its bound, whereas a filter lags every genuine force (Section~\ref{sec:filtering}). The vibrotactile cues of Section~\ref{sec:columnbase}, a torque whose sign reverses every tick, are the fastest legitimate signal in the system, so the angular slew bound has a hard floor at the cue's own rate of change.
+where $F_k, \tau_k$ is the commanded force and torque at tick $k$, and $\dot F_{\max}, \dot\tau_{\max}$ are the maximum allowed rates of change: each new $F$ (respectively $\tau$) must land within a ball of radius $\dot F_{\max}\Delta t$ (respectively $\dot\tau_{\max}\Delta t$) around the previous command, not within a per-axis box, so a transition between force laws keeps its direction rather than skewing axis by axis as each component saturates on its own. The limiter is applied before the damper, so the damper's same-tick passivity is untouched. It is a rate limiter and not a low-pass filter by design: transparent to any signal changing slower than its bound, where a filter would lag every genuine force (Section~\ref{sec:filtering}). The angular slew bound $\dot\tau_{\max}$ has a hard floor set by the fastest legitimate signal in the system: the vibrotactile cues of Section~\ref{sec:columnbase}, a torque whose sign reverses every tick.
 
 \subsection{Clutch mode --- position control}
 \label{sec:clutchmode}
@@ -794,7 +796,7 @@ and published with the feed-forward twist consumed by the CLF row~\eqref{eq:clf}
 \subsection{Joystick mode --- velocity control}
 \label{sec:joystick}
 
-Joystick mode exists because of a structural instability in the alternative. Integrating the handle twist into a pose \emph{and} rendering a tracking tether back onto the same handle closes a positive-feedback loop: the rendered force displaces the handle, the displacement is re-read as intent, and the loop oscillates. Joystick mode removes the coupling by construction: the only persistent force on the handle is a centring spring toward a home pose (Section~\ref{sec:columnbase}), and intent is read purely as displacement from home. Releasing the handle recentres it, which is exactly a zero command. The two modes are the two classical families of master kinematic mapping, position control and rate control~\cite{kim1987comparison}, and constitute the control-mode factor of Section~\ref{sec:study}.
+Joystick mode is an alternative teleoperation mapping whose advantage is structural and holds for any device or robot: because the robot is commanded a velocity rather than an integrated position, no clutch is needed to reach the full workspace. The only persistent force on the handle is a centring spring toward a home pose (Section~\ref{sec:columnbase}), and intent is read purely as displacement from home. Releasing the handle recentres it, which is exactly a zero command. The two modes are the two classical families of master kinematic mapping, position control and rate control~\cite{kim1987comparison}, and constitute the control-mode factor of Section~\ref{sec:study}.
 
 With the radial deadband operator
 \begin{equation}
@@ -820,7 +822,7 @@ The home position is fixed; the home orientation tracks the gripper, so that a h
 R_{\text{home}} \;=\; \exp_3\!\Bigl(\tfrac{1}{s_r}\,\Phi \log_3\!\bigl(R_{\text{EE}}\,\bar{R}_{\text{arm}}^{\top}\bigr)\Bigr)\, R_0,
 \label{eq:homerot}
 \end{equation}
-where $R_0$ is the neutral handle orientation, $\bar{R}_{\text{arm}}$ a per-arm gripper reference captured once at that arm's first activation and never re-anchored, and $s_r > 1$ compresses the gripper's excursion into the device's rotational workspace. The compression applies to the home pose only, never to the commanded twist. Because~\eqref{eq:homerot} is recomputed every tick, including while teleoperation is suspended, the home stays synchronised with the gripper and no state transition produces a jump; the same live home pose is the spring target of Section~\ref{sec:columnbase} and the zero point of~\eqref{eq:jtwist}.
+where $R_0$ is the neutral handle orientation, $\bar{R}_{\text{arm}}$ a per-arm gripper reference captured once at that arm's first activation and never re-anchored, and $s_r > 1$ compresses the gripper's excursion into the device's narrower, unevenly-ranged rotational workspace, the binding constraint on the hand-to-gripper map. The compression applies to the home pose only, never to the commanded twist. Because~\eqref{eq:homerot} is recomputed every tick, including while teleoperation is suspended, the home stays synchronised with the gripper and no state transition produces a jump; the same live home pose is the spring target of Section~\ref{sec:columnbase} and the zero point of~\eqref{eq:jtwist}.
 
 Without blending the twist is integrated into a latched reference whose lead over the end-effector is bounded by projection,
 \begin{equation}
