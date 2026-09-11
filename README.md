@@ -175,15 +175,15 @@ ros2 run haption_teleoperation haptic_force_manager_CFB.py
 
 > **The active cell is set in `config.py` (§1b), not here.** It is currently `CONTROL_MODE=CLUTCH`, `ASSIST_FEEDBACK=True`, `ASSIST_BLENDING=True` — cell **CFB** (full guidance), hence `haptic_force_manager_CFB.py` above. Change the flags and step 8 must change with them: every teleop and force-manager node calls `cfg.validate_condition(...)` at startup and hard-errors on a mismatch, so a mis-launched pair fails loudly rather than silently recording the wrong condition. The force manager consumes `/shared_autonomy/{goal_names, goal_probabilities, user_policy, active_goal_pose, grasp_active}` published by `main_shared_autonomy.py` to compute the guidance wrench sent to the Haption device.
 >
-> **Force-manager naming convention.** Every force manager is `haptic_force_manager_<CELL>`, where `<CELL>` encodes the active study condition as letters: **C** = CLUTCH or **J** = JOYSTICK (the control mode, always first), then **F** if `ASSIST_FEEDBACK` is on, then **B** if `ASSIST_BLENDING` is on. The no-assist baseline is just the mode letter. The full 2x2x2 factorial (8 study cells):
+> **Force-manager naming convention.** Every force manager is `haptic_force_manager_<CELL>`, where `<CELL>` encodes the active study condition as letters: **C** = CLUTCH or **J** = JOYSTICK (the control mode, always first), then **F** if `ASSIST_FEEDBACK` is on, then **B** if `ASSIST_BLENDING` is on. The study itself is a 2×3 design (2 control modes × 3 assistance combinations `{F, B, FB}` = 6 cells); the no-assist baseline (`C`/`J`, just the mode letter) still works end-to-end in code but is excluded from the study:
 >
 > | File | CONTROL_MODE | ASSIST_FEEDBACK | ASSIST_BLENDING | Condition |
 > |---|---|---|---|---|
-> | `haptic_force_manager_C` | CLUTCH | False | False | Sync only (baseline) |
+> | `haptic_force_manager_C` | CLUTCH | False | False | Sync only (baseline, **not in the study**) |
 > | `haptic_force_manager_CF` | CLUTCH | True | False | Guided feedback (VF) |
 > | `haptic_force_manager_CB` | CLUTCH | False | True | Guided blending |
 > | `haptic_force_manager_CFB` | CLUTCH | True | True | Full guidance |
-> | `haptic_force_manager_J` | JOYSTICK | False | False | Sync only (baseline) |
+> | `haptic_force_manager_J` | JOYSTICK | False | False | Sync only (baseline, **not in the study**) |
 > | `haptic_force_manager_JF` | JOYSTICK | True | False | Guided feedback |
 > | `haptic_force_manager_JB` | JOYSTICK | False | True | Guided blending |
 > | `haptic_force_manager_JFB` | JOYSTICK | True | True | Full guidance |
@@ -225,7 +225,7 @@ ros2 run triago_control drift_evaluator_node.py # Tracking error analysis
 
 All tunable parameters live in `triago_control/qp_controller/config.py`:
 
-- **Study condition** (§1b): `CONTROL_MODE`, `ASSIST_FEEDBACK`, `ASSIST_BLENDING` — the 2x2x2 cell selector, also read by `haption_teleoperation`
+- **Study condition** (§1b): `CONTROL_MODE`, `ASSIST_FEEDBACK`, `ASSIST_BLENDING` — the 2x3 study cell selector (plus the code-only C/J baseline), also read by `haption_teleoperation`
 - **Feature flags**: `DISABLE_CBF`, `DYNAMIC_SLACK_WEIGHT`, `COMPARISON_CLF`, etc.
 - **Safety gains**: `ALPHA_SOFTMIN`, `GAMMA_CBF`, `D_SAFE_BASE`, `K_V_SAFE`
 - **Control loop**: `CONTROL_FREQ_DEFAULT` (Hz), `PUBLISH_EVERY_N`

@@ -60,4 +60,4 @@ Force feedback to the operator (`virtuose/force_cmd`, `geometry_msgs/Wrench`, �
 
 **Import-level coupling (not a topic):** haption_teleoperation depends on this repo's `triago_control.qp_controller.config` module (`cfg.BLENDING`, `cfg.ASSIST_*`, `cfg.validate_condition(...)`) — declared as a `<depend>` in haption_teleoperation's `package.xml`. Changing the condition-selector shape in `qp_controller/config.py` breaks haption_teleoperation's teleop and force-manager scripts.
 
-**Key entrypoints in this repo:** `scripts/qp_arm_teleop/main_qp_controller.py` (QP-CLF-CBF safety loop), `scripts/qp_arm_teleop/main_shared_autonomy.py` (belief estimation, grasp state machine, reference blending), `triago_control/qp_controller/config.py` (single source of truth for the 2×2×2 experiment condition matrix).
+**Key entrypoints in this repo:** `scripts/qp_arm_teleop/main_qp_controller.py` (QP-CLF-CBF safety loop), `scripts/qp_arm_teleop/main_shared_autonomy.py` (belief estimation, grasp state machine, reference blending), `triago_control/qp_controller/config.py` (single source of truth for the 2×3 experiment condition matrix).

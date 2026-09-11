@@ -44,7 +44,10 @@ triago_control/
 │       ├── study_config.py                 study/data settings (paths, topics, thresholds)
 │       ├── study_recorder.py               Tkinter GUI wrapper around `ros2 bag record`
 │       ├── study_metrics.py                bag reader + metric engine (numpy-only)
-│       └── analyze_trial.py                per-trial PNG dashboard + metrics summary
+│       ├── analyze_trial.py                per-trial PNG dashboard + metrics summary
+│       ├── check_study_data.py             per-trial pass/fail integrity check (§15.6)
+│       ├── export_to_matlab.py             exports passing trials to MATLAB .mat (§15.6)
+│       └── matlab/*.m                      MATLAB-side loaders for the export (§15.6)
 ├── haption_teleoperation/              sibling package (haptic device interface)
 └── triago_control/                     importable Python library
     ├── qp_controller/                  QP safety math
@@ -118,9 +121,9 @@ Bayesian belief estimation over a discrete goal set, a local QP policy per goal,
 
 `-p plot:=false` (default: plots ON) suspends `PlotManager`'s live Matplotlib dashboard — `enabled=False` short-circuits before figure construction and every `push_*`/`update` call becomes a no-op, so a headless/no-display run never touches Matplotlib state.
 
-### 5.0 Experiment Condition Selector (2×2×2 factorial, 8 cells) — `config.py` §1b
+### 5.0 Experiment Condition Selector — 2×3 study design (`config.py` §1b)
 
-Full 2×2×2 factorial (2 control modes × 4 assistance-channel combinations), selected by three orthogonal flags in `config.py` (§1b):
+2 control modes × 3 assistance combinations `{F, B, FB}` = 6 study cells, selected by three orthogonal flags in `config.py` (§1b). The same flags also cover the no-assistance baseline (`C`/`J`): fully functional in code (teleop + force-manager pair, `validate_condition` accepts it) but excluded from the study itself.
 
 - `CONTROL_MODE ∈ {CLUTCH, JOYSTICK}` — position control vs velocity control.
 - `ASSIST_FEEDBACK` (bool) — channel F: assistive haptic forces (`F_guide` velocity field + `F_fixture` funnel) on top of the always-present `F_sync` tether.
@@ -128,16 +131,16 @@ Full 2×2×2 factorial (2 control modes × 4 assistance-channel combinations), s
 
 | CONTROL_MODE | ASSIST_FEEDBACK | ASSIST_BLENDING | Condition | Teleop + force manager |
 |---|---|---|---|---|
-| CLUTCH | False | False | Sync only (baseline) | `teleop_triago_clutch` + `haptic_force_manager_C` |
+| CLUTCH | False | False | Sync only (baseline, **not in the study**) | `teleop_triago_clutch` + `haptic_force_manager_C` |
 | CLUTCH | True | False | Guided feedback (VF) | `teleop_triago_clutch` + `haptic_force_manager_CF` |
 | CLUTCH | False | True | Guided blending | `teleop_triago_clutch` + `haptic_force_manager_CB` |
 | CLUTCH | True | True | Full guidance | `teleop_triago_clutch` + `haptic_force_manager_CFB` |
-| JOYSTICK | False | False | Sync only | `teleop_triago_joystick` + `haptic_force_manager_J` |
+| JOYSTICK | False | False | Sync only (baseline, **not in the study**) | `teleop_triago_joystick` + `haptic_force_manager_J` |
 | JOYSTICK | True | False | Guided feedback | `teleop_triago_joystick` + `haptic_force_manager_JF` |
 | JOYSTICK | False | True | Guided blending | `teleop_triago_joystick` + `haptic_force_manager_JB` |
 | JOYSTICK | True | True | Full guidance | `teleop_triago_joystick` + `haptic_force_manager_JFB` |
 
-**Naming**: `haptic_force_manager_<CELL>`, `<CELL>` = `C`/`J` (mode, always first) + `F` if feedback + `B` if blending → `C/CF/CB/CFB`, `J/JF/JB/JFB`. `CB` (clutch+blending-only) and `JF` (joystick+feedback-only) are the off-diagonal cells completing the factorial (each pairs a mode with its non-native assist channel — conceptually unusual, included for a complete study comparison).
+**Naming**: `haptic_force_manager_<CELL>`, `<CELL>` = `C`/`J` (mode, always first) + `F` if feedback + `B` if blending → `C/CF/CB/CFB`, `J/JF/JB/JFB`. The study's {F,B,FB} coverage under both modes needs `CB` (clutch+blending) and `JF` (joystick+feedback) even though each pairs a mode with its non-native assist channel (F suits position control, B suits velocity control) — conceptually unusual, but required for a complete comparison.
 
 Every teleop/force-manager node calls `cfg.validate_condition(node_name, control_mode=…, feedback=…, blending=…)` at startup and hard-errors on mismatch, so a mis-launched condition fails loudly.
 
@@ -460,20 +463,21 @@ Self-contained tooling to run and record a human-subject study comparing feedbac
 
 ### 15.1 Independent Variable — Feedback Conditions
 
-Full 2×2×2 factorial (8 cells, §5.0) — `(CONTROL_MODE, ASSIST_FEEDBACK, ASSIST_BLENDING)`, not the legacy `cfg.BLENDING` alone. Short codes used in trial-folder names / master table: `C/CF/CB/CFB` (clutch), `J/JF/JB/JFB` (joystick) — see `VALID_CELLS`/`CELL_LABELS` in `study_config.py`. Recorder snapshots the full triple from `cfg` into `metadata.json` and verifies the launched condition against it (nodes also hard-error via `cfg.validate_condition`). Manual success call remains the experimenter's; the flag triple resolves the condition unambiguously.
+2×3 study design (§5.0) — `(CONTROL_MODE, ASSIST_FEEDBACK, ASSIST_BLENDING)`, not the legacy `cfg.BLENDING` alone. Short codes used in trial-folder names / master table: `CF/CB/CFB` (clutch), `JF/JB/JFB` (joystick) — see `VALID_CELLS`/`CELL_LABELS` in `study_config.py`. Recorder snapshots the full triple from `cfg` into `metadata.json` and verifies the launched condition against it (nodes also hard-error via `cfg.validate_condition`). Manual success call remains the experimenter's; the flag triple resolves the condition unambiguously.
 
-`study_config.py` owns the canonical label strings and implements all 8 cells via `derive_cell()`.
+`study_config.py` owns the canonical label strings and implements all 8 mode×feedback×blending combinations via `derive_cell()` — including the `C`/`J` no-assistance baseline, which still works end-to-end but is excluded from the study.
 
 ### 15.2 Recorder — GUI, one launch per trial (`study_recorder.py`)
 
 A Tkinter GUI wrapping `ros2 bag record`, launched fresh per trial. No rclpy (pure `subprocess`), stateless; pure helpers (`build_record_command`, `sanitize_token`, `snapshot_cfg`) are testable headless. Workflow:
-1. `PARTICIPANT_ID` prefilled from `study_config` (env/`-p participant:=` overridable), editable.
-2. Experimenter types a world shortcut, selects feedback strategy (radio: `virtual_fixture`/`blending`/`no_assist`); a live label flags mismatch against `cfg.BLENDING`.
-3. **START** → spawns `ros2 bag record` for `BAG_TOPICS` in its own process group; elapsed timer runs.
-4. **STOP** → SIGINT to the process group (falls back to terminate/kill on timeout).
-5. Experimenter marks **Success (Yes/No)** + **Notes**, **SAVE** writes `metadata.json` and resets the form (participant/world/strategy stay sticky). State machine `IDLE → RECORDING → AWAIT_SAVE → IDLE` forces classifying every trial before the next starts.
+1. `PARTICIPANT_ID` prefilled from `study_config` (env/`-p participant:=` overridable), editable. World shortcut is free-typed; the study cell is AUTO-DETECTED from `cfg` (§15.1), never picked.
+2. **START** → spawns `ros2 bag record` for `BAG_TOPICS` in its own process group; elapsed timer runs.
+3. **STOP** → SIGINT to the process group (falls back to terminate/kill on timeout).
+4. Experimenter marks **Success (Yes/No)** + **Notes**, **SAVE** writes `metadata.json` and resets the form (participant/world stay sticky). State machine `IDLE → RECORDING → AWAIT_SAVE → IDLE` forces classifying every trial before the next starts.
 
 **Auto-analysis on SAVE** ("Analyze after SAVE" checkbox, on by default): spawns `analyze_trial.py` on the just-saved bag folder as a low-priority (`nice 19`) background subprocess, logging to `analyze.log` inside that folder; polled non-blockingly so the GUI stays responsive for the next trial. START is guarded against deleting/overwriting a folder still being analyzed, and close waits for any in-flight analysis rather than killing it. No extra step needed — the dashboards/metrics from §15.5 just appear in the trial folder once analysis finishes.
+
+**Auto-MATLAB-export on SAVE** ("Export to MATLAB..." checkbox, on by default): same detached/niced/polled pattern, but gated on `check_study_data.inspect_trial` confirming this SAVE just completed the participant's full worlds×cells grid — runs `export_to_matlab.py --participants <p> --skip-existing` once per participant, not once per trial, logging to `export_matlab.log` in the participant's folder (see §15.6).
 
 Success is always the experimenter's manual call (no ground-truth correctness check).
 
@@ -487,7 +491,7 @@ DATA_ROOT/<participant>/<world_shortcut>_<condition_short>/   # = `ros2 bag reco
     metadata.json                 # our provenance sidecar (METADATA_NAME)
 ```
 
-`condition_short` ∈ {`vf`, `bl`, `na`} (`STRATEGY_SHORTCUTS`). One folder per `(participant, world, condition)` triple — re-recording overwrites it (confirmed via dialog, no repetition index/timestamp). Bag uses the curated `BAG_TOPICS` allowlist (`/joint_states`+`/tf`, head-camera point clouds excluded), backend `BAG_STORAGE_ID` (default `sqlite3`). `metadata.json` holds participant/world/condition(+short), timestamps, duration, success, notes, `cfg.BLENDING`, `CFG_SNAPSHOT_KEYS` cfg snapshot, hostname, topic list. Tidy time-series is derived offline from the bag (§15.5).
+`condition_short` is the cell code itself (`C/CF/CB/CFB/J/JF/JB/JFB`, §15.1). One folder per `(participant, world, condition)` triple — re-recording overwrites it (confirmed via dialog, no repetition index/timestamp). Bag uses the curated `BAG_TOPICS` allowlist (`/joint_states`+`/tf`, head-camera point clouds excluded), backend `BAG_STORAGE_ID` (default `sqlite3`). `metadata.json` holds participant/world/condition(+short), timestamps, duration, success, notes, `cfg.BLENDING`, `CFG_SNAPSHOT_KEYS` cfg snapshot, hostname, topic list. Tidy time-series is derived offline from the bag (§15.5).
 
 ### 15.4 Storage Split
 
@@ -498,9 +502,15 @@ Code lives in the git repo; heavy data lives locally, never on GitHub. `DATA_ROO
 - **`study_metrics.py`** — numpy-only engine (no pandas): `load_bag()` reads a trial bag via `rosbag2_py`+`rclpy` into per-topic numpy `Series` (needs a sourced ROS 2 env); `compute_metrics()` returns a flat metrics dict; `format_summary()` renders the human table; `sparc()` is the smoothness metric. Array layouts of multi-array telemetry are pinned as topic constants at the top of the file.
 - **`analyze_trial.py`** — runnable per-trial analyzer (`ros2 run triago_control analyze_trial.py [path…]`, or plain `python3`; no arg walks `DATA_ROOT`). Since the QP decouples the two arms and only one is teleoperated at a time, analyzes/plots each arm separately: `plot_dashboard_{right,left}.png`, `metrics_summary_{right,left}.txt`, one `metrics.json` (`{metadata, right, left}`). Each 3×3 dashboard: EE path, EE speed (from published `/qp_debug/ee_real`, ground truth), measured joint velocity (`qdot_measured`) + QP solution (`qdot_cmd`, 7 joints), that arm's CLF slack + CBF λ, **per-arm clearance** (`h_soft_X = margin_X + d_safe_X` from `/qp_debug/safety_margin[idx]` + `/qp_debug/d_safe_dynamic[idx]`, plus the required `d_safe` dashed and the global min as a faint reference — was previously one arm-agnostic min-distance line only), haptic force + clutch + authority α, active-arm timeline, metrics text panel. Matplotlib headless (`Agg`).
 - **Active-hand resolution** (`study_metrics.resolve_active_arm`): prefers `/shared_autonomy/active_arm` when it carries data (VF/blending); otherwise infers the active hand from which arm is actually moving (published EE speed) — works even in `no_assist` (no controller change needed, resolved offline from the bag).
-- **`build_master_table.py`** (planned) — aggregate every trial's `metrics.json` into `trials_summary.csv` (`MASTER_TABLE_NAME`), one row per `(participant, world, condition)` (overwrite semantics). Pandas/pyarrow acceptable here.
+- **`build_master_table.py`** — aggregates every trial's `metrics.json` into `trials_summary.csv` (`MASTER_TABLE_NAME`), one row per trial, always overwritten (never appended, so it can't drift from the bags). No ROS import. Per-arm fields collapse to `primary_active_arm`, unprefixed; the idle arm's same fields stay `passive_`-prefixed for sanity-checking.
 - **`study_analysis.py`** (planned) — cross-condition comparison figures + stats from the master table.
 
 **Metric families**: (A) effectiveness — total/per-phase time (sliced by `/shared_autonomy/grasp_active`), manual success, #retries/#aborts; (B) motion quality — EE speed/SPARC smoothness from published `/qp_debug/ee_real` (ground truth, per arm) and QP solution `qdot_cmd` vs measured `qdot_measured`, path efficiency; (C) safety — min-distance/near-miss on `/qp_debug/min_distance` computed with the autonomous-grasp window excluded (that topic is the raw signed closest distance over all pairs before the grasp CBF-bypass, and the graspable cylinder is in the collision set, so the intentional gripper↔cylinder overlap drives it negative during grasp; a grasp-inclusive raw minimum is kept separately), plus λ_cbf active-time; (D) human effort — clutch-press count/duty (`/virtuose/button_right`, VF/no_assist), force impulse from `/virtuose/force_cmd` (not cross-mode comparable), handle excursion; (E) assistance — α stats and human–policy agreement from `/shared_autonomy/blend_debug`, belief-convergence time from `/shared_autonomy/goal_probabilities`; (F) subjective — questionnaire scores (NASA-TLX/trust/preference) in `metadata.json`. Dashboard shades the autonomous-grasp window on authority/CBF/safety panels.
 
 **Subjective questionnaire (family F)**: administered once per condition (6/participant: the 6 non-tutorial cells, `C`/`J` excluded), after both worlds have been tried under it — not per-trial, so no World field. Via a Google Form, not on paper — `scripts/analysis/build_post_trial_form.gs` (Apps Script, run once to create the form: 3 trimmed NASA-TLX items + 3 HRI items — control/trust/comfort — as 1–7 scales, Condition as a dropdown so nothing free-typed can break the join) and `on_form_submit_trigger.gs` (installed on the linked response Sheet; auto-computes a `participant_condition` join key — one level coarser than the per-trial bag folder key — and flags exact-duplicate resubmits). `post_trial_questionnaire.tex/.pdf` is the same item set, styled (colored section bars, TikZ bead-scale) as a print reference, not the live data-collection path.
+
+### 15.6 Data-Integrity Check & MATLAB Export
+
+`check_study_data.py` (no ROS dep) is the single source of truth for "is a trial usable": per (participant, world, cell) a fail ladder — MISSING → NO_BAG → NOT_FINALIZED (no rosbag2 `metadata.yaml`) → EMPTY_BAG → NO_ROBOT_DATA (`/joint_states`/`/qp_debug/ee_real` empty) → TOO_SHORT (< `--min-duration`, default 87s = 1.45min task minimum) — `OK` only if none fire. `metadata.json` missing/mislabelled/`success=no` is a WARNING only: folder name is ground truth for world/cell, not the free-typed `metadata.json` field, which a manual folder rename leaves stale. `inspect_trial()` is imported directly by `export_to_matlab.py` and by `study_recorder.py`'s auto-export gate (§15.2), so inclusion can't drift between them.
+
+`export_to_matlab.py` (needs a sourced ROS env, like `study_metrics.load_bag`) exports every `OK` trial to `<DATA_ROOT>/matlab_export/`: one `mat/<participant>_<world>_<cell>.mat` (`meta` + per-arm `compute_metrics()` + every `series.<topic>` `load_bag` decodes — no raw `/joint_states`/`/tf`, same scope as `analyze_trial.py`'s dashboards) plus `manifest.{csv,mat}` (one row per trial, metrics flattened `right_*`/`left_*` — the whole-study entry point). Struct fields are sanitized to valid MATLAB identifiers (≤63 chars) and `savemat(..., long_field_names=True, oned_as='column')` is mandatory — several real topic names exceed the default 31-char struct-field limit and fail to save without it. `--skip-existing` reuses a `.mat` newer than its bag's `metadata.yaml` (manifest row read back from it, bag not re-decoded) — adding one participant costs ~2-3 min, not a full re-read of the corpus. `scripts/analysis/matlab/{load_manifest,load_trial,load_trial_row}.m` are the MATLAB-side counterparts, verified against real MATLAB (not just `scipy.io` round-trips).

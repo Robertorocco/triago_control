@@ -20,15 +20,17 @@ SIMULATE_IDEAL_KINEMATICS = False  # True = pure-math digital twin instead of me
 ORIENTATION_CTRL = True         # True = 6DOF (pos+ori), False = 3DOF (pos only)
 
 # =============================================================================
-# 1b. EXPERIMENT CONDITION SELECTOR (2x2x2 user-study factorial)
+# 1b. EXPERIMENT CONDITION SELECTOR (2x3 user-study design: mode x assistance)
 # =============================================================================
-# CONTROL_MODE x ASSIST_FEEDBACK x ASSIST_BLENDING selects one of 8 study cells and its
-# matching haptic_force_manager_<cell> node (see README.md); validate_condition() hard-errors on mismatch.
+# CONTROL_MODE x ASSIST_FEEDBACK x ASSIST_BLENDING selects the study cell and its
+# matching haptic_force_manager_<cell> node (see README.md); the study itself is
+# 2x3 (2 modes x {F,B,FB} = 6 cells) -- C/J (no assistance) still work in code but
+# are excluded from the study. validate_condition() hard-errors on mismatch.
 CLUTCH = "CLUTCH"
 JOYSTICK = "JOYSTICK"
 
 # Active experiment condition: edit these three to select a study cell.
-CONTROL_MODE   = CLUTCH      # CLUTCH (position control) | JOYSTICK (velocity control)
+CONTROL_MODE   = JOYSTICK      # CLUTCH (position control) | JOYSTICK (velocity control)
 ASSIST_FEEDBACK = True        # channel F: assistive guidance forces on the handle
 ASSIST_BLENDING = True      # channel B: reference-level user<->policy blending
 

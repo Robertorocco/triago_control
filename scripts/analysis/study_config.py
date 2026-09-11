@@ -54,18 +54,17 @@ def resolve_participant_id(ros_param_value: str | None = None) -> str:
 #   + F if ASSIST_FEEDBACK, + B if ASSIST_BLENDING.
 #
 #   CONTROL_MODE  F  B   code   condition
-#   CLUTCH        0  0   C      Clutch / Sync-only (baseline)
+#   CLUTCH        0  0   C      Clutch / Sync-only (baseline, code-only -- not in the study)
 #   CLUTCH        1  0   CF     Clutch / Guided feedback (VF)
 #   CLUTCH        0  1   CB     Clutch / Guided blending
 #   CLUTCH        1  1   CFB    Clutch / Full guidance
-#   JOYSTICK      0  0   J      Joystick / Sync-only (baseline)
+#   JOYSTICK      0  0   J      Joystick / Sync-only (baseline, code-only -- not in the study)
 #   JOYSTICK      1  0   JF     Joystick / Guided feedback
 #   JOYSTICK      0  1   JB     Joystick / Guided blending
 #   JOYSTICK      1  1   JFB    Joystick / Full guidance
-# CB (CLUTCH,F=0,B=1) and JF (JOYSTICK,F=1,B=0) complete the full 2x2x2 factorial
-# -- the off-diagonal cells the original "fair 2x3" omitted, added for a complete
-# paper study even though each pairs a control mode with its NON-native assist
-# channel (clutch+blend-only, joystick+feedback-only).
+# The study itself is 2x3: 2 control modes x 3 assistance combinations {F, B, FB}
+# = CF/CB/CFB/JF/JB/JFB. C and J (no assistance) still work end-to-end in code
+# (validate_condition, force managers, this table) but are excluded from the study.
 VALID_CELLS = {
     ("CLUTCH",   False, False): "C",
     ("CLUTCH",   True,  False): "CF",
@@ -93,11 +92,10 @@ def derive_cell(cfg) -> dict:
 
     Returns {code, label, control_mode, assist_feedback, assist_blending, valid,
     warning}. ``code`` is the cell tag (C/CF/CB/CFB/J/JF/JB/JFB) used in
-    trial-folder names and the master table. ``valid`` is False only for a flag
-    combination outside the 8-cell factorial (all 2x2x2 combos are now valid, so
-    this should not happen for a real config); the trial is still recorded, just
-    flagged. Never raises: a missing cfg yields a clearly-marked 'unknown' cell so
-    the recorder can still capture the bag.
+    trial-folder names and the master table -- all 8 mode x feedback x blending
+    combinations are valid code-wise (this should not happen for a real config);
+    the trial is still recorded, just flagged. Never raises: a missing cfg yields
+    a clearly-marked 'unknown' cell so the recorder can still capture the bag.
     """
     if cfg is None:
         return {"code": "unknown",
@@ -113,13 +111,14 @@ def derive_cell(cfg) -> dict:
         return {"code": code, "label": CELL_LABELS[code], "control_mode": mode,
                 "assist_feedback": fb, "assist_blending": bl, "valid": True,
                 "warning": None}
-    # Outside the 2x3 design -- still build a descriptive code so nothing crashes.
+    # Unreachable while VALID_CELLS covers all 8 combos -- kept as a hard fallback
+    # so an unrecognised mode string still builds a descriptive code, not a crash.
     letter = "C" if mode == "CLUTCH" else ("J" if mode == "JOYSTICK" else "X")
     code = letter + ("F" if fb else "") + ("B" if bl else "")
     return {"code": code, "label": f"NON-STUDY cell ({mode}, F={fb}, B={bl})",
             "control_mode": mode, "assist_feedback": fb, "assist_blending": bl,
             "valid": False,
-            "warning": f"({mode}, F={fb}, B={bl}) is not one of the 6 fair 2x3 cells"}
+            "warning": f"({mode}, F={fb}, B={bl}) is not a recognised control mode"}
 
 
 # ---------------------------------------------------------------------------
