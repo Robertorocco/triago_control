@@ -19,7 +19,9 @@ GUI workflow:
   2. Press START  -> `ros2 bag record` begins; a timer runs.
   3. Press STOP   -> the bag is closed cleanly (SIGINT).
   4. Mark Success (Yes/No) + optional Notes, press SAVE -> metadata.json written,
-     the form resets for the next trial.
+     the form resets for the next trial. If this SAVE completes a participant's
+     full grid (check_study_data.py's own criteria), export_to_matlab.py runs
+     for just that participant, detached and niced, same as the analysis step.
 
 This script intentionally does NOT use rclpy: pure bag capture needs only a
 subprocess. It is still launched via `ros2 run` so the ROS environment (and
@@ -43,6 +45,14 @@ import sys
 # analysis/) and when installed flat into lib/triago_control/. ---------------
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import study_config as sc  # noqa: E402
+
+# Only needed to detect "this participant just became fully complete" for the
+# auto-MATLAB-export trigger below; guarded like cfg/tk so the GUI still runs
+# without it (export trigger simply stays disabled).
+try:
+    import check_study_data as csd  # noqa: E402
+except Exception:  # pragma: no cover - environment dependent
+    csd = None
 
 # cfg is only needed for the (optional) BLENDING sanity check + provenance
 # snapshot. Guarded so the GUI still runs if the controller package is not
@@ -76,6 +86,14 @@ _STOP_GRACE_S = 15.0
 # the control loop always wins the CPU.
 _ANALYZE_NICE = 19
 _ANALYZE_LOG = "analyze.log"
+_EXPORT_LOG = "export_matlab.log"       # written into the PARTICIPANT dir, not per-trial
+
+
+def build_export_command(participant: str) -> list[str]:
+    """Assemble the niced `export_to_matlab.py` argv for one completed participant."""
+    return ["nice", "-n", str(_ANALYZE_NICE),
+            "ros2", "run", "triago_control", "export_to_matlab.py",
+            "--participants", participant, "--skip-existing"]
 
 
 def build_analyze_command(bag_dir: str) -> list[str]:
@@ -133,6 +151,10 @@ class RecorderApp:
         # trial can be set up while the previous one is still being plotted.
         self.analyze_proc: subprocess.Popen | None = None
         self.analyze_bag_dir: str | None = None
+        # MATLAB export runs detached too, triggered once a participant's full
+        # grid (all worlds x cells) passes check_study_data's own criteria.
+        self.export_proc: subprocess.Popen | None = None
+        self.export_participant: str | None = None
 
         root.title("TRIAGo Study Recorder")
         root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -150,6 +172,8 @@ class RecorderApp:
         self.var_cellnote = tk.StringVar(value="")
         self.var_analyze = tk.BooleanVar(value=True)
         self.var_analyze_status = tk.StringVar(value="")
+        self.var_matlab_export = tk.BooleanVar(value=csd is not None)
+        self.var_export_status = tk.StringVar(value="")
 
         self._build_widgets()
         self._refresh_cell_display()
@@ -213,12 +237,22 @@ class RecorderApp:
             variable=self.var_analyze)
         self.chk_analyze.grid(row=10, column=0, columnspan=3, sticky="w", **pad)
 
+        self.chk_matlab_export = ttk.Checkbutton(
+            frm, text="Export to MATLAB once a participant's full grid completes",
+            variable=self.var_matlab_export,
+            state="normal" if csd is not None else "disabled")
+        self.chk_matlab_export.grid(row=11, column=0, columnspan=3, sticky="w", **pad)
+
         self.btn_save = ttk.Button(frm, text="SAVE TRIAL", command=self.on_save)
-        self.btn_save.grid(row=11, column=1, sticky="w", **pad)
+        self.btn_save.grid(row=12, column=1, sticky="w", **pad)
 
         self.lbl_analyze = ttk.Label(frm, textvariable=self.var_analyze_status,
                                      foreground="#666")
-        self.lbl_analyze.grid(row=12, column=0, columnspan=3, sticky="w", **pad)
+        self.lbl_analyze.grid(row=13, column=0, columnspan=3, sticky="w", **pad)
+
+        self.lbl_export = ttk.Label(frm, textvariable=self.var_export_status,
+                                    foreground="#666")
+        self.lbl_export.grid(row=14, column=0, columnspan=3, sticky="w", **pad)
 
     def _refresh_cell_display(self):
         """Show the auto-detected study cell (read-only) + its config flags."""
@@ -392,6 +426,8 @@ class RecorderApp:
         # must never cost the trial's provenance.
         if self.var_analyze.get():
             self._start_analysis(self.bag_dir)
+        if self.var_matlab_export.get():
+            self._maybe_export_matlab(meta["participant"])
         # Reset for the next trial (keep participant/world sticky; the cell is
         # auto-detected from config, so nothing to preserve there).
         self.proc = None
@@ -448,6 +484,55 @@ class RecorderApp:
         print(f"[study_recorder] analysis finished (exit {rc}) for {name}")
         self.analyze_proc = None
 
+    # ---------------------------------------------------- post-save MATLAB export
+    def _maybe_export_matlab(self, participant: str):
+        """Kick off a MATLAB export iff this SAVE just completed the participant's
+        full grid (same worlds x cells x min-duration rule as check_study_data.py)."""
+        if csd is None:
+            return
+        if self.export_proc is not None and self.export_proc.poll() is None:
+            self.var_export_status.set(
+                "MATLAB export still running for a previous participant - "
+                "will be picked up on that participant's next completed trial.")
+            return
+        expected = [(w, c) for w in csd.DEFAULT_WORLDS for c in csd.DEFAULT_CELLS]
+        results = [csd.inspect_trial(sc.DATA_ROOT, participant, w, c, csd.DEFAULT_MIN_DURATION_S)
+                   for w, c in expected]
+        if not all(r.ok for r in results):
+            return   # participant not fully complete yet -- nothing to export
+        cmd = build_export_command(participant)
+        try:
+            log = open(os.path.join(sc.participant_dir(participant), _EXPORT_LOG), "w")
+            self.export_proc = subprocess.Popen(
+                cmd, stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        except (OSError, FileNotFoundError) as exc:
+            self.var_export_status.set(f"MATLAB export could not start: {exc}")
+            return
+        self.export_participant = participant
+        self.var_export_status.set(
+            f"Participant {participant} complete -> exporting to MATLAB in the background ...")
+        print(f"[study_recorder] participant {participant} complete, exporting -> "
+              f"{' '.join(cmd)}")
+        self._poll_export()
+
+    def _poll_export(self):
+        if self.export_proc is None:
+            return
+        rc = self.export_proc.poll()
+        if rc is None:
+            self.root.after(1000, self._poll_export)
+            return
+        name = self.export_participant or ""
+        if rc == 0:
+            self.var_export_status.set(
+                f"MATLAB export for {name} done - manifest + mat/ updated.")
+        else:
+            self.var_export_status.set(
+                f"MATLAB export for {name} FAILED (exit {rc}) - see {_EXPORT_LOG} in "
+                f"that participant's folder. The bags themselves are untouched.")
+        print(f"[study_recorder] MATLAB export finished (exit {rc}) for {name}")
+        self.export_proc = None
+
     def _on_close(self):
         if self.state == self.RECORDING:
             if not messagebox.askyesno(
@@ -462,6 +547,15 @@ class RecorderApp:
                     "Analysis in progress",
                     f"analyze_trial.py is still running on "
                     f"'{os.path.basename(self.analyze_bag_dir or '')}'.\n\n"
+                    "It will keep running in the background after this window "
+                    "closes. Quit anyway?"):
+                return
+        # Same story for a detached MATLAB export.
+        if self.export_proc is not None and self.export_proc.poll() is None:
+            if not messagebox.askyesno(
+                    "MATLAB export in progress",
+                    f"export_to_matlab.py is still running for "
+                    f"'{self.export_participant or ''}'.\n\n"
                     "It will keep running in the background after this window "
                     "closes. Quit anyway?"):
                 return
