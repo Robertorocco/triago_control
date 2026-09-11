@@ -513,7 +513,7 @@ Visualization Manager:
       Enabled: true
       Name: Blended_Reference
       Namespaces:
-        {}
+        blended_reference: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -625,7 +625,8 @@ Visualization Manager:
       Enabled: true
       Name: QP_Debug_Markers
       Namespaces:
-        {}
+        goal_poses: true
+        grasp_ready_cue: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -637,7 +638,8 @@ Visualization Manager:
       Enabled: true
       Name: World_Obstacles_And_Platforms
       Namespaces:
-        {}
+        platform: true
+        workspace: true
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -709,18 +711,18 @@ Visualization Manager:
         Swap Stereo Eyes: false
         Value: false
       Focal Point:
-        X: 0.7837952971458435
-        Y: -0.02758207358419895
-        Z: 0.5420674085617065
+        X: 0.7934027314186096
+        Y: -0.0058523197658360004
+        Z: 0.5502839088439941
       Focal Shape Fixed Size: true
       Focal Shape Size: 0.05000000074505806
       Invert Z Axis: false
       Name: Current View
       Near Clip Distance: 0.009999999776482582
-      Pitch: 0.8749997019767761
+      Pitch: 0.8649988770484924
       Target Frame: <Fixed Frame>
       Value: Orbit (rviz)
-      Yaw: 3.1331357955932617
+      Yaw: 3.1431355476379395
     Saved:
       - Class: rviz_default_plugins/Orbit
         Distance: 1.0063155889511108

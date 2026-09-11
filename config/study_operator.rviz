@@ -514,7 +514,7 @@ Visualization Manager:
       Enabled: true
       Name: Blended_Reference
       Namespaces:
-        blended_reference: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -626,8 +626,7 @@ Visualization Manager:
       Enabled: true
       Name: QP_Debug_Markers
       Namespaces:
-        goal_poses: true
-        grasp_ready_cue: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
@@ -639,8 +638,7 @@ Visualization Manager:
       Enabled: true
       Name: World_Obstacles_And_Platforms
       Namespaces:
-        platform: true
-        workspace: true
+        {}
       Topic:
         Depth: 5
         Durability Policy: Volatile
