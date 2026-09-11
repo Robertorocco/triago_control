@@ -6,6 +6,11 @@ __pycache__/
 *.aux
 *.log
 *.out
+*.bbl
+*.blg
+*.lof
+*.lot
+*.toc
 technical_report.pdf
 
 # User-study data (rosbags, per-trial timeseries, figures) must stay local,
