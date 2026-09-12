@@ -319,10 +319,13 @@ disp(fam(:, {'key', 'n_metrics', 'members', 'dropped'}))
 % these differ, part of the "mode effect" is practice.
 
 %% 6. Overview: which condition is best, per family
-% Each row is a family. Left: the six cells (colour and number = mean family
-% score, red = better). Middle: Clutch vs Joystick, one grey line per
-% participant. Right: F / B / FB. The titles carry the test results.
-fig_family_overview(trial, S, items, families);
+% One figure per family: the six cells (colour and number = mean family
+% score, red = better), then Clutch vs Joystick and F / B / FB with one grey
+% line per participant. The titles carry the test results. The wide
+% single-page version is figures/overview_families.png in the results folder.
+for k = find(items.is_family & items.name ~= "composite")'
+    fig_family_compact(trial, S, table2struct(items(k, :)), families);
+end
 %% 6.1 Headline table (family scores)
 show_results(R(R.is_family_score & ismember(R.question, ["Q1_mode" "Q2_assist" "Q3_cell"]), :), "headline")
 
@@ -342,7 +345,7 @@ show_results(R(R.question == "Q2_assist", :), "Q2")
 % The six cells. The composite ranking is the one-picture summary; the family
 % table and the per-metric table give the rigorous answers, including the
 % interaction (whether the best assistance depends on the mode).
-fig_cell_ranking(trial, S);
+fig_cell_ranking(trial, S, 'compact', true);
 show_results(R(R.question == "Q3_cell", :), "Q3")
 %% 9.1 Mode x assistance interaction, per family
 % An interaction means "the effect of assistance is different in Clutch and in
@@ -363,7 +366,7 @@ end
 % Shorter bar = the participants obtained more similar values under that
 % condition. A significant Pitman-Morgan test means the spread genuinely
 % differs; Kendall's W says whether participants agree on the ranking.
-fig_consistency_overview(S, items, families);
+fig_consistency_overview(S, items, families, 'compact', true);
 show_results(R(R.question == "Q4_consistency_mode", :), "Q4 (best = most consistent)")
 show_results(R(R.question == "Q5_consistency_assist", :), "Q5 (best = most consistent)")
 
@@ -372,31 +375,32 @@ show_results(R(R.question == "Q5_consistency_assist", :), "Q5 (best = most consi
 % difference of each participant, split by which mode they met first. If the
 % two groups differ, the mode comparison of Q1 is partly a practice effect and
 % must be read with care.
-fig_learning_overview(S, items, families);
+fig_learning_overview(S, items, families, 'compact', true);
 show_results(R(R.question == "Q6_learning", :), "Q6 (statistic = mean slope per slot)")
 
 %% 12. Supplementary: the two worlds
 % Rack versus shield. Every participant did both worlds in every cell, so the
 % world effect cancels out of the paired comparisons of Q1-Q3; it is shown
 % because it is large and tells how demanding each scene was.
-fig_world_overview(trial, S, items, families);
+fig_world_overview(trial, S, items, families, 'compact', true);
 show_results(R(R.question == "QW_world" & R.is_family_score, :), "world")
 
 %% 13. Success and incidents
-fig_success_incidents(trial);
+fig_success_incidents(trial, 'compact', true);
 disp(trial(trial.incident == 1, {'participant', 'world', 'cell', 'success', 'notes'}))
 
 %% 14. Metric dashboards
-% One figure per metric: Q1 (top-left), Q2 (top-right), Q3 (bottom-left), Q6
-% (bottom-right). Grey lines are participants, coloured markers are means
-% with 95% CI, brackets mark Holm-significant pairs.
+% One figure per metric, four stacked panels: Q1 mode, Q2 assistance, Q3
+% cells, Q6 trend. Grey lines are participants, coloured markers are means
+% with 95% CI, brackets mark Holm-significant pairs. Larger versions of the
+% same figures are in figures/metric_<name>.png in the results folder.
 headlineMetrics = ["duration_s" "qdot_cmd_rms" "safety_min_dist_m" "ee_sparc" "belief_max_prob" "agreement_mean_cos" "composite"];
 metricItems = items(~items.is_family | items.name == "composite", :);
 if ~SHOW_ALL_METRIC_FIGURES
     metricItems = metricItems(ismember(metricItems.name, headlineMetrics), :);
 end
 for k = 1:height(metricItems)
-    fig_metric_dashboard(trial, table2struct(metricItems(k, :)), S);
+    fig_metric_dashboard(trial, table2struct(metricItems(k, :)), S, 'compact', true);
 end
 
 %% 15. Assumptions, limitations, and how to judge a result
@@ -430,7 +434,7 @@ end
 %% 16. Appendix: full results table and provenance
 % The complete master table (every test, every metric) is results_all.csv in
 % the results folder; a compact view:
-A = compact_table(R); A.question = R.question; A = movevars(A, 'question', 'Before', 'family');
+A = compact_table(R); A.question = extractBefore(R.question + "    ", 3); A = movevars(A, 'question', 'Before', 'metric');
 disp(A)
 fprintf('manifest      : %s\nschedule      : %s\nresults       : %s\nalpha = %.2f, bootstrap resamples = %d\n', ...
     meta.export_dir, meta.schedule_path, RESULTS_DIR, settings.alpha, settings.n_boot);
@@ -457,8 +461,7 @@ end
 
 function T = compact_table(Rq)
 T = table();
-T.family = extractBefore(pad(Rq.family, 10), 11);
-T.metric = extractBefore(pad(Rq.label, 24), 25);
+T.metric = extractBefore(pad("[" + extractBefore(Rq.family + "    ", 5) + "] " + Rq.label, 32), 33);
 T.n = Rq.n;
 T.p_raw = arrayfun(@ptxt, Rq.p_raw);
 T.p_holm = arrayfun(@ptxt, Rq.p_holm);

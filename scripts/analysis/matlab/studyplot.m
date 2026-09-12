@@ -56,13 +56,16 @@ methods (Static)
             levels (1,:) string
             opts.ylabel (1,1) string = ""
             opts.colors = []
+            opts.horizontal (1,1) logical = false   % levels on the y-axis (compact layout)
         end
         k = numel(levels); n = size(M, 1);
         hold(ax, 'on');
         rng(7, 'twister'); jit = (rand(n, 1) - 0.5) * 0.12;
+        h = opts.horizontal;
         for i = 1:n
-            plot(ax, (1:k) + jit(i), M(i, :), '-', 'Color', [0.7 0.7 0.7], 'LineWidth', 0.8);
-            plot(ax, (1:k) + jit(i), M(i, :), 'o', 'MarkerSize', 4, ...
+            xy = {(1:k) + jit(i), M(i, :)}; if h, xy = xy([2 1]); end
+            plot(ax, xy{:}, '-', 'Color', [0.7 0.7 0.7], 'LineWidth', 0.8);
+            plot(ax, xy{:}, 'o', 'MarkerSize', 4 - h, ...
                  'MarkerFaceColor', [0.75 0.75 0.75], 'MarkerEdgeColor', [0.5 0.5 0.5]);
         end
         for j = 1:k
@@ -70,13 +73,24 @@ methods (Static)
             ci = 0;
             if numel(v) > 1, ci = tinv(0.975, numel(v) - 1) * std(v) / sqrt(numel(v)); end
             if isempty(opts.colors), col = studyplot.color(levels(j)); else, col = opts.colors(j, :); end
-            errorbar(ax, j + 0.28, m, ci, 'o', 'Color', col, 'MarkerFaceColor', col, ...
-                     'MarkerSize', 8, 'LineWidth', 1.8, 'CapSize', 8);
+            if h
+                errorbar(ax, m, j + 0.28, ci, 'horizontal', 'o', 'Color', col, 'MarkerFaceColor', col, ...
+                         'MarkerSize', 6, 'LineWidth', 1.5, 'CapSize', 6);
+            else
+                errorbar(ax, j + 0.28, m, ci, 'o', 'Color', col, 'MarkerFaceColor', col, ...
+                         'MarkerSize', 8, 'LineWidth', 1.8, 'CapSize', 8);
+            end
         end
         hold(ax, 'off');
-        xlim(ax, [0.5 k + 0.6]);
-        xticks(ax, 1:k); xticklabels(ax, arrayfun(@studyplot.levelname, levels));
-        ylabel(ax, opts.ylabel); grid(ax, 'on'); box(ax, 'on');
+        names = arrayfun(@studyplot.levelname, levels);
+        if h
+            ylim(ax, [0.5 k + 0.6]); yticks(ax, 1:k); yticklabels(ax, names);
+            xlabel(ax, opts.ylabel); ax.YDir = 'reverse';
+        else
+            xlim(ax, [0.5 k + 0.6]); xticks(ax, 1:k); xticklabels(ax, names);
+            ylabel(ax, opts.ylabel);
+        end
+        grid(ax, 'on'); box(ax, 'on');
     end
 
     function heat23(ax, means, cis, rows, cols, opts)
@@ -91,6 +105,7 @@ methods (Static)
             opts.fmt (1,1) string = "%.3g"
             opts.best (1,1) string = ""
             opts.sig = []      % logical matrix, cells significantly different from another
+            opts.bestmark (1,1) string = "  (best)"
         end
         oriented = means * (opts.dir + (opts.dir == 0));
         imagesc(ax, oriented);
@@ -103,7 +118,7 @@ methods (Static)
                 txt = sprintf(opts.fmt, means(r, k));
                 if ~isnan(cis(r, k)), txt = txt + sprintf(" ± " + opts.fmt, cis(r, k)); end
                 lab = rows(r) + cols(k);
-                if lab == opts.best, txt = txt + "  (best)"; end
+                if lab == opts.best, txt = txt + opts.bestmark; end
                 text(ax, k, r, txt, 'HorizontalAlignment', 'center', 'FontWeight', 'bold', 'FontSize', 9);
             end
         end
@@ -111,7 +126,7 @@ methods (Static)
         yticks(ax, 1:numel(rows)); yticklabels(ax, arrayfun(@studyplot.levelname, rows));
         ax.YDir = 'normal';
         cb = colorbar(ax); cb.Ticks = [];
-        cb.Label.String = ternary(opts.dir ~= 0, "worse  <-   colour   ->  better", "low  <-   colour   ->  high");
+        cb.Label.String = ternary(opts.dir ~= 0, "worse -> better", "low -> high");
     end
 
     function learning(ax, S, opts)
@@ -182,11 +197,39 @@ methods (Static)
         cm = [interp1([0 1], [lo; mid], linspace(0, 1, h)'); interp1([0 1], [mid; hi], linspace(0, 1, n - h)')];
     end
 
-    function fig = newfig(name, w, h)
+    function fig = newfig(name, w, h, compact)
         % Plain-text interpreter everywhere: metric names contain underscores.
+        % Visibility is deliberately NOT set: the Live Editor only captures
+        % figures whose visibility it controls itself (an explicit 'Visible'
+        % argument, even 'on', makes the figure disappear from the report).
+        % COMPACT figures are designed for the Live Editor canvas (~480 x 660
+        % px): stacked panels and small fonts.
+        if nargin < 4, compact = false; end
         fig = figure('Name', name, 'Color', 'w', 'Position', [60 60 w h], ...
-                     'Visible', get(0, 'DefaultFigureVisible'), 'DefaultTextInterpreter', 'none', ...
-                     'DefaultAxesTickLabelInterpreter', 'none');
+                     'DefaultTextInterpreter', 'none', 'DefaultAxesTickLabelInterpreter', 'none');
+        if compact
+            set(fig, 'DefaultAxesFontSize', 7, 'DefaultTextFontSize', 7, ...
+                     'DefaultAxesTitleFontSizeMultiplier', 1.1, 'DefaultLegendFontSize', 7);
+        end
+    end
+
+    function [w, h] = size_for(compact, w, h)
+        % Compact figures are always 480 px wide; height is capped at 660.
+        if compact, w = 480; h = min(h, 660); end
+    end
+
+    function s = wrap(str, width)
+        % Break a long title into lines of at most WIDTH characters.
+        words = split(string(str), " ");
+        lines = strings(0, 1); cur = "";
+        for w = words'
+            if strlength(cur) == 0, cur = w;
+            elseif strlength(cur) + 1 + strlength(w) > width, lines(end + 1, 1) = cur; cur = w; %#ok<AGROW>
+            else, cur = cur + " " + w;
+            end
+        end
+        lines(end + 1, 1) = cur;
+        s = strjoin(lines, newline);
     end
 
     function s = testname(code)
