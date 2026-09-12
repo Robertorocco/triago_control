@@ -1,0 +1,80 @@
+function spec = study_metric_spec()
+%STUDY_METRIC_SPEC Single source of truth for every per-trial metric of the study.
+%   SPEC = STUDY_METRIC_SPEC() returns a table with one row per metric of the
+%   manifest (right_<name>/left_<name> columns written by export_to_matlab.py)
+%   plus a few derived ones. Every downstream script (loader, tests, figures,
+%   report) reads direction / family / scope from here, never hard-codes them.
+%
+%   Columns
+%     name            manifest suffix (right_<name>) or derived name
+%     label           plain-language name used in figures and tables
+%     unit            axis unit
+%     dir             +1 higher is better, -1 lower is better, 0 no valence
+%     family          metric family used for grouping and composite scores;
+%                     "" = diagnostic only (reported, never in a composite)
+%     combine         how the right_/left_ columns fold into one trial value:
+%                     shared  identical in both columns (trial-level quantity)
+%                     sum     extensive per-arm quantity, both arms add
+%                     wmean   intensive per-arm quantity, weighted by the time
+%                             each arm was the active one
+%                     max     worst case over the two arms
+%                     derived computed from other columns (see load_study_table)
+%     cell_scope      "all" | "clutch_only" | "blend_only": cells where the
+%                     metric is physically defined; elsewhere it is NaN
+%     mode_comparable false when CLUTCH and JOYSTICK values have a different
+%                     physical origin (haptic force, clutch button): such a
+%                     metric is compared only within one control mode
+%     cv_safe         true when the coefficient of variation is meaningful
+%                     (positive, not near zero, not a signed score)
+%     description     one-sentence definition (the full math is in the report)
+
+rows = {
+% name                        label                              unit    dir family                 combine  scope         modecmp cvsafe description
+ "duration_s"                 "Task time"                        "s"     -1  "time_effectiveness"   "shared" "all"         true   true  "Bag time span from the first to the last recorded message of the trial."
+ "teleop_time_s"              "Time under human control"         "s"     -1  "time_effectiveness"   "derived" "all"        true   true  "Task time minus the time spent in autonomous grasp/release phases."
+ "autonomy_grasp_time_s"      "Time in autonomous grasp phases"  "s"     -1  "time_effectiveness"   "shared" "all"         true   true  "Seconds during which grasp_active was true (robot-driven approach, close, lift, release)."
+ "ee_path_len_m"              "Hand path length (both arms)"     "m"     -1  "time_effectiveness"   "sum"    "all"         true   true  "Arc length travelled by the two end effectors, summed."
+ "ee_path_efficiency"         "Path efficiency"                  "ratio" +1  "time_effectiveness"   "derived" "all"        true   true  "Straight-line displacement divided by path length (ratio of arm sums)."
+ "ee_speed_mean_mps"          "Mean hand speed"                  "m/s"    0  "time_effectiveness"   "wmean"  "all"         true   true  "Mean end-effector linear speed of the active arm."
+ "qdot_cmd_rms"               "Commanded joint-rate RMS"         "rad/s" -1  "human_effort"         "wmean"  "all"         true   true  "Root-mean-square of the QP joint velocity command over the 7 arm joints."
+ "force_mean_N"               "Mean haptic force"                "N"     -1  "human_effort"         "shared" "all"         false  true  "Mean magnitude of the wrench rendered on the handle (tether in CLUTCH, centring spring in JOYSTICK)."
+ "force_peak_N"               "Peak haptic force"                "N"     -1  "human_effort"         "shared" "all"         false  true  "Maximum rendered force magnitude."
+ "force_impulse_Ns"           "Haptic force impulse"             "N.s"   -1  "human_effort"         "shared" "all"         false  true  "Time integral of the rendered force magnitude."
+ "clutch_presses"             "Clutch presses"                   "count" -1  "human_effort"         "shared" "clutch_only" false  true  "Number of rising edges of the clutch button (CLUTCH mode only)."
+ "clutch_duty_frac"           "Clutch duty"                      "frac"  -1  "human_effort"         "shared" "clutch_only" false  true  "Fraction of samples with the clutch button held (CLUTCH mode only)."
+ "safety_min_dist_m"          "Minimum clearance"                "m"     +1  "safety"               "shared" "all"         true   true  "Smallest signed distance between any collision pair, autonomous-grasp window excluded."
+ "safety_nearmiss_frac"       "Near-miss time fraction"          "frac"  -1  "safety"               "shared" "all"         true   false "Fraction of teleoperated samples with clearance below 0.05 m."
+ "safety_nearmiss_episodes"   "Near-miss episodes"               "count" -1  "safety"               "shared" "all"         true   false "Number of separate dips of the clearance below 0.05 m."
+ "cbf_active_frac"            "Safety filter active"             "frac"  -1  "safety"               "wmean"  "all"         true   false "Fraction of samples where the collision barrier multiplier exceeds 1."
+ "cbf_lambda_mean"            "Mean barrier multiplier"          "-"     -1  "safety"               "wmean"  "all"         true   true  "Mean Lagrange multiplier of the collision barrier (how hard the safety filter pushed)."
+ "ee_sparc"                   "Smoothness (SPARC)"               "-"     +1  "motion_quality"       "wmean"  "all"         true   false "Spectral arc length of the hand speed profile; negative, closer to 0 is smoother."
+ "slack_mean"                 "Mean tracking slack"              "-"     -1  "motion_quality"       "wmean"  "all"         true   true  "Mean relaxation of the tracking constraint (how far the robot deviated from the reference)."
+ "qdot_cmd_max"               "Peak commanded joint rate"        "rad/s" -1  "motion_quality"       "max"    "all"         true   true  "Largest absolute joint velocity command."
+ "belief_max_prob"            "Peak intent confidence"           "prob"  +1  "intent_understanding" "shared" "all"         true   true  "Highest probability assigned to any goal during the trial."
+ "belief_time_to_conf_s"      "Time to confident intent"         "s"     -1  "intent_understanding" "shared" "all"         true   true  "First time at which the most likely goal reached probability 0.80 (NaN if never)."
+ "belief_confident_ever"      "Intent ever confident"            "0/1"   +1  "intent_understanding" "derived" "all"        true   false "1 if the belief reached 0.80 at least once, else 0."
+ "agreement_mean_cos"         "User-autonomy agreement"          "cos"   +1  "assistance_quality"   "shared" "blend_only"  true   false "Mean cosine between the user twist and the policy twist while the user is moving."
+ "alpha_mean"                 "Mean autonomy authority"          "-"      0  "assistance_quality"   "shared" "blend_only"  true   false "Mean blending weight alpha (0 = user only, 1 = policy only)."
+ "alpha_autonomy_frac"        "Autonomy-led time fraction"       "frac"   0  "assistance_quality"   "shared" "blend_only"  true   false "Fraction of samples with alpha above 0.5."
+ "user_active_frac"           "User actively driving"            "frac"   0  "assistance_quality"   "shared" "blend_only"  true   false "Fraction of samples with a non-zero user twist."
+ "success"                    "Task success"                     "0/1"   +1  "success_incident"     "derived" "all"        true   false "Experimenter's manual success call (1 = yes)."
+ "incident"                   "Incident noted"                   "0/1"   -1  "success_incident"     "derived" "all"        true   false "1 if the experimenter wrote a note (fallen object, failed grasp, ...)."
+ "safety_mean_dist_m"         "Mean clearance"                   "m"     +1  ""                     "shared" "all"         true   true  "Mean clearance, autonomous-grasp window excluded."
+ "safety_min_dist_graspincl_m" "Min clearance incl. grasp"       "m"      0  ""                     "shared" "all"         true   false "Raw minimum including the intentional gripper-object overlap during grasp."
+ "cbf_lambda_peak"            "Peak barrier multiplier"          "-"     -1  ""                     "max"    "all"         true   true  "Largest collision-barrier multiplier."
+ "slack_peak"                 "Peak tracking slack"              "-"     -1  ""                     "max"    "all"         true   true  "Largest tracking-constraint relaxation."
+ "qdot_meas_rms"              "Measured joint-rate RMS"          "rad/s" -1  ""                     "wmean"  "all"         true   true  "RMS of the measured joint velocity."
+ "qdot_meas_max"              "Peak measured joint rate"         "rad/s" -1  ""                     "max"    "all"         true   true  "Largest measured joint velocity."
+ "ee_speed_max_mps"           "Peak hand speed"                  "m/s"    0  ""                     "max"    "all"         true   true  "Maximum end-effector speed."
+ "ee_straight_len_m"          "Straight-line displacement"       "m"      0  ""                     "sum"    "all"         true   true  "Distance between the first and last hand position, summed over arms."
+ "autonomy_grasp_frac"        "Autonomous grasp fraction"        "frac"   0  ""                     "shared" "all"         true   false "Fraction of samples in autonomous grasp phases."
+ "loop_freq_mean_hz"          "Controller loop rate"             "Hz"     0  ""                     "shared" "all"         true   true  "Self-reported control loop frequency (health check, not performance)."
+};
+
+spec = cell2table(rows, 'VariableNames', {'name','label','unit','dir','family', ...
+    'combine','cell_scope','mode_comparable','cv_safe','description'});
+spec.name = string(spec.name);       spec.label = string(spec.label);
+spec.unit = string(spec.unit);       spec.family = string(spec.family);
+spec.combine = string(spec.combine); spec.cell_scope = string(spec.cell_scope);
+spec.description = string(spec.description);
+end

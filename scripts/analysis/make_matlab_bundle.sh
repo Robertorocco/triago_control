@@ -19,6 +19,7 @@ OUT="${1:-${TRIAGO_STUDY_DATA_ROOT:-$HOME/exchange/triago_study_data}/triago_mat
 mkdir -p "$OUT"
 cp "$SRC"/*.m "$OUT"/
 cp "$EXPORT_DIR/manifest.mat" "$EXPORT_DIR/manifest.csv" "$OUT"/
+cp "$SRC/../participant_schedule.csv" "$OUT"/       # trial order, needed by the group analysis
 cp "$SRC/../bundle_README.txt" "$OUT/README.txt"
 
 ( cd "$(dirname "$OUT")" && zip -qr "$(basename "$OUT").zip" "$(basename "$OUT")" )
