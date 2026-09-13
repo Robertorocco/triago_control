@@ -4,6 +4,8 @@ Before doing any work in this repo, read `.kiro/context.md` — it holds the cur
 
 It is Claude's responsibility to keep `.kiro/context.md` accurate and up to date as work happens in this repo: update it when architecture changes, features land, or decisions are made, so a new chat can pick up full context from this file alone. **Keep it short** — see its own §0 for the length rule; don't let entries grow back into essays.
 
+**If the chat is dedicated to thesis writing (editing `technical_report.tex`)**, also read `master_thesis_rules.md` first — PRISMA Lab's official style/structure checklist, which governs that file. Ignore it for ordinary code work in this repo.
+
 ## Orchestration
 
 When the active session model is Opus, dispatch subtasks (Agent tool calls) on Sonnet rather than inheriting Opus — Opus stays the orchestrator, Sonnet does the token-heavy subagent work.
