@@ -20,22 +20,26 @@ famItems = famItems(arrayfun(@(nm) isfield(S.Q6, nm), famItems.name), :);
 nf = height(famItems);
 
 if opts.compact
-    fig = studyplot.newfig("Learning overview", 480, 600, true);
-    tl = tiledlayout(fig, 2, 1, 'TileSpacing', 'compact', 'Padding', 'compact');
-    title(tl, studyplot.wrap("Learning and order effects (slot 1 = first condition met; slots 1-3 one control mode, 4-6 the other)", 70), ...
-          'FontWeight', 'bold', 'FontSize', 9);
+    % Kept deliberately short: the legend only names each line (the slope
+    % and p-value for every family are already in the show_results table
+    % right below this figure in the report, so repeating them here would
+    % just crowd the plot without adding anything new to read).
+    fig = studyplot.newfig("Learning overview", 480, 210 * 2 + 110, true);
+    tl = tiledlayout(fig, 2, 1, 'TileSpacing', 'loose', 'Padding', 'loose');
+    title(tl, "Learning and order effects", 'FontWeight', 'bold', 'FontSize', 10);
+    subtitle(tl, "slot 1 = first condition met; slots 1-3 one control mode, 4-6 the other", 'FontSize', 7.5);
     ax = nexttile(tl); hold(ax, 'on');
     cmap = lines(nf);
     for i = 1:nf
         nm = famItems.name(i); R = S.Q6.(nm);
         if nm == "composite", lab = "Composite"; lw = 2.5; col = [0 0 0]; else, lab = families.label(families.key == famItems.family(i)); lw = 1.2; col = cmap(i, :); end
         plot(ax, 1:6, R.slot_mean, '-o', 'Color', col, 'LineWidth', lw, 'MarkerFaceColor', col, 'MarkerSize', 3, ...
-             'DisplayName', sprintf("%s (slope %.2f, %s)", lab, R.slope_mean, fmt_p(R.p_slope_wilcoxon)));
+             'DisplayName', lab);
     end
     hold(ax, 'off'); xlim(ax, [0.8 6.2]); xticks(ax, 1:6); grid(ax, 'on'); box(ax, 'on');
     xlabel(ax, "experiment slot"); ylabel(ax, "mean score (z)");
-    legend(ax, 'Location', 'eastoutside', 'Box', 'off', 'FontSize', 6);
-    title(ax, "Mean family score per slot (rising line = practice improves the score)");
+    legend(ax, 'Location', 'eastoutside', 'Box', 'off', 'FontSize', 6.5);
+    title(ax, "Score per slot", 'FontSize', 9);
 
     ax = nexttile(tl);
     R = S.Q6.("composite");
@@ -75,11 +79,10 @@ yline(ax, 0, ':', 'Color', [0.4 0.4 0.4]);
 hold(ax, 'off');
 xlim(ax, [0.5 2.5]); xticks(ax, 1:2); xticklabels(ax, {'Clutch first', 'Joystick first'});
 ylabel(ax, "Joystick - Clutch (z)"); grid(ax, 'on'); box(ax, 'on');
-title(ax, studyplot.wrap(sprintf("%s: mode-order check, rank-sum %s %s (n = %d / %d)", ...
-    lab, fmt_p(R.p_order_ranksum), studyplot.stars(R.p_order_ranksum), R.mode_order_n(1), R.mode_order_n(2)), 70));
+title(ax, sprintf("%s: order check  %s %s", lab, fmt_p(R.p_order_ranksum), studyplot.stars(R.p_order_ranksum)), 'FontSize', 9);
 if ~isnan(R.p_order_ranksum) && R.p_order_ranksum < R.alpha
-    subtitle(ax, studyplot.wrap("WARNING: the mode difference depends on the order -> partly a practice effect", 70));
+    subtitle(ax, studyplot.wrap(sprintf("n=%d/%d -- WARNING: depends on order, partly a practice effect", R.mode_order_n(1), R.mode_order_n(2)), 55), 'FontSize', 7.5);
 else
-    subtitle(ax, studyplot.wrap("the mode difference does not depend on the order -> no order bias detected", 70));
+    subtitle(ax, studyplot.wrap(sprintf("n=%d/%d -- does not depend on order, no bias detected", R.mode_order_n(1), R.mode_order_n(2)), 55), 'FontSize', 7.5);
 end
 end

@@ -20,13 +20,20 @@ famItems = items(items.is_family & items.name ~= "composite", :);
 nf = height(famItems);
 
 if opts.compact
-    fig = studyplot.newfig("Consistency overview", 480, 600, true);
-    tl = tiledlayout(fig, 2, 1, 'TileSpacing', 'compact', 'Padding', 'compact');
-    title(tl, studyplot.wrap("Which condition gives the most SIMILAR results across participants? (shorter bar = more consistent)", 70), ...
-          'FontWeight', 'bold', 'FontSize', 9);
+    % Horizontal grouped bars: family names as plain y-axis text (no rotated,
+    % overlapping tick labels), one legend per panel placed clear of the
+    % bars, and a single small marker (not floating text) on the winning bar
+    % of a family whose spread difference is significant -- the full
+    % statistics are already in the show_results table right below this
+    % figure in the report, so the plot itself only needs to be readable.
+    fig = studyplot.newfig("Consistency overview", 480, 230 * 2 + 110, true);
+    tl = tiledlayout(fig, 2, 1, 'TileSpacing', 'loose', 'Padding', 'loose');
+    title(tl, "Most similar results across participants", 'FontWeight', 'bold', 'FontSize', 10);
+    subtitle(tl, "shorter bar = more consistent; * = significantly more consistent (Pitman-Morgan)", 'FontSize', 7.5);
+    labels = arrayfun(@(k) families.label(families.key == k), famItems.family);
     for q = ["Q4" "Q5"]
         ax = nexttile(tl);
-        if q == "Q4", levels = ["C" "J"]; what = "control mode"; else, levels = ["F" "B" "FB"]; what = "assistance"; end
+        if q == "Q4", levels = ["C" "J"]; panelTitle = "By control mode"; else, levels = ["F" "B" "FB"]; panelTitle = "By assistance level"; end
         k = numel(levels);
         V = nan(nf, k); Lo = V; Hi = V; sigf = false(nf, 1); best = strings(nf, 1);
         for i = 1:nf
@@ -41,24 +48,28 @@ if opts.compact
             sigf(i) = R.significant; best(i) = R.most_consistent;
         end
         hold(ax, 'on');
-        wdt = 0.8 / k;
+        wdt = 0.75 / k;
+        ypos = nan(nf, k);
         for j = 1:k
-            x = (1:nf) - 0.4 + wdt * (j - 0.5);
-            bar(ax, x, V(:, j), wdt * 0.9, 'FaceColor', studyplot.color(levels(j)), 'EdgeColor', 'none', 'DisplayName', levels(j));
-            errorbar(ax, x, V(:, j), V(:, j) - Lo(:, j), Hi(:, j) - V(:, j), 'k', 'LineStyle', 'none', 'LineWidth', 0.8, 'CapSize', 3, 'HandleVisibility', 'off');
+            y = (1:nf)' - 0.375 + wdt * (j - 0.5);
+            ypos(:, j) = y;
+            barh(ax, y, V(:, j), wdt * 0.9, 'FaceColor', studyplot.color(levels(j)), 'EdgeColor', 'none', 'DisplayName', levels(j));
+            errorbar(ax, V(:, j), y, Lo(:, j) - V(:, j), Hi(:, j) - V(:, j), 'horizontal', 'k', ...
+                     'LineStyle', 'none', 'LineWidth', 0.8, 'CapSize', 2, 'HandleVisibility', 'off');
         end
         for i = 1:nf
             if sigf(i)
-                text(ax, i, max(Hi(i, :), [], 'omitnan') * 1.05, "* " + best(i), 'HorizontalAlignment', 'center', 'FontSize', 7, 'FontWeight', 'bold');
+                jbest = find(levels == best(i), 1);
+                plot(ax, Hi(i, jbest) + 0.02 * max(Hi(:), [], 'omitnan'), ypos(i, jbest), 'k*', ...
+                     'MarkerSize', 5, 'HandleVisibility', 'off');
             end
         end
         hold(ax, 'off');
-        xticks(ax, 1:nf); xticklabels(ax, arrayfun(@(k) families.label(families.key == k), famItems.family));
-        ax.XTickLabelRotation = 25;
-        ylabel(ax, "SD across participants"); grid(ax, 'on'); box(ax, 'on');
-        legend(ax, 'Location', 'northeast', 'Orientation', 'horizontal', 'Box', 'off');
-        ylim(ax, [0, max(Hi(:), [], 'omitnan') * 1.3]);
-        title(ax, studyplot.wrap(sprintf("by %s: * = spread differs significantly (Pitman-Morgan); letter = most consistent", what), 62));
+        ylim(ax, [0.5 nf + 0.5]); yticks(ax, 1:nf); yticklabels(ax, labels); ax.YDir = 'reverse';
+        xlim(ax, [0, max(Hi(:), [], 'omitnan') * 1.22]);
+        xlabel(ax, "SD across participants"); grid(ax, 'on'); box(ax, 'on');
+        legend(ax, 'Location', 'southoutside', 'Orientation', 'horizontal', 'Box', 'off', 'FontSize', 7);
+        title(ax, panelTitle, 'FontSize', 9);
     end
     return
 end
