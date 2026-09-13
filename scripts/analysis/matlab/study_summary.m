@@ -7,7 +7,7 @@ function out = study_summary(results_dir, opts)
 %     02_mode_families         forest plot, Joystick vs Clutch, family scores
 %     03_assist_families       forest plot, F/B/FB contrasts, family scores
 %     04_cells                 families x cells heat matrix + composite ranking
-%     05_checks                practice, order bias, world, success
+%     05_checks                practice, order bias, world
 %     06_mode_metrics          forest plot, Joystick vs Clutch, every metric
 %     07_assist_metrics        forest plot, F/B/FB contrasts, every metric
 %     summary_table.csv        one row per family: winners, p-values, effects

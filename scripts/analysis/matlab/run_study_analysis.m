@@ -54,8 +54,7 @@ fprintf(' complete participants : %d  (%s)\n', meta.n_complete, strjoin(meta.com
 for i = 1:height(meta.excluded)
     fprintf(' excluded              : %s  -- %s\n', meta.excluded.participant(i), meta.excluded.reason(i));
 end
-fprintf(' trials analysed       : %d  |  success %d  |  incidents noted %d\n', ...
-    height(trial), nnz(trial.success), nnz(trial.incident));
+fprintf(' trials analysed       : %d\n', height(trial));
 fprintf(' output                : %s\n', out_dir);
 
 %% ---- analysis items: every family metric + family scores + composite ----
@@ -221,7 +220,6 @@ if MAKE_FIGURES
         f = fig_family_overview(trial, S, items, families);    studyplot.save(f, fig_dir, "overview_families"); close(f);
         f = fig_consistency_overview(S, items, families);      studyplot.save(f, fig_dir, "overview_consistency"); close(f);
         f = fig_learning_overview(S, items, families);         studyplot.save(f, fig_dir, "overview_learning"); close(f);
-        f = fig_success_incidents(trial);                      studyplot.save(f, fig_dir, "overview_success_incidents"); close(f);
         f = fig_world_overview(trial, S, items, families);     studyplot.save(f, fig_dir, "overview_world"); close(f);
         f = fig_cell_ranking(trial, S);                        studyplot.save(f, fig_dir, "overview_cell_ranking"); close(f);
     catch err

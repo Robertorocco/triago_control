@@ -324,14 +324,6 @@ disp(spec(spec.family ~= "", {'name', 'label', 'unit', 'dir', 'family', 'cell_sc
 % (share of samples with $\alpha > 0.5$) and *user actively driving* (share of
 % samples with a non-zero user twist): context, no direction.
 
-%% 3.8 Success and incidents
-% * *Task success*: the experimenter's manual yes/no call at the end of the
-% trial (1 = yes).
-% * *Incident noted*: 1 when the experimenter wrote a note (fallen object,
-% failed grasp, unreachable object, ...). It captures problems that did not
-% prevent an eventual success. Both are rates near the ceiling / floor, so
-% they are described by counts rather than tested.
-
 %% 4. Family scores and the composite
 % To answer "which condition is best" across many metrics without counting
 % each of them separately, the metrics are grouped in families
@@ -553,11 +545,7 @@ show_results(R(R.question == "Q6_learning", :), "Q6 (statistic = mean slope per 
 fig_world_overview(trial, S, items, families, 'compact', true);
 show_results(R(R.question == "QW_world" & R.is_family_score, :), "world")
 
-%% 13. Success and incidents
-fig_success_incidents(trial, 'compact', true);
-disp(trial(trial.incident == 1, {'participant', 'world', 'cell', 'success', 'notes'}))
-
-%% 14. Metric dashboards
+%% 13. Metric dashboards
 % One figure per metric, four stacked panels: Q1 mode, Q2 assistance, Q3
 % cells, Q6 trend. Grey lines are participants, coloured markers are means
 % with 95% CI, brackets mark Holm-significant pairs. Larger versions of the
@@ -571,7 +559,7 @@ for k = 1:height(metricItems)
     fig_metric_dashboard(trial, table2struct(metricItems(k, :)), S, 'compact', true);
 end
 
-%% 15. Assumptions, limitations, and how to judge a result
+%% 14. Assumptions, limitations, and how to judge a result
 % * *Sample size.* With $n$ participants the paired tests detect an effect of
 % $d_z \approx 0.9$ at $n = 12$ and $d_z \approx 0.6$ at $n = 24$ with 80%
 % power. Medium effects that are not significant now may become significant
@@ -583,9 +571,11 @@ end
 % * *Multiple testing.* Per-metric significance is Holm-corrected within its
 % family and question; a result that is significant before correction but not
 % after is suggestive, not established.
-% * *Ceiling effects.* Success is almost always "yes" and intent confidence is
-% almost always reached, so those metrics carry little information; the
-% incident notes and the time-to-confidence are more informative.
+% * *Task outcome is not analysed.* The experimenter's success / incident
+% notes were not recorded consistently, and the study targets the assistance
+% toward the goal poses rather than placement precision, so no outcome
+% metric is used. Intent confidence is almost always reached, so the
+% time-to-confidence is the informative belief metric.
 % * *Order.* Control mode was blocked (3 cells, then 3 cells). The
 % counter-balancing across participants removes the average practice effect
 % from the mode comparison, but only when both orders are equally represented;
@@ -599,7 +589,7 @@ end
 % between worlds; they are compared across conditions within the same
 % world-balanced design, never across worlds in absolute terms.
 
-%% 16. Appendix: full results table and provenance
+%% 15. Appendix: full results table and provenance
 % The complete master table (every test, every metric) is results_all.csv in
 % the results folder; a compact view:
 A = compact_table(R); A.question = extractBefore(R.question + "    ", 3); A = movevars(A, 'question', 'Before', 'metric');

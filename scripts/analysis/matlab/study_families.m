@@ -10,7 +10,6 @@ rows = {
  "motion_quality"       "Motion quality"         "How smooth and well tracked the robot motion was."
  "intent_understanding" "Intent understanding"   "How confidently and how early the robot inferred which object the operator wanted."
  "assistance_quality"   "Assistance quality"     "How well the autonomous policy agreed with the operator (blending cells only)."
- "success_incident"     "Success & incidents"    "Whether the task succeeded and whether anything went wrong."
 };
 fam = cell2table(rows, 'VariableNames', {'key','label','meaning'});
 fam.key = string(fam.key); fam.label = string(fam.label); fam.meaning = string(fam.meaning);

@@ -13,7 +13,7 @@ function [trial, meta] = load_study_table(export_dir, opts)
 %   after new participants are exported therefore needs no code change.
 %
 %   TRIAL columns: participant, world, cell, mode ("C"/"J"), assist ("F"/"B"/
-%   "FB"), control_mode, success, incident, notes, act_right_frac, one column
+%   "FB"), control_mode, success, notes, act_right_frac, one column
 %   per metric in the spec, and (from the schedule) slot (1-6),
 %   slot_in_mode (1-3), mode_order ("C_first"/"J_first"), trial_index (1-12).
 %   Metrics outside their cell_scope are NaN, so every 'omitnan' aggregation
@@ -85,7 +85,6 @@ trial.assist = extractAfter(trial.cell, 1);                  % "F" / "B" / "FB"
 trial.control_mode = string(Traw.control_mode);
 trial.success  = gettext(Traw, 'success') == "yes";
 trial.notes    = gettext(Traw, 'notes');
-trial.incident = strlength(strtrim(trial.notes)) > 0;
 
 wR = getnum(Traw, 'right_this_arm_active_frac');
 wL = getnum(Traw, 'left_this_arm_active_frac');
@@ -153,10 +152,6 @@ switch nm
         v = s ./ p; v(p <= 1e-6) = NaN;
     case "belief_confident_ever"
         v = double(~isnan(getnum(Traw, 'right_belief_time_to_conf_s')));
-    case "success"
-        v = double(trial.success);
-    case "incident"
-        v = double(trial.incident);
     otherwise
         error('load_study_table:derived', 'no rule for derived metric %s', nm);
 end

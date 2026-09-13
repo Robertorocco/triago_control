@@ -57,8 +57,6 @@ rows = {
  "alpha_mean"                 "Mean autonomy authority"          "-"      0  "assistance_quality"   "shared" "blend_only"  true   false "Mean blending weight alpha (0 = user only, 1 = policy only)."
  "alpha_autonomy_frac"        "Autonomy-led time fraction"       "frac"   0  "assistance_quality"   "shared" "blend_only"  true   false "Fraction of samples with alpha above 0.5."
  "user_active_frac"           "User actively driving"            "frac"   0  "assistance_quality"   "shared" "blend_only"  true   false "Fraction of samples with a non-zero user twist."
- "success"                    "Task success"                     "0/1"   +1  "success_incident"     "derived" "all"        true   false "Experimenter's manual success call (1 = yes)."
- "incident"                   "Incident noted"                   "0/1"   -1  "success_incident"     "derived" "all"        true   false "1 if the experimenter wrote a note (fallen object, failed grasp, ...)."
  "safety_mean_dist_m"         "Mean clearance"                   "m"     +1  ""                     "shared" "all"         true   true  "Mean clearance, autonomous-grasp window excluded."
  "safety_min_dist_graspincl_m" "Min clearance incl. grasp"       "m"      0  ""                     "shared" "all"         true   false "Raw minimum including the intentional gripper-object overlap during grasp."
  "cbf_lambda_peak"            "Peak barrier multiplier"          "-"     -1  ""                     "max"    "all"         true   true  "Largest collision-barrier multiplier."

@@ -17,7 +17,7 @@
 %  HOW THE INDICES WORK
 %    Every metric is z-scored WITHIN this participant's own trials and flipped
 %    so that higher is always better. Metrics are grouped into four families
-%    (efficiency / smoothness / safety / success); the composite is the mean of
+%    (efficiency / smoothness / safety); the composite is the mean of
 %    the four family scores, so a family with many metrics cannot dominate.
 %    A score of 0 = this participant's own average. It is a DESCRIPTIVE profile
 %    of one person, not a statistical test -- group comparisons come later.
@@ -69,7 +69,6 @@ spec = { ...
   'safety_nearmiss_frac',  'near-miss time',           'frac', -1, 'safety'
   'safety_nearmiss_episodes','near-miss episodes',     '',     -1, 'safety'
   'cbf_active_frac',       'CBF active',               'frac', -1, 'safety'
-  'success',               'success',                  '',     +1, 'success'
   'force_impulse_Ns',      'force impulse',            'N.s',  -1, ''
   'force_mean_N',          'mean force',               'N',    -1, ''
   'clutch_presses',        'clutch presses',           '',     -1, ''

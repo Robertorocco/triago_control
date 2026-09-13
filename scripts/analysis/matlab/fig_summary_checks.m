@@ -1,14 +1,14 @@
 function fig = fig_summary_checks(trial, S)
-%FIG_SUMMARY_CHECKS Validity checks on the composite: practice, order bias, world, success.
-%   FIG = FIG_SUMMARY_CHECKS(TRIAL, S) draws four panels: the composite score
-%   along the six experiment slots (practice), the Joystick-minus-Clutch gap
-%   by mode order (order bias), rack versus shield (world difficulty) and the
-%   success / incident rates per cell. These are the things that could make
-%   the headline results misleading; the titles state whether they do.
+%FIG_SUMMARY_CHECKS Validity checks on the composite: practice, order bias, world.
+%   FIG = FIG_SUMMARY_CHECKS(TRIAL, S) draws three panels: the composite
+%   score along the six experiment slots (practice), the Joystick-minus-Clutch
+%   gap by mode order (order bias) and rack versus shield (world difficulty).
+%   These are the things that could make the headline results misleading; the
+%   titles state whether they do.
 
 n = numel(unique(trial.participant));
-fig = studyplot.profig("Checks", 1250, 820);
-tl = tiledlayout(fig, 2, 2, 'TileSpacing', 'loose', 'Padding', 'loose');
+fig = studyplot.profig("Checks", 1500, 470);
+tl = tiledlayout(fig, 1, 3, 'TileSpacing', 'loose', 'Padding', 'loose');
 title(tl, sprintf("Sanity checks on the composite score   (n = %d participants)", n), 'FontWeight', 'bold', 'FontSize', 13);
 
 % ---------------- practice ----------------
@@ -54,25 +54,4 @@ Rw = S.QW.("composite");
 title(ax, "World: rack versus shield (same participants, paired)");
 if Rw.significant, v = Rw.better + " is the easier scene"; else, v = "no significant difference between the scenes"; end
 subtitle(ax, sprintf("%s  (%s, %s = %.2f)", v, fmt_p(Rw.p), Rw.effect_name, abs(Rw.effect)), 'FontSize', 9, 'Color', [0.35 0.35 0.35]);
-
-% ---------------- success / incidents ----------------
-ax = nexttile(tl);
-CELLS = ["CF" "CB" "CFB" "JF" "JB" "JFB"];
-succ = nan(1, 6); inc = nan(1, 6); ntr = nan(1, 6);
-for j = 1:6
-    sel = trial.cell == CELLS(j); ntr(j) = nnz(sel);
-    succ(j) = 100 * mean(trial.success(sel)); inc(j) = 100 * mean(trial.incident(sel));
-end
-hold(ax, 'on');
-for j = 1:6
-    bar(ax, j - 0.18, succ(j), 0.34, 'FaceColor', studyplot.color(CELLS(j)), 'EdgeColor', 'none');
-    bar(ax, j + 0.18, inc(j), 0.34, 'FaceColor', [0.8 0.8 0.8], 'EdgeColor', 'none');
-    text(ax, j - 0.18, succ(j) + 2, sprintf("%d", round(succ(j))), 'HorizontalAlignment', 'center', 'FontSize', 8);
-    text(ax, j + 0.18, inc(j) + 2, sprintf("%d", round(inc(j))), 'HorizontalAlignment', 'center', 'FontSize', 8, 'Color', [0.35 0.35 0.35]);
-end
-hold(ax, 'off');
-xticks(ax, 1:6); xticklabels(ax, CELLS); ylim(ax, [0 112]); ylabel(ax, "% of trials"); grid(ax, 'on'); ax.XGrid = 'off';
-title(ax, "Success rate (colour) and incident rate (grey) per cell");
-subtitle(ax, sprintf("%d successes and %d incident notes over %d trials -- too rare to test, shown as counts", ...
-         nnz(trial.success), nnz(trial.incident), height(trial)), 'FontSize', 9, 'Color', [0.35 0.35 0.35]);
 end
