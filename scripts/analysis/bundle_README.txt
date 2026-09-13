@@ -13,10 +13,15 @@ HOW TO USE  (group analysis -- the study results)
        file and press Run). It prints the verdict per question and writes a
        time-stamped folder analysis_results/study_results_<date>_n<N>/ with
        results.mat, results_all.csv, trial_table.csv and figures/*.png.
+       It also writes summary/ inside that folder: summary.pdf (7 pages, one
+       figure each: scorecard, forest plots, cell matrix, checks),
+       summary.txt (plain-language verdict) and summary_table.csv. This is
+       the short, publication-style output; study_summary regenerates it.
     4. Run  build_report  to turn study_report.m into the Live Script
        study_report.mlx (executed, with every figure) plus study_report.html
        and study_report.pdf in that results folder. Open study_report.mlx to
-       read the report: it explains every metric, every test and every figure.
+       read the full report: it explains every metric, every test and every
+       figure.
 
 HOW TO USE  (one participant)
     Open analyze_participant.m and press Run; leave PARTICIPANT = '' and a
@@ -24,6 +29,8 @@ HOW TO USE  (one participant)
 
 WHAT IS IN HERE
     run_study_analysis.m     group statistics for Q1-Q6 (main script)
+    study_summary.m          short publication-style output (summary/ folder)
+    fig_summary_*.m          scorecard, forest plots, cell matrix, checks
     study_report.m           the report source (text + code); build_report makes the .mlx
     build_report.m           .m -> .mlx -> html/pdf
     load_study_table.m       tidy per-trial table, completeness rule, trial order

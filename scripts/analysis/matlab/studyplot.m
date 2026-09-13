@@ -249,6 +249,57 @@ methods (Static)
         if ~isfolder(out_dir), mkdir(out_dir); end
         exportgraphics(fig, fullfile(out_dir, name + ".png"), 'Resolution', 140);
     end
+
+    % ------------------------------------------------ publication style
+    function fig = profig(name, w, h)
+        % Publication-style figure: white, thin dark-grey axes, outward ticks,
+        % light grid, no box, Helvetica, plain-text interpreters.
+        fig = figure('Name', name, 'Color', 'w', 'Position', [60 60 w h], ...
+            'DefaultTextInterpreter', 'none', 'DefaultAxesTickLabelInterpreter', 'none', ...
+            'DefaultAxesFontName', 'Helvetica', 'DefaultTextFontName', 'Helvetica', ...
+            'DefaultAxesFontSize', 10, 'DefaultTextFontSize', 10, ...
+            'DefaultAxesTickDir', 'out', 'DefaultAxesTickLength', [0.006 0.006], ...
+            'DefaultAxesBox', 'off', 'DefaultAxesLineWidth', 0.8, ...
+            'DefaultAxesXColor', [0.25 0.25 0.25], 'DefaultAxesYColor', [0.25 0.25 0.25], ...
+            'DefaultAxesGridColor', [0.88 0.88 0.88], 'DefaultAxesGridAlpha', 1, ...
+            'DefaultAxesTitleFontWeight', 'bold', 'DefaultAxesTitleFontSizeMultiplier', 1.15, ...
+            'DefaultLegendBox', 'off', 'DefaultLegendFontSize', 9);
+    end
+
+    function export(fig, base, opts)
+        % PNG (200 dpi) + vector PDF next to each other; optional append to a
+        % multi-page PDF (one document with every summary figure).
+        arguments
+            fig
+            base (1,1) string
+            opts.append_to (1,1) string = ""
+        end
+        exportgraphics(fig, base + ".png", 'Resolution', 200, 'BackgroundColor', 'white');
+        exportgraphics(fig, base + ".pdf", 'ContentType', 'vector', 'BackgroundColor', 'white');
+        if strlength(opts.append_to) > 0
+            exportgraphics(fig, opts.append_to, 'ContentType', 'vector', 'BackgroundColor', 'white', 'Append', true);
+        end
+    end
+
+    function c = sigcolor(p)
+        % Evidence strength as a green ramp; grey = not significant; white = untested.
+        if isnan(p),        c = [1 1 1];
+        elseif p < 0.001,   c = [0.13 0.47 0.29];
+        elseif p < 0.01,    c = [0.33 0.65 0.42];
+        elseif p < 0.05,    c = [0.66 0.84 0.62];
+        else,               c = [0.92 0.92 0.92];
+        end
+    end
+
+    function c = textcolor_on(bg)
+        % Black or white text depending on the background luminance.
+        if 0.299 * bg(1) + 0.587 * bg(2) + 0.114 * bg(3) < 0.5, c = [1 1 1]; else, c = [0.1 0.1 0.1]; end
+    end
+
+    function s = famlabel(families, key)
+        % Family label with the composite handled as a pseudo-family.
+        if key == "composite", s = "Composite"; else, s = families.label(families.key == key); end
+    end
 end
 end
 

@@ -33,6 +33,7 @@ OUT_ROOT     = '';        % '' = <export dir>/analysis_results
 ALPHA        = 0.05;      % significance level
 N_BOOT       = 5000;      % bootstrap resamples for confidence intervals
 MAKE_FIGURES = true;      % write PNG figures
+MAKE_SUMMARY = true;      % publication-style summary (summary/ folder, see study_summary)
 %% =======================================================================
 
 %% ---- load ----
@@ -229,6 +230,9 @@ if MAKE_FIGURES
     end
     set(0, 'DefaultFigureVisible', prev);
     fprintf(' figures -> %s\n', fig_dir);
+end
+if MAKE_SUMMARY
+    study_summary(out_dir, 'show', false);
 end
 fprintf('%s\n', line);
 
