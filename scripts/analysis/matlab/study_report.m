@@ -54,59 +54,148 @@ disp(meta.excluded)
 % listed above.
 
 %% 2. How to read a statistical result
-% *p-value.* The probability of seeing a difference at least as large as the
-% observed one if, in reality, the conditions were identical. Small p (below
-% the significance level $\alpha = 0.05$) means the data are hard to explain
-% by chance alone: the difference is called *significant*. A p-value above
-% 0.05 does *not* prove that the conditions are equal; with 12-24 participants
-% only medium-to-large effects can be detected, so "not significant" means
-% "not demonstrated with this sample", nothing more.
+% Every test in this report answers exactly *two questions*, always in this
+% order:
 %
-% *Effect size.* How large the difference is, independently of the sample
-% size. Reported here:
+% # *Is this difference real, or could it just be luck?* -- the *p-value*.
+% # *If it is real, how big is it -- does it actually matter?* -- the
+% *effect size*.
 %
-% * *Cohen's* $d_z = \bar{d} / s_d$ for paired comparisons: the mean of the
-% within-person differences divided by their standard deviation. Bands: 0.2
-% small, 0.5 medium, 0.8 large.
-% * *Rank-biserial* $r$ for the Wilcoxon test: $r = (W^+ - W^-) / (W^+ +
-% W^-)$ where $W^\pm$ are the sums of the ranks of the positive / negative
-% differences; $r = 1$ when every participant goes the same way. Bands: 0.1
-% small, 0.3 medium, 0.5 large.
-% * *Partial eta squared* $\eta_p^2 = SS_{effect} / (SS_{effect} + SS_{error})$
-% for ANOVA: the share of the variance (after removing the participant
-% differences) explained by the factor. Bands: 0.01 small, 0.06 medium, 0.14
+% Neither question alone is enough. A p-value alone can call a tiny,
+% meaningless gap "real" if there is enough data; an effect size alone can
+% call a huge number "important" when it is really just noise from too few
+% participants. This report always gives both, plus a plausible range (the
+% confidence interval) for how big the true gap is.
+%
+% *If you read nothing else, read this table:*
+disp(cell2table({ ...
+ "p < 0.05  (marked * ** ***)"                 "The gap is unlikely to be pure luck -- treat it as real."
+ "p >= 0.05  (marked n.s.)"                    "Not enough evidence with this many participants. This does NOT mean the conditions are equal -- it means we could not tell them apart yet."
+ "effect size: small"                          "Real, but modest in everyday terms."
+ "effect size: medium / large"                 "A gap big enough that a person would actually notice or care about it."
+ "95% CI does not include 0"                    "Same conclusion as p < 0.05, plus a plausible range for how big the true gap is."
+ "the two calculators disagree (recommended flips)" "The result is fragile / borderline -- read it with extra caution."
+}, 'VariableNames', {'if_you_see', 'it_means'}))
+
+%% 2.1 "Is it real?" -- the p-value
+% Picture a courtroom. The starting assumption ("innocent until proven
+% guilty") is that the two conditions are *truly identical* -- any difference
+% you measured is pure chance, nothing more. The p-value asks: *if that
+% starting assumption were true, how surprising is the gap I actually
+% measured?* A small p-value (below the significance level $\alpha = 0.05$)
+% means "very surprising -- hard to explain as luck," so the difference is
+% called *significant*.
+%
+% *This is the single most common misreading of statistics, so read it
+% twice:* a p-value above 0.05 does *not* prove the two conditions are equal.
+% It means the evidence was not strong enough, with only this many
+% participants, to rule out luck. "Not significant" = "not demonstrated yet",
+% never "proven the same".
+%
+% *In your data:* task time, Clutch vs Joystick, gives p = 0.380 -- not
+% significant. That does not mean the two modes take equally long; it means
+% 12 participants were not enough to separate them on this particular metric.
+% Compare that with safety, Clutch vs Joystick: p < 0.001 -- here the gap is
+% unmistakably real, Joystick is clearly safer.
+
+%% 2.2 "How big is it?" -- effect size
+% The p-value only says "probably real"; the effect size says "how much".
+% Four different rulers are used here, one per kind of test -- the *bands*
+% below (small / medium / large) are the standard convention for judging
+% each one at a glance:
+%
+% * *Cohen's dz* (two-condition comparisons, e.g. Clutch vs Joystick): take
+% every participant's own personal gap (their Clutch time minus their
+% Joystick time), then divide the *average* of those personal gaps by how
+% much the gaps *vary* from person to person. In plain words: "the average
+% gap, measured in units of how much people normally differ from each
+% other." $d_z = \bar{d} / s_d$. Bands: 0.2 small, 0.5 medium, 0.8 large.
+% * *Rank-biserial r* (the safer, rank-only version of the above, used by
+% the Wilcoxon test): simply "what fraction of participants leaned one way
+% versus the other," rescaled so $r=+1$ means literally everyone went the
+% same direction and $r=0$ means it was a coin flip who did better under
+% each condition. $r = (W^+ - W^-)/(W^+ + W^-)$, from the rank sums $W^\pm$
+% of the positive/negative personal gaps. Bands: 0.1 small, 0.3 medium, 0.5
 % large.
-% * *Kendall's W* $= \chi^2_F / (n(k-1))$: agreement of the $n$ participants on
-% the ranking of the $k$ conditions, from 0 (no agreement) to 1 (everyone ranks
-% them identically). Bands: 0.1 weak, 0.3 moderate, 0.5 strong.
+% * *Partial eta squared* $\eta_p^2$ (three-or-more-condition ANOVA, e.g.
+% F/B/FB): "what share of the ups and downs between conditions is explained
+% by this factor, once person-to-person differences are removed." $\eta_p^2
+% = SS_{effect} / (SS_{effect} + SS_{error})$. Bands: 0.01 small, 0.06
+% medium, 0.14 large.
+% * *Kendall's W* (agreement across participants, Sections 10-11): imagine
+% giving 12 people the same 3 ice-cream flavours and asking each to rank
+% favourite to least favourite. $W=1$ means everyone produced the identical
+% ranking; $W=0$ means their rankings have nothing to do with each other.
+% $W = \chi^2_F / (n(k-1))$. Bands: 0.1 weak, 0.3 moderate, 0.5 strong.
 %
-% *Confidence interval (CI).* The range in which the true mean difference
-% plausibly lies (95%). A CI that does not contain 0 corresponds to a
-% significant difference. Where the sample is small, a *bootstrap* CI is used:
-% the participants are re-sampled with replacement 5000 times and the 2.5th
-% and 97.5th percentiles of the re-computed means are taken.
+% *In your data:* safety, Clutch vs Joystick, |dz| = 1.74 -- a huge effect,
+% Joystick is not just "significantly" safer, it is *substantially* safer.
+% Assistance (F/B/FB) on time-effectiveness: partial $\eta_p^2 = 0.70$ --
+% assistance level explains 70% of the trial-to-trial swing in that score.
+
+%% 2.3 The confidence interval -- a weather forecast for the gap
+% "70 degF +/- 5 degF" does not claim the temperature is exactly 70 -- it
+% says you are fairly confident the truth sits somewhere between 65 and 75.
+% The 95% confidence interval (CI) works the same way for the true gap
+% between two conditions: it is the plausible range, not a single number. A
+% CI that does not include 0 is the exact same conclusion as "significant",
+% just expressed as a range instead of a single p-value -- and it is more
+% informative, because it also tells you how big the gap plausibly is, not
+% only whether it is nonzero.
 %
-% *Two tests for every comparison.* A parametric test (t-test, ANOVA) assumes
-% roughly normal differences; a non-parametric test (Wilcoxon, Friedman) only
-% uses the ordering of the values and is safer with few participants and
-% outliers. Both are always computed; a normality check (Lilliefors test on
-% the differences) and, for ANOVA, a sphericity check (Mauchly) decide which
-% one is *recommended* and used for the headline p-value. When the two
-% disagree, the conclusion is fragile and is said so.
+% With only 12-24 participants there is no reliable formula for this range,
+% so the report uses *bootstrapping*: it treats your participants as a
+% stand-in for "everyone who could have done this study", and repeatedly
+% (5000 times) redraws a pretend group of the same size *from your own data,
+% with replacement* (so the same participant can be picked more than once in
+% one redraw). Each pretend redraw gives a slightly different average gap;
+% the middle 95% of those 5000 redraws is the confidence interval. It is a
+% simulation of "how much would my answer wobble if I had tested a slightly
+% different group of the same size."
+
+%% 2.4 Two calculators, one trusted answer
+% Every comparison is run through *two different calculators* at once:
 %
-% *Multiple comparisons.* Testing many metrics inflates the chance that some
-% p-value falls below 0.05 by luck. Two corrections are applied with the
-% Holm-Bonferroni procedure (sort the p-values, multiply the smallest by $m$,
-% the next by $m-1$, ..., keep them monotone): (1) inside one test, over the
-% pairwise post-hoc comparisons (3 pairs for F/B/FB, 15 pairs for the six
-% cells); (2) across the metrics of one family within one question. Both the
-% raw and the corrected p-value are kept in the tables. The *family scores*
-% (Section 4) are the headline answers and are reported uncorrected because
-% there is only one of them per family.
+% * a *parametric* one (t-test, ANOVA) -- more powerful, but it assumes the
+% differences between conditions are roughly bell-curve shaped;
+% * a *non-parametric* one (Wilcoxon, Friedman) -- a bit less powerful, but
+% it only looks at who ranked above whom, so it cannot be thrown off by one
+% unusually large or small trial (an outlier) or by a non-bell-curve shape.
 %
-% *Best.* Every metric has a direction (lower task time is better, higher
-% clearance is better). "Best" always means better in that direction; metrics
-% without a direction (mean speed, authority share) are shown for context only.
+% A quick automatic check on your actual data (a normality test on the
+% differences, and for ANOVA a sphericity test) picks which of the two is
+% *recommended* for that specific metric, and its p-value becomes the
+% headline number. Both results are always kept in the tables so you can see
+% them agree (reassuring) or disagree (a sign the result is fragile and
+% should be read with extra caution).
+
+%% 2.5 Testing many things at once -- the lottery-ticket problem
+% If you buy 100 lottery tickets, one of them might "win" purely by luck --
+% that does not mean lottery tickets work. Testing many metrics has exactly
+% the same problem: test ~30 things and, on average, one or two will look
+% "significant" by pure chance even if nothing real is happening anywhere.
+%
+% The *Holm-Bonferroni correction* fixes this by automatically raising the
+% bar for significance based on how many tests are being run together in one
+% batch: sort the p-values from smallest to largest, multiply the smallest
+% by the number of tests $m$, the next by $m-1$, and so on, keeping the
+% sequence non-decreasing. This is applied twice: (1) *inside* one test, over
+% its own pairwise comparisons (3 pairs for F/B/FB, 15 pairs for the six
+% cells); (2) *across* every metric of one family, within one question. Both
+% the original ("raw") and the corrected ("Holm") p-value are always shown
+% side by side, so you can see the correction happening rather than take it
+% on faith. The one exception: the *family scores* (Section 4) are each
+% reported on their own, uncorrected, because there is only one test per
+% family and nothing to correct for.
+
+%% 2.6 What "best" means here
+% Every metric has a built-in direction: lower task time is better, higher
+% clearance from obstacles is better, and so on (Section 3 states the
+% direction of every metric explicitly). "Best" in this report always means
+% "better in that direction, and the difference survived the checks above" --
+% never a vague impression. A handful of metrics have no direction at all
+% (mean speed, autonomy authority share) -- those are shown purely for
+% context, never as a win or a loss.
 
 %% 3. The metrics
 % Every trial is recorded as a ROS bag; |study_metrics.py| turns it into the
@@ -266,57 +355,136 @@ disp(spec(spec.family ~= "", {'name', 'label', 'unit', 'dir', 'family', 'cell_sc
 disp(families(:, {'key', 'label'}))
 disp(fam(:, {'key', 'n_metrics', 'members', 'dropped'}))
 
-%% 5. The tests, formally
-% All tests are run on one value per participant per condition (the mean over
-% that participant's trials in that condition), so $n$ is the number of
-% participants.
+%% 5. The tests, in plain language
+% Every test below follows the same two-question recipe from Section 2 ("is
+% it real", "how big is it") -- what differs from test to test is only *what
+% is being compared*. All of them work on one value per participant per
+% condition (that participant's own trials in that condition, averaged), so
+% $n$ below is always the number of participants, never the number of
+% trials.
+
+%% 5.1 Two conditions -- comparing each person against themselves
+% *Used for:* Clutch vs Joystick (Q1), B vs FB (part of Q2), rack vs shield.
 %
-% *Two conditions* (Clutch vs Joystick, B vs FB, rack vs shield): with $d_i =
-% x_i - y_i$, the paired t-test uses $t = \bar d / (s_d / \sqrt n)$ with $n-1$
-% degrees of freedom; the Wilcoxon signed-rank test ranks $|d_i|$ and compares
-% the rank sum of the positive differences with its distribution under the
-% hypothesis of symmetric differences (exact distribution for $n \le 15$); the
-% sign test only counts how many participants went each way.
+% *In plain words:* every participant did both conditions, so instead of
+% comparing the Clutch group to the Joystick group (they are the same 12
+% people!), the test looks at each person's own personal gap -- "how much
+% longer did *I* take in Clutch than in Joystick" -- and then asks whether
+% those 12 personal gaps mostly lean one way, or whether they are scattered
+% randomly around zero. This is exactly what makes it a *paired* test, and
+% why it needs far fewer people than comparing two separate groups would.
 %
-% *Three conditions* (F, B, FB): the one-way repeated-measures ANOVA models
-% $x_{ij} = \mu + \pi_i + \tau_j + \epsilon_{ij}$ (participant $i$, condition
-% $j$) and tests $\tau_j = 0$ with $F = MS_{condition} / MS_{error}$, the error
-% being the participant-by-condition interaction. The sphericity assumption
-% (equal variances of all pairwise differences) is checked with Mauchly's test
-% and the degrees of freedom are corrected with the Greenhouse-Geisser
-% $\epsilon$. The Friedman test ranks the 3 values of every participant and
-% tests whether the rank sums differ: $\chi^2_F = \frac{12}{nk(k+1)} \sum_j
-% R_j^2 - 3n(k+1)$ (with tie correction). Post-hoc: the three pairwise
-% Wilcoxon tests, Holm-corrected.
+% *The two calculators:* the paired t-test averages the personal gaps and
+% compares that average to how much the gaps vary from person to person
+% ($t = \bar d / (s_d/\sqrt n)$, $d_i = x_i - y_i$). The Wilcoxon signed-rank
+% test instead ranks the 12 gaps by size (ignoring sign) and checks whether
+% the ranks of the "Clutch was longer" gaps and the "Joystick was longer"
+% gaps are balanced or lopsided (exact for $n \le 15$). A simple *sign test*
+% is also reported as the plainest possible summary: literally just "how
+% many of the 12 people went each way."
+
+%% 5.2 Three conditions -- extending the same idea to three flavours
+% *Used for:* F vs B vs FB (Q2).
 %
-% *Six cells* (mode x assistance): the two-way repeated-measures ANOVA
-% decomposes the cell means into a *mode* main effect, an *assistance* main
-% effect and their *interaction* (does the effect of assistance depend on the
-% mode?). Every effect has its own error term (participant x effect) and its
-% own Greenhouse-Geisser correction. When the interaction is significant the
-% simple effects (assistance within each mode, mode within each assistance)
-% are reported. The Friedman test over the six cells answers "do the cells
-% differ at all" and the 15 pairwise Wilcoxon tests with Holm correction
-% identify which cells differ.
+% *In plain words:* the same "each person is their own comparison" logic,
+% now with three conditions instead of two. First an *omnibus* test asks the
+% broad question "do these three conditions differ from each other at all?"
+% -- only if the answer is yes do we go looking for *which specific pairs*
+% differ (F vs B? F vs FB? B vs FB?), each of those three pairwise checks
+% Holm-corrected so that having three chances to find a difference does not
+% by itself inflate the odds of a false alarm (Section 2.5).
 %
-% *Consistency* (which condition gives the most similar results across
-% participants): for every condition the standard deviation across
-% participants of the participant means is computed (with a bootstrap CI). Two
-% conditions are compared with the Pitman-Morgan test for equal variances of
-% paired samples: with $u_i = x_i + y_i$ and $v_i = x_i - y_i$, the
-% correlation $r_{uv}$ is zero if and only if $\mathrm{Var}(x) =
-% \mathrm{Var}(y)$, and $t = r_{uv} \sqrt{n-2} / \sqrt{1 - r_{uv}^2}$ with
-% $n-2$ degrees of freedom. Kendall's W adds the complementary notion: do the
-% participants *agree on the ranking* of the conditions?
+% *The two calculators:* the repeated-measures ANOVA splits each
+% participant's three values into "how this person differs from everyone
+% else" and "how this condition differs from the others", $x_{ij} = \mu +
+% \pi_i + \tau_j + \epsilon_{ij}$, and asks whether the condition part is
+% large compared to the leftover noise, $F = MS_{condition}/MS_{error}$. It
+% assumes the three pairwise gaps are similarly variable (*sphericity*,
+% checked with Mauchly's test; when violated, the degrees of freedom are
+% shrunk with the Greenhouse-Geisser correction so the test does not become
+% falsely confident). The Friedman test instead ranks each person's own
+% three values 1st/2nd/3rd and checks whether those rankings are consistent
+% across people rather than random.
+
+%% 5.3 Six cells -- does mode matter, does assistance matter, do they interact?
+% *Used for:* the full mode x assistance grid (Q3).
 %
-% *Learning and order*: for every participant the metric is averaged over the
-% two worlds of every slot (6 values) and a least-squares line is fitted; the
-% slope (change per slot) is tested against zero over the participants (t-test
-% and Wilcoxon). The block effect compares slots 1-3 with slots 4-6. Because
-% control mode was blocked, the Joystick-minus-Clutch difference of the
-% participants who started with Clutch is compared with that of the
-% participants who started with Joystick (Mann-Whitney rank-sum test): if
-% these differ, part of the "mode effect" is practice.
+% *In plain words:* this asks three separate questions from one model: (1)
+% averaging over assistance, does *mode* matter? (2) averaging over mode,
+% does *assistance* matter? (3) does the effect of assistance *depend on*
+% which mode you are in -- i.e. does blending help more in Joystick than in
+% Clutch, or the same in both? That third question is the *interaction*, and
+% it is the one that a simple "compare each factor separately" analysis
+% would miss entirely. Each of the three questions gets its own
+% Greenhouse-Geisser-corrected p-value and effect size. When the interaction
+% is significant, the report also breaks it down further ("assistance within
+% Clutch only", "assistance within Joystick only") because the single
+% overall "assistance effect" number would be misleading on its own. A
+% Friedman test across all six cells together answers the plainest version
+% of the question, "do the six cells differ at all", and the 15 possible
+% pairwise comparisons (Holm-corrected) say exactly which cells differ from
+% which.
+
+%% 5.4 Consistency -- who agrees with themselves more?
+% *Used for:* Q4 (mode) and Q5 (assistance).
+%
+% *In plain words:* every test so far asked "which condition has the better
+% *average*?" This one asks a completely different question: "which
+% condition gives more *similar* results from one participant to the next?"
+% A condition where everybody scores about the same is more *predictable* --
+% useful to know even when the average is a tie. This is measured as the
+% spread (standard deviation) of the 12 participants' own averages under
+% each condition; a shorter spread means more agreement between people.
+%
+% Two conditions' spreads are compared with the *Pitman-Morgan test*: a
+% clever trick where, instead of comparing the two spreads directly, you
+% look at the *sum* and the *difference* of each person's two values; if the
+% two original conditions truly have equal spread, that sum and that
+% difference will be statistically unrelated (correlation exactly 0), so the
+% test simply checks whether they are. *Kendall's W* (Section 2.2) answers a
+% related but different question on the same data: not "how spread out are
+% the numbers", but "do participants at least *agree on which condition is
+% better*, even if by different margins."
+%
+% *In your data:* task time is significantly more consistent in Joystick
+% than in Clutch (participant-to-participant spread 33.7 vs 63.5,
+% Pitman-Morgan Holm p = 0.005) -- even though Section 5.1 found no
+% significant *average* time difference between the two modes. Joystick
+% gives more predictable task times, without necessarily being faster.
+
+%% 5.5 Learning and order -- did people get better, and does the order matter?
+% *Used for:* Q6.
+%
+% *In plain words:* two separate concerns share this section. First,
+% *learning*: across the six slots of the experiment (slot 1 = the very
+% first condition a participant met), does performance drift up or down as
+% people get more practice? For each participant a straight line is fitted
+% through their own six slot-averages, giving one *slope* per person (their
+% personal rate of improvement or decline); those 12 personal slopes are
+% then tested against zero exactly like the paired gaps in Section 5.1 --
+% "do the slopes mostly lean toward improvement, or are they scattered
+% around flat."
+%
+% Second, *order bias*: because every participant did all three cells of one
+% control mode before switching to the other, anyone who happened to meet
+% Joystick second had three extra conditions of practice behind them before
+% ever trying it -- which could quietly inflate an apparent "Joystick is
+% better" result that is really just "practice is better". To check this,
+% participants are split into two groups by which mode they met first, and
+% the Joystick-minus-Clutch gap of the "Clutch-first" group is compared with
+% that of the "Joystick-first" group (Mann-Whitney rank-sum test, the
+% two-independent-groups cousin of the Wilcoxon test from Section 5.1, used
+% here because these two groups are made of *different* people, not paired).
+% If the two groups tell a different story, part of the mode comparison in
+% Q1 is practice, not the mode itself -- the report flags this explicitly
+% whenever it happens.
+%
+% *In your data:* task time shows no significant slope across the session
+% (p = 0.077, borderline) but a significant *block* effect -- the three
+% slots of the second-met mode are faster than the first three (p = 0.045)
+% -- and the mode-order check comes back clean (p = 0.093, no significant
+% dependence on which mode came first), so the Q1 mode comparison for task
+% time is not contaminated by practice.
 
 %% 6. Overview: which condition is best, per family
 % One figure per family: the six cells (colour and number = mean family
