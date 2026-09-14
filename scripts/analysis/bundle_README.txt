@@ -5,6 +5,12 @@ WHAT THIS IS
     Everything needed to analyse the study on any PC with MATLAB and the
     Statistics and Machine Learning Toolbox. No ROS, no Python, no path editing.
 
+JUST WANT TO LOOK  (no MATLAB needed)
+    Open prebuilt/study_paper_figures.pdf. It is the finished short report --
+    every paper-style figure with its explanation -- exactly as built on the
+    export machine from the run named in prebuilt/BUILT_FROM.txt.
+    prebuilt/summary.pdf is the one-page-per-figure scorecard of the same run.
+
 HOW TO USE  (group analysis -- the study results)
     1. Copy this whole folder anywhere on the other PC.
     2. In MATLAB, use the "Browse for folder" button to open this folder
@@ -25,12 +31,15 @@ HOW TO USE  (group analysis -- the study results)
     5. Run  build_report  for the LONG read: study_report.mlx (executed, with
        every figure) plus .html and .pdf in that results folder. It explains
        every metric, every test and every figure of the full analysis.
+    Afterwards, START_HERE reopens the latest run: loads results.mat into the
+    Workspace, draws the headline figures as windows and opens the PDF.
 
 HOW TO USE  (one participant)
     Open analyze_participant.m and press Run; leave PARTICIPANT = '' and a
     pick-list dialog appears.
 
 WHAT IS IN HERE
+    START_HERE.m             reopens the latest run (workspace + figures + PDF)
     run_study_analysis.m     group statistics for Q1-Q6 (main script)
     study_summary.m          short publication-style output (summary/ folder)
     fig_summary_*.m          scorecard, forest plots, cell matrix, checks
@@ -60,6 +69,7 @@ WHAT IS IN HERE
     manifest.mat             every trial, every summary metric  <- the analysis reads this
     manifest.csv             the same table as plain text (Excel, pandas, R)
     participant_schedule.csv the order in which every participant met the conditions
+    prebuilt/                PDF/HTML reports of the latest run, readable without MATLAB
 
 WHAT IS *NOT* IN HERE
     The per-trial raw time series (mat/ folder, ~29 MB per trial, ~4.5 GB total).

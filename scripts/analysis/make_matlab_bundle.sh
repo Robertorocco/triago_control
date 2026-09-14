@@ -22,6 +22,18 @@ cp "$EXPORT_DIR/manifest.mat" "$EXPORT_DIR/manifest.csv" "$OUT"/
 cp "$SRC/../participant_schedule.csv" "$OUT"/       # trial order, needed by the group analysis
 cp "$SRC/../bundle_README.txt" "$OUT/README.txt"
 
+# Ship the latest built reports too, so the result can be read without MATLAB.
+LATEST="$EXPORT_DIR/analysis_results/latest.txt"
+if [ -f "$LATEST" ]; then
+    RES="$(cat "$LATEST")"
+    rm -rf "$OUT/prebuilt"; mkdir -p "$OUT/prebuilt"
+    for f in study_paper_figures.pdf study_paper_figures.html summary/summary.pdf summary/summary.txt; do
+        [ -f "$RES/$f" ] && cp "$RES/$f" "$OUT/prebuilt/"
+    done
+    basename "$RES" > "$OUT/prebuilt/BUILT_FROM.txt"
+fi
+
+rm -f "$OUT.zip"    # zip -r updates in place and would keep stale entries
 ( cd "$(dirname "$OUT")" && zip -qr "$(basename "$OUT").zip" "$(basename "$OUT")" )
 
 echo "bundle  -> $OUT  ($(du -sh "$OUT" | cut -f1))"
