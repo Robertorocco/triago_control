@@ -17,11 +17,14 @@ HOW TO USE  (group analysis -- the study results)
        figure each: scorecard, forest plots, cell matrix, checks),
        summary.txt (plain-language verdict) and summary_table.csv. This is
        the short, publication-style output; study_summary regenerates it.
-    4. Run  build_report  to turn study_report.m into the Live Script
-       study_report.mlx (executed, with every figure) plus study_report.html
-       and study_report.pdf in that results folder. Open study_report.mlx to
-       read the full report: it explains every metric, every test and every
-       figure.
+    4. Run  build_paper_figures  for the SHORT read: paper-style bar charts
+       (one quantity per panel, six conditions, error bars, p-value brackets)
+       with every figure explained in plain words. Writes
+       study_paper_figures.pdf / .html / .mlx into the results folder. Open
+       the PDF -- that is the whole document, nothing else has to be run.
+    5. Run  build_report  for the LONG read: study_report.mlx (executed, with
+       every figure) plus .html and .pdf in that results folder. It explains
+       every metric, every test and every figure of the full analysis.
 
 HOW TO USE  (one participant)
     Open analyze_participant.m and press Run; leave PARTICIPANT = '' and a
@@ -31,8 +34,12 @@ WHAT IS IN HERE
     run_study_analysis.m     group statistics for Q1-Q6 (main script)
     study_summary.m          short publication-style output (summary/ folder)
     fig_summary_*.m          scorecard, forest plots, cell matrix, checks
+    study_paper_figures.m    the short visual summary (source); build_paper_figures makes the .mlx
+    build_paper_figures.m    .m -> .mlx -> html/pdf  (short read)
+    fig_paper_panels.m       paper-style panels: six cells, SEM, p-value brackets
+    paper_stats_tables.m     the effects / significant-pairs tables behind them
     study_report.m           the report source (text + code); build_report makes the .mlx
-    build_report.m           .m -> .mlx -> html/pdf
+    build_report.m           .m -> .mlx -> html/pdf  (long read)
     load_study_table.m       tidy per-trial table, completeness rule, trial order
     study_metric_spec.m      every metric: label, unit, direction, family, scope
     study_families.m         the metric families
