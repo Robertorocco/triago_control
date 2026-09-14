@@ -30,7 +30,9 @@ for i = 1:numel(metrics)
         end
     end
 
-    if ~isempty(R.pairs)
+    % A skipped omnibus (constant metric, too few participants) leaves an empty
+    % pairs table with no columns, so the column must be checked, not just size.
+    if ~isempty(R.pairs) && ismember('significant', R.pairs.Properties.VariableNames)
         sig = R.pairs(R.pairs.significant, :);
         for j = 1:height(sig)
             prows(end + 1, :) = {shortLabel(label), sig.a(j) + " vs " + sig.b(j), ...

@@ -77,10 +77,17 @@ sem = R.sds(:)' / sqrt(max(n, 1));
 
 lo = min(vals - sem, [], 'omitnan');
 hi = max(vals + sem, [], 'omitnan');
-span = max(hi - lo, eps);
-% Clip only when zero is outside the data and the band is narrow next to its
-% own distance from zero -- otherwise every bar would look identical.
-clipped = ~(lo <= 0 && hi >= 0) && span < 0.25 * max(abs([lo hi]));
+rawspan = hi - lo;
+% A metric that is identical in every condition (e.g. an outcome that always
+% happened) has no spread to scale by; give it a nominal one and draw from zero
+% so the equal bars read as equal instead of as a degenerate axis.
+flat = ~(rawspan > 0);
+if flat, span = max(0.1 * max(abs([lo hi])), 0.1); else, span = rawspan; end
+% Clip when zero is outside the data and either the whole metric is negative
+% (bars from zero would hang downward and read as inverted against the other
+% panels) or the band is narrow next to its own distance from zero (bars from
+% zero would look identical). Clipping is always labelled under the title.
+clipped = ~flat && ~(lo <= 0 && hi >= 0) && (hi < 0 || rawspan < 0.25 * max(abs([lo hi])));
 if clipped, base = lo - 0.55 * span; else, base = 0; end
 
 hold(ax, 'on');
@@ -94,7 +101,13 @@ end
 % downward from zero (an all-negative metric) is the zero line, not the bars.
 ytop = max([hi, base]);
 top = ytop;
-sig = R.pairs(R.pairs.significant, :);
+% A metric the omnibus test skipped (constant, or too few participants) comes
+% back with an empty pairs table that has no columns at all.
+if ~isempty(R.pairs) && ismember('significant', R.pairs.Properties.VariableNames)
+    sig = R.pairs(R.pairs.significant, :);
+else
+    sig = table();
+end
 if ~isempty(sig)
     ia = arrayfun(@(s) find(cells == s, 1), sig.a);
     ib = arrayfun(@(s) find(cells == s, 1), sig.b);
@@ -130,14 +143,25 @@ yhi = max([base, top]);
 rngy = max(yhi - ylo, eps);
 ylo = ylo - 0.02 * rngy; yhi = yhi + 0.06 * rngy;
 
-xline(ax, 3.5, '-', 'Color', [0.75 0.75 0.75], 'LineWidth', 0.8, 'HandleVisibility', 'off');
+% Mode split is read from the result, so a 4-cell (blending-only) metric is
+% grouped and divided in the same way as the full six.
+if isfield(R, 'modes'), modes = string(R.modes); else, modes = extractBefore(cells, 2); end
+isJ = modes(:)' == "J";
+bnd = find(diff(isJ) ~= 0, 1);
+if ~isempty(bnd)
+    xline(ax, bnd + 0.5, '-', 'Color', [0.75 0.75 0.75], 'LineWidth', 0.8, 'HandleVisibility', 'off');
+end
 ylim(ax, [ylo, yhi]);
 xlim(ax, [0.4, numel(vals) + 0.6]);
 xticks(ax, 1:numel(vals)); xticklabels(ax, cellstr(cells));
-text(ax, 2, ylo, 'CLUTCH', 'HorizontalAlignment', 'center', 'VerticalAlignment', 'top', ...
-     'FontSize', fs - 2, 'Color', studyplot.color("C"), 'FontWeight', 'bold');
-text(ax, 5, ylo, 'JOYSTICK', 'HorizontalAlignment', 'center', 'VerticalAlignment', 'top', ...
-     'FontSize', fs - 2, 'Color', studyplot.color("J"), 'FontWeight', 'bold');
+if any(~isJ)
+    text(ax, mean(find(~isJ)), ylo, 'CLUTCH', 'HorizontalAlignment', 'center', ...
+         'VerticalAlignment', 'top', 'FontSize', fs - 2, 'Color', studyplot.color("C"), 'FontWeight', 'bold');
+end
+if any(isJ)
+    text(ax, mean(find(isJ)), ylo, 'JOYSTICK', 'HorizontalAlignment', 'center', ...
+         'VerticalAlignment', 'top', 'FontSize', fs - 2, 'Color', studyplot.color("J"), 'FontWeight', 'bold');
+end
 ax.XRuler.TickLabelGapOffset = 12;
 
 yl = label;
@@ -147,5 +171,6 @@ grid(ax, 'on'); ax.YGrid = 'on'; ax.XGrid = 'off';
 
 sub = studyplot.dirtext(d) + sprintf(" | n=%d", n);
 if clipped, sub = sub + " | clipped axis"; end
+if flat, sub = sub + " | identical in every condition"; end
 subtitle(ax, sub, 'FontSize', fs - 2, 'Color', [0.35 0.35 0.35]);
 end

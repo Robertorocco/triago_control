@@ -176,7 +176,88 @@ end
 % shape of the result, then look back at panel 3 for the specifics.
 
 fig_paper_panels(S, items, SUMMARY_METRICS, 'cols', 1, 'panel_h', 240, 'name', 'summary scores');
-%% 6. What this page does not tell you
+%% 6. Every remaining metric
+% Sections 3 to 5 showed the headline quantities. Everything else the analysis
+% measures is below, grouped by family and drawn and read exactly the same way.
+% Nothing is cherry-picked: every metric that can be put on a six-condition
+% chart is here.
+%
+% *One group cannot be drawn this way.* The haptic force metrics (mean, peak,
+% impulse) and the clutch-button metrics are absent on purpose: force is
+% rendered by a different law in each control mode, and the clutch button only
+% exists in clutch mode. Putting either on a chart that compares clutch against
+% joystick would compare the apparatus, not the operator. They are analysed
+% _within_ each mode in the full report (|study_report|) — that is where to look
+% for the effort question in the clutch column specifically.
+%% 6a. Time and effectiveness — the rest
+% *Time under human control* is the task time minus the seconds the robot spent
+% performing the grasp by itself: the part the operator is actually responsible
+% for. *Path efficiency* is straight-line distance divided by distance actually
+% travelled — 1.0 would be a perfect straight line, lower means more wandering.
+% *Mean hand speed* is how fast the active hand moved. *Time in autonomous grasp
+% phases* is how long the robot drove itself; it is neither good nor bad, it
+% just says how much of the trial was handed over to the machine.
+
+fig_paper_panels(S, items, ["teleop_time_s", "ee_path_efficiency", ...
+                 "ee_speed_mean_mps", "autonomy_grasp_time_s"], ...
+                 'cols', 1, 'panel_h', 235, 'name', 'time and effectiveness (rest)');
+%% 6b. Safety — the rest
+% *Near-miss time fraction* is the share of the operator-driven trial spent
+% closer than 5 cm to something, and *near-miss episodes* counts how many
+% separate times it dipped below that line — one long approach and ten brief
+% scares look very different to an operator but can average the same. *Mean
+% barrier multiplier* is how hard the safety filter was pushing on average, not
+% just whether it was on.
+
+fig_paper_panels(S, items, ["safety_nearmiss_frac", "safety_nearmiss_episodes", ...
+                 "cbf_lambda_mean"], 'cols', 1, 'panel_h', 235, 'name', 'safety (rest)');
+%% 6c. Motion quality — the rest
+% *Mean tracking slack* is how far the robot was allowed to fall behind the
+% reference it was given: large slack means the controller was relaxing the
+% tracking constraint to stay feasible, usually because it was busy avoiding
+% something. *Peak commanded joint rate* is the single fastest joint command in
+% the trial — the spikes that a mean hides.
+
+fig_paper_panels(S, items, ["slack_mean", "qdot_cmd_max"], ...
+                 'cols', 1, 'panel_h', 250, 'name', 'motion quality (rest)');
+%% 6d. Did the robot understand what the operator wanted?
+% These describe the intent estimate: the robot continuously guesses which
+% object the operator is reaching for, and these say how well that went.
+%
+% *Peak intent confidence* is the highest probability it ever assigned to a
+% single goal (1.0 = certain). *Time to confident intent* is how many seconds
+% until it first passed 80% confidence — lower is better, and it is blank for
+% trials where it never got there. *Intent ever confident* is the fraction of
+% trials in which it passed that line at all, so 1.0 means "always worked out
+% eventually" and 0.5 means "half the time it never became sure".
+
+fig_paper_panels(S, items, ["belief_max_prob", "belief_time_to_conf_s", ...
+                 "belief_confident_ever"], 'cols', 1, 'panel_h', 235, 'name', 'intent understanding');
+%% 6e. How well did operator and robot agree? (blending conditions only)
+% These four exist only where the robot is actually blending its motion into the
+% command — the *B* and *FB* conditions. The *F* conditions have no blending to
+% measure, so these charts have *four bars, not six*.
+%
+% *User-autonomy agreement* is how closely the direction the operator was
+% pushing matched the direction the robot wanted to go (1.0 = same direction,
+% 0 = perpendicular): high means the help was pulling with the operator rather
+% than against them. *Mean autonomy authority* is how much of the motion the
+% robot contributed on average (0 = all operator, 1 = all robot), and
+% *autonomy-led time* is the share of the trial where it contributed more than
+% half. *User actively driving* is how much of the trial the operator was
+% actually commanding something rather than holding still.
+
+fig_paper_panels(S, items, ["agreement_mean_cos", "alpha_mean", ...
+                 "alpha_autonomy_frac", "user_active_frac"], ...
+                 'cols', 1, 'panel_h', 235, 'name', 'assistance quality');
+%% 6f. The remaining family scores
+% The same z-scored, higher-is-better summaries as section 5, for the three
+% families not shown there. *Human effort* here rests on the joint-rate demand
+% only, for the cross-mode reason given at the top of this section.
+
+fig_paper_panels(S, items, ["fam_human_effort", "fam_intent_understanding", ...
+                 "fam_assistance_quality"], 'cols', 1, 'panel_h', 235, 'name', 'remaining family scores');
+%% 7. What this page does not tell you
 % * *The study is not finished.* Conditions that look close today can separate
 % once more participants are in, and pairs that look significant can lose that
 % status. Nothing here is final.
