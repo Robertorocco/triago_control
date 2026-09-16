@@ -4,6 +4,8 @@ Before doing any work in this repo, read `.kiro/context.md` — it holds the cur
 
 It is Claude's responsibility to keep `.kiro/context.md` accurate and up to date as work happens in this repo: update it when architecture changes, features land, or decisions are made, so a new chat can pick up full context from this file alone. **Keep it short** — see its own §0 for the length rule; don't let entries grow back into essays.
 
+**If the session is on a new machine** (data root missing, MATLAB not shared), read `.kiro/context.md` §15.8 first: it lists what lives outside git, the pipeline order, and how to attach to the user's MATLAB.
+
 **If the chat is dedicated to thesis writing (editing `thesis/technical_report.tex`)**, also read `thesis/master_thesis_rules.md` first — PRISMA Lab's official style/structure checklist, which governs that file. All thesis content (source, bibliography, figures, cited-paper notes) lives under `thesis/`. Ignore this for ordinary code work in this repo.
 
 ## Orchestration
