@@ -112,19 +112,19 @@ for i = 1:height(it)
     if isfield(S.Q1, nm)
         R = S.Q1.(nm);
         if R.significant, L(end + 1) = sprintf("* %s: %s is better than %s  (%s, |%s| = %.2f, %s effect)", lab, studyplot.levelname(R.better), studyplot.levelname(other(R.better)), fmt_p(R.p), R.effect_name, abs(R.effect), effect_band(bandkind(R.effect_name), R.effect));
-        else, open(end + 1) = sprintf("* %s: Clutch vs Joystick not separated yet  (%s, |%s| = %.2f)", lab, fmt_p(R.p), R.effect_name, abs(R.effect)); end
+        else, open(end + 1) = sprintf("* %s: Clutch vs Joystick not separated  (%s, |%s| = %.2f)", lab, fmt_p(R.p), R.effect_name, abs(R.effect)); end
     end
     if isfield(S.Q2, nm)
         R = S.Q2.(nm);
         if R.test_family == "paired2"
             if R.significant, L(end + 1) = sprintf("* %s: %s is better than %s  (%s, |%s| = %.2f)", lab, R.better, other2(R.better), fmt_p(R.p), R.effect_name, abs(R.effect));
-            else, open(end + 1) = sprintf("* %s: B vs FB not separated yet  (%s)", lab, fmt_p(R.p)); end
+            else, open(end + 1) = sprintf("* %s: B vs FB not separated  (%s)", lab, fmt_p(R.p)); end
         else
             if R.significant
                 sig = R.pairs(R.pairs.significant, :); pp = strings(height(sig), 1);
                 for q = 1:height(sig), if sig.mean_diff(q) * 1 > 0, pp(q) = sig.a(q) + " > " + sig.b(q); else, pp(q) = sig.b(q) + " > " + sig.a(q); end, end
                 L(end + 1) = sprintf("* %s: assistance matters, ranking %s  (%s, %s = %.2f); confirmed pairs: %s", lab, strjoin(R.ranking, " > "), fmt_p(R.p), R.effect_name, R.effect, ternary(isempty(pp), "none after Holm", strjoin(pp, ", ")));
-            else, open(end + 1) = sprintf("* %s: F / B / FB not separated yet  (%s)", lab, fmt_p(R.p)); end
+            else, open(end + 1) = sprintf("* %s: F / B / FB not separated  (%s)", lab, fmt_p(R.p)); end
         end
     end
     if isfield(S.Q3, nm)
@@ -135,7 +135,7 @@ for i = 1:height(it)
     if isfield(S.Q5, nm) && S.Q5.(nm).significant, L(end + 1) = sprintf("* %s: %s gives more consistent results across participants  (Pitman-Morgan %s)", lab, S.Q5.(nm).most_consistent, fmt_p(S.Q5.(nm).p)); end
 end
 L(end + 1) = "";
-L(end + 1) = "NOT DEMONSTRATED YET (more participants may or may not change this)";
+L(end + 1) = "NOT DEMONSTRATED (no significant difference in the full data set)";
 L(end + 1) = "----------------------------------------------------------------------";
 L = [L(:); open(:)];
 L(end + 1) = "";

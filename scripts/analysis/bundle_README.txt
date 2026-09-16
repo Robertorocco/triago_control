@@ -78,9 +78,10 @@ WHAT IS *NOT* IN HERE
     If you want that too, copy the mat/ folder from the export machine into this
     folder; load_trial will then find it automatically.
 
-KEEPING IT UP TO DATE
-    After new participants are recorded, the export regenerates manifest.mat.
-    Copy the new manifest.mat over the old one here (and the schedule if it
-    changed), then re-run run_study_analysis and build_report. Only complete
+IF THE DATA ARE RE-EXPORTED
+    Data collection is complete (24 participants, 288 trials; P00 is the pilot
+    and is excluded). Should the export ever be regenerated, copy the new
+    manifest.mat over the old one here (and the schedule if it changed), then
+    re-run run_study_analysis and build_paper_figures. Only complete
     participants (all 12 trials, present in the schedule) are analysed; the
     others are listed with the reason. Every run keeps its own results folder.

@@ -2,7 +2,7 @@
 % This Live Script is the readable report of the analysis produced by
 % |run_study_analysis.m|. It explains what every performance metric means,
 % how every statistical test works and how to read every figure, and then
-% answers the study questions on the participants analysed so far.
+% answers the study questions on the full set of complete participants.
 %
 % *How to use it.* Run |run_study_analysis| first (it writes a time-stamped
 % results folder). Then run this script: by default it loads the most recent
@@ -70,7 +70,7 @@ disp(meta.excluded)
 % *If you read nothing else, read this table:*
 disp(cell2table({ ...
  "p < 0.05  (marked * ** ***)"                 "The gap is unlikely to be pure luck -- treat it as real."
- "p >= 0.05  (marked n.s.)"                    "Not enough evidence with this many participants. This does NOT mean the conditions are equal -- it means we could not tell them apart yet."
+ "p >= 0.05  (marked n.s.)"                    "Not enough evidence with this many participants. This does NOT mean the conditions are equal -- it means we could not tell them apart."
  "effect size: small"                          "Real, but modest in everyday terms."
  "effect size: medium / large"                 "A gap big enough that a person would actually notice or care about it."
  "95% CI does not include 0"                    "Same conclusion as p < 0.05, plus a plausible range for how big the true gap is."
@@ -89,7 +89,7 @@ disp(cell2table({ ...
 % *This is the single most common misreading of statistics, so read it
 % twice:* a p-value above 0.05 does *not* prove the two conditions are equal.
 % It means the evidence was not strong enough, with only this many
-% participants, to rule out luck. "Not significant" = "not demonstrated yet",
+% participants, to rule out luck. "Not significant" = "not demonstrated",
 % never "proven the same".
 %
 % *In your data:* task time, Clutch vs Joystick, gives p = 0.380 -- not

@@ -10,9 +10,9 @@
 %      Q5  which assistance is most consistent across participants
 %      Q6  learning / order effects along the experiment
 %      QW  rack vs shield world (supplementary)
-%    Everything is written to a time-stamped folder so that results can be
-%    kept and compared when more participants are added. Re-run this script:
-%    nothing has to be edited when new participants are exported.
+%    Everything is written to a time-stamped folder so that runs can be kept
+%    and compared. Re-run this script after any re-export: nothing has to be
+%    edited.
 %
 %  HOW TO USE
 %    Open the folder that holds manifest.mat (or the bundle folder) as the
