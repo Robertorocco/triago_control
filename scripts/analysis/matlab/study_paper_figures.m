@@ -87,6 +87,111 @@ if ~isempty(meta.excluded)
     fprintf('\nExcluded from the analysis:\n');
     disp(meta.excluded)
 end
+%% 1b. How the numbers were produced — and whether the data allow it
+% *The design.* Every participant did every condition: a *within-subject
+% 2 × 3 factorial* (control mode × assistance), each cell once in each of the
+% two scenes, so 12 trials per person and 288 in all, with no missing cell.
+% The unit of analysis is the *participant*, not the trial: the two scenes are
+% averaged first, so each person contributes exactly one number per condition
+% (24 numbers per bar). This is what makes every comparison a paired one and
+% avoids counting the same person twice. The order was fully counterbalanced:
+% half the participants did the clutch block first and half the joystick block
+% first, and inside a block the three kinds of help were rotated so that every
+% one of the twelve possible orders was used by exactly two participants — each
+% kind of help came first, second and third equally often.
+%
+% *The tests, and why these.* This is the standard toolkit for a within-subject
+% factorial study of this size, the same family of tests that robotics and
+% human-robot-interaction user studies conventionally report, and results are
+% given the way the APA reporting guidelines ask for them: the test statistic
+% with its degrees of freedom, the exact p-value, and an effect size.
+%
+% * *Two-way repeated-measures ANOVA* (Mode × Assistance) answers whether each
+% factor matters and whether they interact (section 4). Its one assumption
+% specific to repeated measures — sphericity, equal variance of every pairwise
+% difference — is never taken for granted: the *Greenhouse–Geisser* correction
+% is applied to every factor with more than two levels, which is the
+% conservative default. Partial eta squared is its effect size.
+% * *Rank-based companions are always computed alongside*: the *Friedman* test
+% as the omnibus "do the six conditions differ at all", *Wilcoxon signed-rank*
+% tests for every pair of conditions (these are the brackets on the panels), and
+% *Kendall's W* for how consistently participants ranked the conditions. They
+% make no assumption about the shape of the data and are the ones reported
+% whenever an assumption check fails.
+% * *Assumption checks decide which test is reported.* For every comparison the
+% differences are tested for normality (*Lilliefors*), and three-level factors
+% for sphericity (*Mauchly*); if either fails, the rank-based result is the
+% one quoted. Both are always in the full report.
+% * *Multiple comparisons* are controlled with the *Holm* step-down procedure,
+% which keeps the chance of even one false positive within a family of pairs
+% at 5%. Correction is applied within each panel (its 15 pairs), which is the
+% usual practice; it is not applied across the whole document.
+% * *Effect sizes and confidence intervals* accompany every test: partial eta
+% squared, Cohen's dz, rank-biserial r, Kendall's W, and bootstrap confidence
+% intervals for the mean differences. Significance is at α = 0.05, two-sided.
+%
+% *Is the data shaped for this?* Mostly yes, and where it is not the pipeline
+% already switches test. The numbers below are computed from the final data:
+
+CELLS6 = ["CF" "CB" "CFB" "JF" "JB" "JFB"];
+nc = arrayfun(@(c) sum(trial.cell == c), CELLS6);
+mo = unique(trial(:, {'participant', 'mode_order'}));
+fprintf('Trials per condition            : %s   (balanced, no missing cell)\n', mat2str(nc));
+fprintf('Mode order                      : %d clutch-first, %d joystick-first\n', ...
+        sum(mo.mode_order == "C_first"), sum(mo.mode_order == "J_first"));
+n1 = 0; nn1 = 0; ag1 = 0;
+for nm = string(fieldnames(S.Q1))'
+    r = S.Q1.(nm); if ~isfield(r, 'p_t') || isnan(r.p_t), continue; end
+    n1 = n1 + 1; nn1 = nn1 + (r.p_normality < 0.05);
+    ag1 = ag1 + ((r.p_t < alpha) == (r.p_wilcoxon < alpha));
+end
+n2 = 0; sph = 0; ag2 = 0;
+for nm = string(fieldnames(S.Q2))'
+    r = S.Q2.(nm); if r.test_family ~= "rm_oneway" || isnan(r.p_anova_gg), continue; end
+    n2 = n2 + 1; sph = sph + (~isnan(r.p_mauchly) && r.p_mauchly < alpha);
+    ag2 = ag2 + ((r.p_anova_gg < alpha) == (r.p_friedman < alpha));
+end
+n3 = 0; ag3 = 0;
+for nm = string(fieldnames(S.Q3))'
+    r = S.Q3.(nm); if isempty(r.effects), continue; end
+    n3 = n3 + 1; ag3 = ag3 + (any(r.effects.p_gg < alpha) == (r.p_friedman < alpha));
+end
+fprintf('Two-condition comparisons       : %d, of which %d had non-normal differences (Wilcoxon reported there)\n', n1, nn1);
+fprintf('   t-test and Wilcoxon agree on significance in %d of %d\n', ag1, n1);
+fprintf('Three-level assistance tests    : %d, of which %d violated sphericity (Friedman reported there)\n', n2, sph);
+fprintf('   ANOVA and Friedman agree on significance in %d of %d\n', ag2, n2);
+fprintf('Six-cell tests                  : %d; ANOVA (any effect) and Friedman agree in %d of %d\n', n3, ag3, n3);
+fprintf('Smallest paired effect detectable with 80%% power at n = 24: Cohen dz = %.2f (moderate)\n', ...
+        sampsizepwr('t', [0 1], [], 0.8, height(mo)));
+%%
+% *What that means.* The design is complete and balanced, the order is
+% counterbalanced, and normality and sphericity fail only in a minority of
+% cases — and *where they fail the rank-based test is the one reported*. The
+% decisive check is the agreement count: the parametric and the rank-based
+% test reach the same verdict in almost every comparison, so *no conclusion
+% on this page depends on which test was chosen*. Where a metric is bounded
+% or heavy-tailed (fractions near their limit, the barrier multiplier) the
+% document uses a robust version or says so at the panel.
+%
+% *What is not ideal, said plainly.*
+%
+% * The two scenes are averaged, so a scene × condition interaction (help that
+% works in one scene but not the other) is not tested; the scene itself is
+% compared in the full report and was easier for everyone, which does not bias
+% the comparisons here.
+% * Inside each slot the shield scene always came before the rack scene, so
+% scene order is not counterbalanced; the analysis averages over scenes before
+% any order test for that reason.
+% * Two trials per condition per person is a small number; the per-person
+% averages are correspondingly noisy, which the 24 participants compensate
+% for at the group level but not for any single participant.
+% * Learning across the twelve trials is real and mode was blocked, so the
+% mode comparison on time-based quantities is partly a practice effect
+% (section 7).
+% * With 24 people the study detects moderate paired effects (dz ≈ 0.6) and
+% larger; a small effect can be missed. "Not significant" below means "not
+% shown", not "equal".
+% * The subjective side (workload, trust, preference) is not analysed here.
 %% 2. How to read every figure on this page
 % All the figures share one layout, so learning it once is enough:
 %
