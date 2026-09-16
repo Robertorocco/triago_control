@@ -102,6 +102,8 @@ for k = 1:height(spec)
             v = wmean2(getnum(Traw, "right_" + nm), getnum(Traw, "left_" + nm), wR, wL);
         case "max"
             v = max(getnum(Traw, "right_" + nm), getnum(Traw, "left_" + nm), 'omitnan');
+        case "min"
+            v = min(getnum(Traw, "right_" + nm), getnum(Traw, "left_" + nm), 'omitnan');
         case "derived"
             v = derived_metric(nm, trial, Traw);
         otherwise
@@ -152,6 +154,12 @@ switch nm
         v = s ./ p; v(p <= 1e-6) = NaN;
     case "belief_confident_ever"
         v = double(~isnan(getnum(Traw, 'right_belief_time_to_conf_s')));
+    case "cbf_active_s"
+        % Absolute seconds, so a fraction that only rose because the trial got
+        % shorter can be told apart from more time actually spent at the barrier.
+        v = trial.cbf_active_frac .* getnum(Traw, 'right_duration_s');
+    case "safety_nearmiss_s"
+        v = trial.safety_nearmiss_frac .* trial.teleop_time_s;
     otherwise
         error('load_study_table:derived', 'no rule for derived metric %s', nm);
 end

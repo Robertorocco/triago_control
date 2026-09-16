@@ -18,7 +18,8 @@ Message-array layouts consumed (confirmed against the publishing nodes):
   /qp_debug/qdot_measured(14): [R_joint(7) L_joint(7)] -- EMA-filtered ground truth
   /qp_debug/slacks (2)   : [|slack_R| |slack_L|]
   /qp_debug/lambda_cbf(2): [lambda_R lambda_L]
-  /qp_debug/min_distance : SCALAR closest pair over ALL pairs -- no arm attribution
+  /qp_debug/min_distance : SCALAR closest pair over ALL pairs -- no arm attribution,
+                           and it includes a carried cylinder (legacy only)
   /qp_debug/safety_margin(2): [h_soft_R - d_safe_R, h_soft_L - d_safe_L], PER ARM;
                            NaN for an arm with no pair inside DISTANCE_FILTER_THRESHOLD
   /qp_debug/d_safe_dynamic(2): [d_safe_R d_safe_L] per-arm dynamic margin, so the
@@ -453,38 +454,55 @@ def compute_metrics(series: dict, metadata: dict | None = None,
     lam = series.get(T_LAMBDA_CBF)
     lcol = lam.col(f"d{_LAMBDA_IDX[arm]}") if lam else None
     if lcol is not None and len(lcol):
-        m["cbf_lambda_peak"] = round(float(np.nanmax(lcol)), 4)
-        m["cbf_lambda_mean"] = round(float(np.nanmean(lcol)), 4)
-        m["cbf_active_frac"] = round(float(np.nanmean(np.asarray(lcol) > sc.CBF_ACTIVE_LAMBDA)), 4)
+        lv = np.asarray(lcol, dtype=float)
+        active = lv > sc.CBF_ACTIVE_LAMBDA
+        m["cbf_lambda_peak"] = round(float(np.nanmax(lv)), 4)
+        m["cbf_lambda_mean"] = round(float(np.nanmean(lv)), 4)
+        m["cbf_active_frac"] = round(float(np.nanmean(active)), 4)
+        # The multiplier is heavy-tailed (a hard barrier fight spikes it by 1e3-1e6
+        # for seconds), so the mean is owned by the worst second; the median of the
+        # active samples is the typical push and is what the analysis compares.
+        m["cbf_lambda_active_median"] = round(float(np.nanmedian(lv[active])), 4) if np.any(active) else nan
     else:
         m["cbf_lambda_peak"] = m["cbf_lambda_mean"] = m["cbf_active_frac"] = nan
+        m["cbf_lambda_active_median"] = nan
 
-    # --- safety (shared: min_distance is a single scalar over all pairs) ---
-    md = series.get(T_MINDIST)
+    # --- safety: this arm's clearance from the barrier's own SoftMin ---
+    # /qp_debug/min_distance is the raw scalar over ALL pairs and reads -3.5 cm
+    # whenever a cylinder is carried (the payload overlaps the gripper's own
+    # envelope), so it says nothing about obstacles. The barrier's per-arm
+    # clearance h_soft = safety_margin + d_safe_dynamic already excludes the
+    # carried cylinder's fused links and any bypassed target, and is 1.0 when no
+    # pair is within sensing range; its SoftMin is a smooth lower bound of the
+    # true nearest distance, i.e. conservative.
     ga = series.get(T_GRASP_ACTIVE)
-    if md and md.col("value") is not None and len(md):
-        d = np.asarray(md.col("value"), dtype=float)
-        thr = sc.NEAR_MISS_DISTANCE_M
-        # Exclude the autonomous-grasp window: min_distance is the raw signed
-        # distance over all pairs BEFORE the grasp CBF-bypass, and the grasped
-        # cylinder is in the collision set, so the intentional gripper<->cylinder
-        # overlap otherwise reads as a safety violation.
-        teleop = np.ones(len(d), dtype=bool)
+    smg = series.get(T_SAFETY)
+    dsf = series.get(T_DSAFE)
+    mcol = smg.col(f"d{_LAMBDA_IDX[arm]}") if smg else None
+    if mcol is not None and len(mcol) and dsf and dsf.col(f"d{_LAMBDA_IDX[arm]}") is not None:
+        h = np.asarray(mcol, dtype=float) + _zoh(smg.t, dsf.t, np.asarray(dsf.col(f"d{_LAMBDA_IDX[arm]}"), dtype=float))
+        rng = sc.CLEARANCE_RANGE_M
+        h = np.where(h >= 0.5, rng, np.minimum(h, rng))      # 1.0 sentinel -> "clear"
+        teleop = np.ones(len(h), dtype=bool)
         if ga and ga.col("value") is not None and len(ga):
-            g = _zoh(md.t, ga.t, np.asarray(ga.col("value")) > 0.5)
-            teleop = ~g.astype(bool)
+            teleop = ~_zoh(smg.t, ga.t, np.asarray(ga.col("value")) > 0.5).astype(bool)
         if not np.any(teleop):
-            teleop = np.ones(len(d), dtype=bool)
-        below = (d < thr) & teleop
-        m["safety_min_dist_m"] = round(float(np.nanmin(d[teleop])), 4)
-        m["safety_mean_dist_m"] = round(float(np.nanmean(d[teleop])), 4)
+            teleop = np.ones(len(h), dtype=bool)
+        below = (h < sc.NEAR_MISS_DISTANCE_M) & teleop
+        m["safety_min_dist_m"] = round(float(np.nanmin(h[teleop])), 4)
+        m["safety_mean_dist_m"] = round(float(np.nanmean(h[teleop])), 4)
         m["safety_nearmiss_frac"] = round(float(np.sum(below) / max(int(np.sum(teleop)), 1)), 4)
         m["safety_nearmiss_episodes"] = _rising_edges(below)
-        m["safety_min_dist_graspincl_m"] = round(float(np.nanmin(d)), 4)
     else:
         m["safety_min_dist_m"] = m["safety_mean_dist_m"] = nan
         m["safety_nearmiss_frac"] = nan
         m["safety_nearmiss_episodes"] = 0
+
+    # Legacy global scalar, kept only to document why it was replaced.
+    md = series.get(T_MINDIST)
+    if md and md.col("value") is not None and len(md):
+        m["safety_min_dist_graspincl_m"] = round(float(np.nanmin(np.asarray(md.col("value"), dtype=float))), 4)
+    else:
         m["safety_min_dist_graspincl_m"] = nan
 
     # --- human effort (shared: device-level) ---
@@ -548,13 +566,16 @@ def compute_metrics(series: dict, metadata: dict | None = None,
     if Pb is not None and Pb.size:
         row_max = np.nanmax(Pb, axis=1)
         m["belief_max_prob"] = round(float(np.nanmax(row_max)), 4)
+        # Peak confidence saturates near 1 in every trial; the time-average of the
+        # leading goal's probability is the discriminating quantity.
+        m["belief_mean_prob"] = round(float(np.nanmean(row_max)), 4)
         hits = np.where(row_max >= sc.BELIEF_CONFIDENCE)[0]
         m["belief_time_to_conf_s"] = round(float(gp.t[hits[0]]), 3) if hits.size else nan
         names = _goal_names(series)
         widx = int(np.nanargmax(Pb[-1]))
         m["belief_winner"] = names[widx] if names and widx < len(names) else f"goal_{widx}"
     else:
-        m["belief_max_prob"] = m["belief_time_to_conf_s"] = nan
+        m["belief_max_prob"] = m["belief_mean_prob"] = m["belief_time_to_conf_s"] = nan
         m["belief_winner"] = None
 
     lf = series.get(T_LOOPFREQ)
@@ -581,11 +602,13 @@ _SUMMARY_LAYOUT = [
                                 ("qdot_cmd_rms", "qdot_cmd rms", "rad/s"),
                                 ("qdot_meas_max", "qdot_meas peak", "rad/s"),
                                 ("qdot_meas_rms", "qdot_meas rms", "rad/s")]),
-    ("Safety", [("safety_min_dist_m", "min obst dist (excl grasp)", "m"),
-                ("safety_min_dist_graspincl_m", "min dist (incl grasp)", "m"),
+    ("Safety", [("safety_min_dist_m", "min clearance, this arm (excl grasp)", "m"),
+                ("safety_mean_dist_m", "mean clearance, this arm", "m"),
+                ("safety_min_dist_graspincl_m", "raw min dist incl carried cyl (legacy)", "m"),
                 ("safety_nearmiss_frac", "time in near-miss", "frac"),
                 ("safety_nearmiss_episodes", "near-miss episodes", ""),
                 ("cbf_lambda_peak", "CBF lambda peak (this arm)", ""),
+                ("cbf_lambda_active_median", "CBF lambda typical when active", ""),
                 ("cbf_active_frac", "CBF active (this arm)", "frac"),
                 ("slack_peak", "CLF slack peak (this arm)", "")]),
     ("Human effort", [("force_impulse_Ns", "force impulse", "N.s"),
@@ -597,6 +620,7 @@ _SUMMARY_LAYOUT = [
                     ("agreement_mean_cos", "user-policy agreement", "cos"),
                     ("autonomy_grasp_time_s", "autonomous grasp time", "s")]),
     ("Intent inference", [("belief_max_prob", "max belief prob", ""),
+                          ("belief_mean_prob", "mean belief prob", ""),
                           ("belief_time_to_conf_s", "time to confident", "s"),
                           ("belief_winner", "inferred goal", "")]),
 ]

@@ -30,6 +30,7 @@ Run:
   ros2 run triago_control export_to_matlab.py
   python3 scripts/analysis/export_to_matlab.py --dry-run
   python3 scripts/analysis/export_to_matlab.py --participants P07,P08 --skip-existing
+  python3 scripts/analysis/export_to_matlab.py --recompute-metrics   # metric change, bags untouched
 """
 
 from __future__ import annotations
@@ -144,6 +145,42 @@ def _struct_to_dict(mstruct) -> dict:
     return {name: getattr(mstruct, name) for name in mstruct._fieldnames}
 
 
+def _series_from_mat(series_struct) -> dict:
+    """Rebuild {topic: Series} from a saved .mat, inverting the field sanitiser."""
+    used: set = set()
+    field_to_topic = {matlab_field(t, used): t for t in sc.BAG_TOPICS}
+    out = {}
+    for field in series_struct._fieldnames:
+        topic = field_to_topic.get(field)
+        if topic is None:
+            continue
+        st = getattr(series_struct, field)
+        cols = {}
+        for name in st._fieldnames:
+            if name == "t":
+                continue
+            v = getattr(st, name)
+            arr = np.atleast_1d(v)
+            cols[name] = [str(x) for x in arr] if arr.dtype.kind in "OUS" else arr.astype(float).ravel()
+        out[topic] = sm.Series(np.atleast_1d(np.asarray(st.t, dtype=float)).ravel(), cols)
+    return out
+
+
+def recompute_trial_mat(mat_path: str, metadata: dict):
+    """Re-run compute_metrics on a .mat's stored series; the bag is not read."""
+    cached = sio.loadmat(mat_path, struct_as_record=False, squeeze_me=True)
+    series = _series_from_mat(cached["series"])
+    metrics_right = sm.compute_metrics(series, metadata, "right")
+    metrics_left = sm.compute_metrics(series, metadata, "left")
+    mat_dict = {
+        "meta": _dict_to_struct(metadata),
+        "metrics_right": _dict_to_struct(metrics_right),
+        "metrics_left": _dict_to_struct(metrics_left),
+        "series": cached["series"],
+    }
+    return mat_dict, metrics_right, metrics_left
+
+
 def manifest_row(r, metadata: dict, metrics_right: dict, metrics_left: dict,
                  mat_relpath: str) -> dict:
     row = {
@@ -240,6 +277,9 @@ def main() -> int:
     ap.add_argument("--skip-existing", action="store_true",
                     help="reuse a .mat already newer than its bag's metadata.yaml "
                          "(manifest row is read back from it, bag is not re-read)")
+    ap.add_argument("--recompute-metrics", action="store_true",
+                    help="after a study_metrics.py change: recompute every metric from the "
+                         "series already stored in each .mat (minutes, not an hour of bag decoding)")
     ap.add_argument("--dry-run", action="store_true",
                     help="only print what would be included/excluded, export nothing")
     args = ap.parse_args()
@@ -285,10 +325,11 @@ def main() -> int:
         mat_name = f"{r.participant}_{r.folder}.mat"
         mat_path = os.path.join(mat_dir, mat_name)
         bag_meta_mtime = os.path.getmtime(os.path.join(r.path, "metadata.yaml"))
-        reuse = (args.skip_existing and os.path.isfile(mat_path)
-                and os.path.getmtime(mat_path) >= bag_meta_mtime)
-        print(f"[{i}/{len(included)}] {r.participant}/{r.folder} "
-              f"{'(reusing existing .mat)' if reuse else '-- reading bag...'}")
+        fresh = os.path.isfile(mat_path) and os.path.getmtime(mat_path) >= bag_meta_mtime
+        recompute = args.recompute_metrics and fresh
+        reuse = args.skip_existing and fresh and not recompute
+        how = '(reusing existing .mat)' if reuse else '-- recomputing metrics...' if recompute else '-- reading bag...'
+        print(f"[{i}/{len(included)}] {r.participant}/{r.folder} {how}", flush=True)
         metadata = sm.load_metadata(r.path)
         if reuse:
             cached = sio.loadmat(mat_path, struct_as_record=False, squeeze_me=True)
@@ -296,7 +337,10 @@ def main() -> int:
             metrics_left = _struct_to_dict(cached["metrics_left"])
         else:
             try:
-                mat_dict, metrics_right, metrics_left = build_trial_mat(r.path, metadata)
+                if recompute:
+                    mat_dict, metrics_right, metrics_left = recompute_trial_mat(mat_path, metadata)
+                else:
+                    mat_dict, metrics_right, metrics_left = build_trial_mat(r.path, metadata)
             except Exception as exc:                   # noqa: BLE001
                 print(f"  FAILED to export {r.participant}/{r.folder}: {exc}", file=sys.stderr)
                 continue

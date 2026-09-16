@@ -122,7 +122,7 @@ if ~isempty(sig)
     for j = 1:nb
         % Clearance is set by the centred p-label, which is wider than a short
         % bracket, not by the bracket span itself.
-        lvl = find(x1(j) > used + 1.3, 1);
+        lvl = find(x1(j) > used + 1.7, 1);
         if isempty(lvl), used(end + 1) = x2(j); lvl = numel(used); %#ok<AGROW>
         else,            used(lvl) = x2(j);
         end
@@ -130,7 +130,8 @@ if ~isempty(sig)
         plot(ax, [x1(j) x1(j) x2(j) x2(j)], [y - 0.22 * step, y, y, y - 0.22 * step], ...
              'k-', 'LineWidth', 0.8);
         text(ax, (x1(j) + x2(j)) / 2, y + 0.02 * step, fmt_p(sig.p_holm(j)), ...
-             'HorizontalAlignment', 'center', 'VerticalAlignment', 'bottom', 'FontSize', fs - 2);
+             'HorizontalAlignment', 'center', 'VerticalAlignment', 'bottom', 'FontSize', fs - 2, ...
+             'BackgroundColor', 'w', 'Margin', 0.5);   % stays legible where brackets stack
         top = max(top, y + 0.9 * step);
     end
 end

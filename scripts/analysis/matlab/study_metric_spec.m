@@ -17,7 +17,8 @@ function spec = study_metric_spec()
 %                     sum     extensive per-arm quantity, both arms add
 %                     wmean   intensive per-arm quantity, weighted by the time
 %                             each arm was the active one
-%                     max     worst case over the two arms
+%                     max     worst case over the two arms (lower is better)
+%                     min     worst case over the two arms (higher is better)
 %                     derived computed from other columns (see load_study_table)
 %     cell_scope      "all" | "clutch_only" | "blend_only": cells where the
 %                     metric is physically defined; elsewhere it is NaN
@@ -42,23 +43,27 @@ rows = {
  "force_impulse_Ns"           "Haptic force impulse"             "N.s"   -1  "human_effort"         "shared" "all"         false  true  "Time integral of the rendered force magnitude."
  "clutch_presses"             "Clutch presses"                   "count" -1  "human_effort"         "shared" "clutch_only" false  true  "Number of rising edges of the clutch button (CLUTCH mode only)."
  "clutch_duty_frac"           "Clutch duty"                      "frac"  -1  "human_effort"         "shared" "clutch_only" false  true  "Fraction of samples with the clutch button held (CLUTCH mode only)."
- "safety_min_dist_m"          "Minimum clearance"                "m"     +1  "safety"               "shared" "all"         true   true  "Smallest signed distance between any collision pair, autonomous-grasp window excluded."
- "safety_nearmiss_frac"       "Near-miss time fraction"          "frac"  -1  "safety"               "shared" "all"         true   false "Fraction of teleoperated samples with clearance below 0.05 m."
- "safety_nearmiss_episodes"   "Near-miss episodes"               "count" -1  "safety"               "shared" "all"         true   false "Number of separate dips of the clearance below 0.05 m."
+ "safety_min_dist_m"          "Minimum clearance (worst hand)"   "m"     +1  "safety"               "min"    "all"         true   true  "Closest either arm's own clearance (barrier SoftMin, carried cylinder excluded) came to an obstacle while the operator was driving."
+ "safety_mean_dist_m"         "Mean clearance"                   "m"     +1  "safety"               "wmean"  "all"         true   true  "Time-average of the arm's clearance while the operator was driving, capped at the 0.15 m sensing range."
+ "safety_nearmiss_frac"       "Near-miss time fraction"          "frac"  -1  "safety"               "wmean"  "all"         true   false "Fraction of teleoperated samples with the arm's clearance below 0.05 m."
+ "safety_nearmiss_episodes"   "Near-miss episodes (both arms)"   "count" -1  "safety"               "sum"    "all"         true   false "Number of separate dips of either arm's clearance below 0.05 m."
  "cbf_active_frac"            "Safety filter active"             "frac"  -1  "safety"               "wmean"  "all"         true   false "Fraction of samples where the collision barrier multiplier exceeds 1."
- "cbf_lambda_mean"            "Mean barrier multiplier"          "-"     -1  "safety"               "wmean"  "all"         true   true  "Mean Lagrange multiplier of the collision barrier (how hard the safety filter pushed)."
+ "cbf_lambda_active_median"   "Typical barrier push"             "-"     -1  "safety"               "wmean"  "all"         true   true  "Median collision-barrier multiplier over the samples where it was active (robust to spikes)."
  "ee_sparc"                   "Smoothness (SPARC)"               "-"     +1  "motion_quality"       "wmean"  "all"         true   false "Spectral arc length of the hand speed profile; negative, closer to 0 is smoother."
  "slack_mean"                 "Mean tracking slack"              "-"     -1  "motion_quality"       "wmean"  "all"         true   true  "Mean relaxation of the tracking constraint (how far the robot deviated from the reference)."
  "qdot_cmd_max"               "Peak commanded joint rate"        "rad/s" -1  "motion_quality"       "max"    "all"         true   true  "Largest absolute joint velocity command."
  "belief_max_prob"            "Peak intent confidence"           "prob"  +1  "intent_understanding" "shared" "all"         true   true  "Highest probability assigned to any goal during the trial."
+ "belief_mean_prob"           "Mean intent confidence"           "prob"  +1  "intent_understanding" "shared" "all"         true   true  "Time-average of the probability of the currently most likely goal."
  "belief_time_to_conf_s"      "Time to confident intent"         "s"     -1  "intent_understanding" "shared" "all"         true   true  "First time at which the most likely goal reached probability 0.80 (NaN if never)."
  "belief_confident_ever"      "Intent ever confident"            "0/1"   +1  "intent_understanding" "derived" "all"        true   false "1 if the belief reached 0.80 at least once, else 0."
  "agreement_mean_cos"         "User-autonomy agreement"          "cos"   +1  "assistance_quality"   "shared" "blend_only"  true   false "Mean cosine between the user twist and the policy twist while the user is moving."
  "alpha_mean"                 "Mean autonomy authority"          "-"      0  "assistance_quality"   "shared" "blend_only"  true   false "Mean blending weight alpha (0 = user only, 1 = policy only)."
  "alpha_autonomy_frac"        "Autonomy-led time fraction"       "frac"   0  "assistance_quality"   "shared" "blend_only"  true   false "Fraction of samples with alpha above 0.5."
  "user_active_frac"           "User actively driving"            "frac"   0  "assistance_quality"   "shared" "blend_only"  true   false "Fraction of samples with a non-zero user twist."
- "safety_mean_dist_m"         "Mean clearance"                   "m"     +1  ""                     "shared" "all"         true   true  "Mean clearance, autonomous-grasp window excluded."
- "safety_min_dist_graspincl_m" "Min clearance incl. grasp"       "m"      0  ""                     "shared" "all"         true   false "Raw minimum including the intentional gripper-object overlap during grasp."
+ "safety_min_dist_graspincl_m" "Raw min. distance (legacy)"      "m"      0  ""                     "shared" "all"         true   false "Raw scalar over all pairs including a carried cylinder; reads -3.5 cm whenever a cylinder is held, kept only for reference."
+ "cbf_active_s"               "Safety filter active time"        "s"     -1  ""                     "derived" "all"        true   true  "Seconds during which the collision barrier multiplier exceeded 1 (active fraction x task time)."
+ "safety_nearmiss_s"          "Near-miss time"                   "s"     -1  ""                     "derived" "all"        true   true  "Seconds of operator-driven time with the arm's clearance below 0.05 m (near-miss fraction x time under human control)."
+ "cbf_lambda_mean"            "Mean barrier multiplier"          "-"     -1  ""                     "wmean"  "all"         true   true  "Mean Lagrange multiplier of the collision barrier; heavy-tailed, dominated by rare spikes."
  "cbf_lambda_peak"            "Peak barrier multiplier"          "-"     -1  ""                     "max"    "all"         true   true  "Largest collision-barrier multiplier."
  "slack_peak"                 "Peak tracking slack"              "-"     -1  ""                     "max"    "all"         true   true  "Largest tracking-constraint relaxation."
  "qdot_meas_rms"              "Measured joint-rate RMS"          "rad/s" -1  ""                     "wmean"  "all"         true   true  "RMS of the measured joint velocity."

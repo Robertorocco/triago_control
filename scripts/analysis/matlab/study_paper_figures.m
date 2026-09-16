@@ -27,6 +27,16 @@ METRICS = ["duration_s", "ee_path_len_m", "safety_min_dist_m", ...
 % The summary panels: the overall score and the family scores behind it.
 SUMMARY_METRICS = ["composite", "fam_time_effectiveness", "fam_safety", "fam_motion_quality"];
 
+% Everything else that is drawn in section 6, so the p-value census of
+% section 2 counts exactly the comparisons on this page.
+REST_METRICS = ["teleop_time_s", "ee_path_efficiency", "ee_speed_mean_mps", "autonomy_grasp_time_s", ...
+                "safety_mean_dist_m", "safety_nearmiss_frac", "safety_nearmiss_s", "safety_nearmiss_episodes", ...
+                "cbf_active_s", "cbf_lambda_active_median", ...
+                "slack_mean", "qdot_cmd_max", ...
+                "belief_mean_prob", "belief_max_prob", "belief_time_to_conf_s", ...
+                "agreement_mean_cos", "alpha_mean", "alpha_autonomy_frac", "user_active_frac", ...
+                "fam_human_effort", "fam_intent_understanding", "fam_assistance_quality"];
+
 if isempty(RESULTS_DIR)
     root = fullfile(study_export_dir(EXPORT_DIR), 'analysis_results');
     latest = fullfile(root, 'latest.txt');
@@ -39,6 +49,12 @@ if isempty(RESULTS_DIR)
 end
 load(fullfile(RESULTS_DIR, 'results.mat'), 'trial', 'items', 'meta', 'S', 'settings');
 alpha = settings.alpha;
+% items holds only the family metrics; the diagnostic views drawn in section 6
+% (seconds next to a fraction) take their labels from the full catalogue.
+full = study_metric_spec();
+extra = full(~ismember(full.name, items.name), items.Properties.VariableNames(1:8));
+extra.is_family = false(height(extra), 1);
+items = [items; extra];
 %% 1. What the study compares
 % Every participant drove the TRIAGo robot through the same pick-and-place task
 % with a Haption force-feedback handle, under *six different ways of being
@@ -113,9 +129,10 @@ end
 % that identical saturated value. Do not read "p < 0.001" as "stronger than
 % p = 0.002" — both mean "as sure as this test can be".
 % # *Not everything is significant, and the null results make physical sense.*
-% Minimum clearance, time to a confident intent estimate, how much of the trial
-% the operator was actively driving — none differ between conditions, and in
-% each case there is a reason they should not. A study where _everything_ came
+% Minimum clearance, how hard the safety filter pushes when it does push, time
+% to a confident intent estimate, how much of the trial the operator was
+% actively driving — none differ between conditions, and in each case there is
+% a reason they should not. A study where _everything_ came
 % out p < 0.001 would deserve suspicion; this one has its nulls where they
 % belong.
 %
@@ -125,7 +142,8 @@ end
 % statement this study can make.
 
 tot = 0; sig = 0; floor_ = 0; unanimous = 0;
-for nm = string(fieldnames(S.Q3))'
+for nm = [METRICS, SUMMARY_METRICS, REST_METRICS]
+    if ~isfield(S.Q3, nm), continue; end
     P = S.Q3.(nm).pairs;
     if isempty(P) || ~ismember('significant', P.Properties.VariableNames), continue; end
     tot = tot + height(P);                 sig = sig + sum(P.significant);
@@ -176,12 +194,17 @@ fig_paper_panels(S, items, METRICS(1:2), 'cols', 1, 'name', 'speed and directnes
 % 5.1 m in JFB), and the between-participant spread shrinks with it — the
 % worst-performing operators gain the most.
 %% 3b. Was it safer?
-% *Minimum clearance* is the closest the robot ever came to an obstacle while
-% the operator was driving — the autonomous grasp moments are excluded, because
-% the gripper is _supposed_ to touch the object then. It is a signed margin
-% measured from the safety envelope rather than from the metal, so the values
-% are negative: the envelope is deliberately generous and gets entered often.
-% Higher (less negative) is better.
+% *Minimum clearance (worst hand)* is the closest either arm came to an
+% obstacle while the operator was driving. It is each arm's own clearance as
+% the collision barrier itself sees it — distance to the other arm, the
+% objects, the rack and the table — with two things deliberately left out: the
+% autonomous grasp moments (the gripper is _supposed_ to touch the object
+% then) and *the cylinder the arm is carrying*, which is fused to the gripper
+% and is payload, not obstacle. The controller's raw "closest pair" number is
+% not used, because it reads −3.5 cm the whole time a cylinder is held and says
+% nothing about obstacles. The clearance is measured from the robot's safety
+% envelope, a few centimetres outside the metal, and is a conservative (slightly
+% pessimistic) estimate. Higher is better.
 %
 % *Safety filter active* is the fraction of the trial in which the robot's
 % collision barrier actually had to push back against the command it was given.
@@ -190,15 +213,16 @@ fig_paper_panels(S, items, METRICS(1:2), 'cols', 1, 'name', 'speed and directnes
 
 fig_paper_panels(S, items, METRICS(3:4), 'cols', 1, 'name', 'safety');
 %%
-% *What the data say.* *Minimum clearance is flat*: −3.4 cm in every one of the
-% six conditions, to within a millimetre, and no test finds a difference
-% (p = 0.56). That is not a failure of the metric, it is what it measures: the
-% deepest the arm's safety envelope was ever pushed into, which in this task is
-% always the moment the gripper closes around the cylinder — a property of the
-% task geometry, identical whatever the assistance. Its value here is as a
-% check: *no condition produced a deeper intrusion than the grasp itself*, i.e.
-% no condition led to anything resembling a collision. The differences in
-% physical safety are in the next panel and in section 6b.
+% *What the data say.* *Minimum clearance is the same in every condition*:
+% about 2 cm (1.9–2.0 cm), and no test finds a difference (p = 0.12). This is
+% not the operator's doing — it is the *safety filter's*. The barrier is tuned
+% to hold the arm about 1.5 cm plus a speed-dependent margin off the envelope,
+% and in every trial, under every condition, the arm at some point pressed
+% against that limit and was held there. The panel therefore says two useful
+% things: *no condition ever got closer than the barrier allows* (there were no
+% collisions or near-collisions in the study), and *how close the robot can
+% get is decided by the controller, not by how the operator is helped*. The
+% differences in safety behaviour are in the next panel and in section 6b.
 %
 % *Safety filter active is decided by the control mode* (|partial_eta2| = 0.75,
 % the second-largest effect in the study): in clutch the barrier had to
@@ -206,13 +230,16 @@ fig_paper_panels(S, items, METRICS(3:4), 'cols', 1, 'name', 'safety');
 % 22 of 24 participants show it. The velocity mapping keeps the operator out of
 % trouble; position mapping with a re-centring button does not.
 %
-% Assistance runs the *other* way here, and it needs care: the filter is busiest
-% under *FB* (31%) and least busy under *F* alone (27%). This does *not* mean
-% blending is less safe — the near-miss panels of section 6b show FB with the
-% _fewest_ close approaches and JFB the fewest of all. What it means is that
-% blending drives the arm along tighter, more direct paths past the rack, and
-% the barrier is engaged more often to shape them. The filter is doing its job,
-% and the near-miss counts say it succeeded.
+% Assistance appears to run the *other* way — the filter is busiest under *FB*
+% (31%) and least busy under *F* alone (27%) — but this is *the denominator
+% moving, not the safety*. Converted to seconds (section 6b), the filter was
+% active for about 79 s per trial under F, 62 s under B and 62 s under FB: *F
+% alone had the most barrier time, not the least*. What blending removes is the
+% other part of the trial — the free-space wandering, 211 s under F against
+% 139 s under FB — so the same barrier time becomes a larger _share_ of a
+% shorter trial. Any "fraction of the trial" quantity behaves this way when
+% trials differ in length; the seconds are the fairer reading, and they say
+% blending reduced both the total time and the time at the barrier.
 %% 3c. Was the resulting motion better?
 % *Smoothness (SPARC)* is a standard smoothness score for the hand's speed
 % profile. It is always negative: *closer to zero means smoother*, more negative
@@ -256,36 +283,43 @@ fig_paper_panels(S, items, METRICS(5:6), 'cols', 1, 'name', 'motion quality');
 % control mode is used. A significant interaction is the interesting case: it
 % means there is no single best assistance, it depends on the mode.
 %
-% |partial_eta2| is the effect size: the share of the variation explained by
-% that factor. Roughly, 0.01 is small, 0.06 medium, 0.14 large — it answers "is
-% this difference big enough to care about", which the p-value alone cannot.
-% *Read this column, not the p column, to compare results with each other.*
-
-[E, Pairs] = paper_stats_tables(S, items, METRICS, alpha);
-disp(E)
-%%
-% *How to read the table.* A clear division of labour appears:
+% The answer to each question is a number called *partial eta squared*
+% (|partial_eta2|), drawn as a bar below. It is *the share of a metric's
+% variation that one factor explains*, from 0 (the factor changes nothing) to 1
+% (the factor explains everything). Concretely: task time varies from trial to
+% trial for many reasons — who the operator is, which scene, which condition,
+% luck. Of the part that the conditions can explain at all, |partial_eta2| =
+% 0.74 for Assistance means three quarters is down to which kind of help was
+% given, and 0.04 for Mode means the mapping barely matters. Roughly, 0.01 is a
+% small effect, 0.06 medium, 0.14 large; most values here are well past
+% "large". It answers "how much does this matter", which the p-value cannot;
+% *compare results with each other by this bar, not by their p-values.*
 %
-% * *Assistance* owns the time-and-path quantities (|partial_eta2| ≈ 0.74–0.77:
-% enormous) and contributes to smoothness (0.53).
+% A filled bar is a significant effect, a hollow one is not. The stars repeat
+% the p-value in the usual shorthand.
+
+fig_effect_map(S, items, METRICS, alpha);
+%%
+% *How to read the figure.* A clear division of labour appears:
+%
+% * *Assistance* owns the time-and-path quantities (0.74–0.77: enormous) and
+% contributes to smoothness (0.53).
 % * *Control mode* owns the safety filter (0.75) and contributes equally to
 % smoothness (0.52); it has a moderate effect on path length (0.35) and none on
 % task time.
-% * *The interaction* matters in two places only: joint-rate demand (0.51, the
-% crossover described in 3c) and, more mildly, task time (0.16, the JF
-% anomaly described in 3a).
-% * *Minimum clearance* has nothing significant in any row, for the reason
-% given in 3b.
+% * *The interaction* — the case where the best help _depends on_ the mode —
+% matters in two places only: joint-rate demand (0.51, the crossover described
+% in 3c) and, more mildly, task time (0.16, the JF anomaly described in 3a).
+% An interaction of 0.51 with no main effects, as for joint-rate demand, means
+% "assistance changes this metric a great deal, but in opposite directions in
+% the two modes, so on average it cancels out" — the two crossing patterns are
+% the whole story, and an average over them is meaningless.
+% * *Minimum clearance* has nothing in any column, for the reason given in 3b.
 %
-% Below are the individual pairs of conditions that survived the correction,
-% with the size of each gap and its rank-biserial correlation (|r| = 1.0 means
-% every participant ordered the pair the same way).
-
-if isempty(Pairs)
-    disp("No pair of conditions differs significantly after correction.")
-else
-    disp(Pairs)
-end
+% Nothing in this figure needs the tables of the full report: the brackets in
+% the panels already show _which pairs_ differ, and this figure shows _which
+% factor_ is responsible. The pair-by-pair numbers are in |study_report| for
+% anyone who wants them.
 %% 5. The overall picture
 % The last figure collapses everything into scores. Each metric is first put on
 % a common scale (how far above or below that participant's own average it is),
@@ -304,21 +338,24 @@ end
 
 fig_paper_panels(S, items, SUMMARY_METRICS, 'cols', 1, 'panel_h', 240, 'name', 'summary scores');
 %%
-% *What the data say.* The composite gives a clean, monotone answer: *JFB is
-% the best condition and CF the worst*, 0.64 standard deviations apart, with
-% every step in between in the expected direction (JFB > JB > CFB > JF > CB >
-% CF). Twelve of the fifteen pairs differ significantly. Joystick beats clutch
-% for 22 of 24 participants; blending beats force-only decisively; FB beats B
-% by a small but real margin (0.13, p = 0.03). The composite shows *no
-% learning trend and no order bias*, so this ranking is not an artefact of who
-% did what first.
+% *What the data say.* The composite gives a clean answer: *JFB is the best
+% condition and CF the worst*, 0.68 standard deviations apart, with the three
+% joystick cells above the three clutch cells (JFB > JB > JF > CFB > CB > CF).
+% Twelve of the fifteen pairs differ significantly. Joystick beats clutch for
+% 22 of 24 participants; blending beats force-only decisively; FB beats B by a
+% small but real margin (0.12, p = 0.01). The composite shows *no learning
+% trend and no order bias*, so this ranking is not an artefact of who did what
+% first.
 %
 % The three family panels show where that comes from and where it does not:
 %
 % * *Time & effectiveness* is entirely an assistance story (F-only cells at
 % about −0.6, all others positive) — the two modes are level.
-% * *Safety* is entirely a mode story (all three joystick cells positive, all
-% three clutch cells negative) — the three kinds of help are level.
+% * *Safety* is mostly a mode story (all three joystick cells above all three
+% clutch cells, 20 of 24 participants). Assistance has a small effect here, and
+% not in blending's favour: blending alone (B) scores best and blending with
+% force (FB) worst, though only that one pair separates (p = 0.04). Section 6b
+% explains why.
 % * *Motion quality* is mostly an assistance story again, with the two F-only
 % cells alone below zero.
 %
@@ -368,35 +405,65 @@ fig_paper_panels(S, items, ["teleop_time_s", "ee_path_efficiency", ...
 % routine finishes sooner when the arm arrives at a better pose, which is what
 % blending arranges.
 %% 6b. Safety — the rest
-% *Near-miss time fraction* is the share of the operator-driven trial spent
-% closer than 5 cm to something, and *near-miss episodes* counts how many
-% separate times it dipped below that line — one long approach and ten brief
-% scares look very different to an operator but can average the same. *Mean
-% barrier multiplier* is how hard the safety filter was pushing on average, not
-% just whether it was on.
+% All clearances here are the per-arm barrier clearance of 3b (carried cylinder
+% and grasp moments excluded). *Mean clearance* is its time-average while the
+% operator drove — how much room the arm typically kept, as opposed to the
+% single closest moment. *Near-miss time fraction* is the share of that time
+% spent closer than 5 cm to something, and *near-miss time* is the same in
+% seconds — the pair is shown together because a fraction rises when a trial
+% gets shorter even if the seconds do not. *Near-miss episodes* counts how many
+% separate times either arm dipped below 5 cm: one long approach and ten brief
+% scares look very different to an operator but can average the same.
 
-fig_paper_panels(S, items, ["safety_nearmiss_frac", "safety_nearmiss_episodes", ...
-                 "cbf_lambda_mean"], 'cols', 1, 'panel_h', 235, 'name', 'safety (rest)');
+fig_paper_panels(S, items, ["safety_mean_dist_m", "safety_nearmiss_frac", ...
+                 "safety_nearmiss_s", "safety_nearmiss_episodes"], ...
+                 'cols', 1, 'panel_h', 235, 'name', 'clearance and near misses');
 %%
-% *What the data say.* The near-miss fraction sits between 0.89 and 0.92 in
-% every condition: in envelope terms the arm is within 5 cm of _something_
-% almost the whole time, because the workspace is cluttered by design. The
-% panel is therefore nearly saturated and the differences are small — yet
-% consistent: joystick spends 2.3 percentage points less time close to
-% obstacles (19 of 24 participants), and JFB has both the lowest fraction and
-% the fewest episodes (5.9 against 7.1 in CF). Together with the filter-active
-% result of 3b this is the real safety statement of the study: *the joystick
-% mapping keeps the operator further from trouble, and blending does not bring
-% them closer even though it makes the filter work harder.*
+% *What the data say.* Mean clearance is 5.5–6.1 cm everywhere: the arm
+% typically kept about three times the barrier's minimum off the envelope. It
+% is slightly higher in joystick (16 of 24, a small effect) and, in clutch
+% only, lowest under FB — the same pattern the fraction panel shows more
+% strongly.
 %
-% *The barrier-multiplier panel should not be read from its bars.* One single
-% trial (P18, rack, JF) contains a numerical spike in the multiplier — a mean
-% of about 1900 against a typical value of 10 — and that one trial alone lifts
-% the JF average to 49 and sends its whisker off the chart. The ANOVA, whose
-% variance that trial inflates, finds nothing; the rank-based tests, which
-% ignore the spike, find only a weak and mixed picture (JB pushes least, and
-% clutch as a whole slightly less than joystick, p = 0.03). Treat this panel
-% as "no strong effect", and the JF bar as an artefact.
+% The near-miss panels are the ones where the fraction and the seconds *tell
+% different stories, and the seconds are right*. By fraction, CFB looks worst
+% (57% of the drive within 5 cm, against 47% for CF) and blending looks like it
+% brings the arm closer to things. By seconds, force guidance alone had the
+% most near-miss time of all (about 117 s per trial, against 86 s under B and
+% 84 s under FB), because those trials were long and the operator kept
+% re-approaching. Blending did not add close time; it removed the far-away
+% time — the free-space wandering fell from 124 s under F to 79 s under FB —
+% so the close time became a larger share of a shorter drive. This is exactly
+% the effect described for the safety filter in 3b, and it is why the
+% assistance ranking of the safety score in section 5 (B > F > FB) should not
+% be read as "blending is less safe": three of its five metrics are fractions
+% or averages over the drive.
+%
+% The episode count is the metric least affected by trial length (it barely
+% correlates with task time), and it is unambiguous: both factors reduce it,
+% from 17 separate close approaches per trial under CF to 12.6 under JFB, with
+% joystick beating clutch for 19 of 24 participants and every JB/JFB cell
+% significantly below CF, CFB and JF. Read together: *blending replaces many
+% brief close calls with fewer, longer, controlled close passes; the joystick
+% mapping reduces both.*
+%% 6b′. Safety — the filter itself
+% *Safety filter active time* is the filter-active fraction of 3b converted to
+% seconds. *Typical barrier push* is how hard the filter pushed when it was
+% pushing — the median of its multiplier over the active samples. The plain
+% mean of the multiplier is not shown: it is dominated by rare spikes (a hard
+% barrier fight raises it a thousand-fold for a few seconds, and about one trial
+% in eight contains one), so a single such episode would own the bar.
+
+fig_paper_panels(S, items, ["cbf_active_s", "cbf_lambda_active_median"], ...
+                 'cols', 1, 'panel_h', 250, 'name', 'safety filter');
+%%
+% *What the data say.* In seconds, the filter's picture is simple: joystick
+% needs it less (53–75 s per trial against 70–83 s in clutch) and force
+% guidance alone needs it most in both modes. *How hard* the filter pushed when
+% it did is the same everywhere — a typical multiplier of 24–28 with no mode or
+% assistance effect. So the conditions change *how often* the operator reached
+% the barrier, not what happened there: once the arm is at the limit, the
+% controller does the same job regardless of how the operator is being helped.
 %% 6c. Motion quality — the rest
 % *Mean tracking slack* is how far the robot was allowed to fall behind the
 % reference it was given: large slack means the controller was relaxing the
@@ -428,23 +495,27 @@ fig_paper_panels(S, items, ["slack_mean", "qdot_cmd_max"], ...
 % trials in which it passed that line at all, so 1.0 means "always worked out
 % eventually" and 0.5 means "half the time it never became sure".
 
-fig_paper_panels(S, items, ["belief_max_prob", "belief_time_to_conf_s", ...
-                 "belief_confident_ever"], 'cols', 1, 'panel_h', 235, 'name', 'intent understanding');
+fig_paper_panels(S, items, ["belief_mean_prob", "belief_max_prob", ...
+                 "belief_time_to_conf_s"], 'cols', 1, 'panel_h', 235, 'name', 'intent understanding');
 %%
 % *What the data say.* The intent estimator worked in every one of the 288
-% trials: it always became confident, and its peak confidence was above 0.99
-% everywhere. Peak confidence is *the textbook example of a significant but
-% unimportant result*: joystick beats clutch with p < 0.001 and all 24
-% participants in agreement — by 0.003 in probability (0.997 against 0.994).
-% Note the clipped axis. The difference is real, presumably because the steady
-% velocity of a joystick approach is easier to read than a position path
-% interrupted by re-centrings, but it has no practical consequence: the robot
-% was certain in both cases.
+% trials: it always became confident, and its *peak* confidence was above 0.99
+% everywhere. That makes peak confidence *the textbook example of a significant
+% but unimportant result*: joystick beats clutch with p < 0.001 and all 24
+% participants in agreement — by 0.003 in probability (0.997 against 0.994;
+% note the clipped axis). Real, and of no consequence: the robot was certain in
+% both cases.
 %
-% Time to a confident estimate (4.5–8.8 s) shows no reliable difference between
-% conditions (p = 0.19); it is a property of the estimator and the scene rather
-% than of the assistance, which is as it should be — the help offered downstream
-% should not change how quickly the goal is recognised upstream.
+% *Mean* confidence is the informative one, because it also counts how long the
+% estimator stayed unsure after each reset. It runs at about 0.77 in clutch and
+% 0.81 in joystick — a large mode effect (|partial_eta2| = 0.60, 20 of 24
+% participants) with assistance making no difference. The reading: the steady
+% velocity of a joystick approach is easier to interpret than a position path
+% broken up by re-centrings, so the estimator spends less of the trial
+% hedging. Time to the first confident estimate (4.5–8.8 s) shows no reliable
+% difference between conditions (p = 0.19), which is as it should be — the help
+% offered downstream should not change how quickly the goal is recognised
+% upstream.
 %% 6e. How well did operator and robot agree? (blending conditions only)
 % These four exist only where the robot is actually blending its motion into the
 % command — the *B* and *FB* conditions. The *F* conditions have no blending to
@@ -506,9 +577,10 @@ fig_paper_panels(S, items, ["fam_human_effort", "fam_intent_understanding", ...
 % the operator absorbs from the handle, in both modes.* That is the effort
 % result of this study; the joint-rate panel is not.
 %
-% *Intent understanding* favours joystick by a medium margin (18 of 24) and is
-% indifferent to the kind of help — consistent with 6d, and of little
-% practical weight since the estimator succeeded everywhere.
+% *Intent understanding* favours joystick clearly (21 of 24, a large effect
+% now that mean confidence is in the score) and is indifferent to the kind of
+% help — consistent with 6d. Its practical weight is modest: the estimator
+% succeeded everywhere, it was simply surer for longer with a joystick.
 %
 % *Assistance quality* (agreement) is the most emphatic family: JFB stands 1.9
 % standard deviations above CB, all six pairs differ, and the mode explains 83%
@@ -533,13 +605,34 @@ fig_paper_panels(S, items, ["fam_human_effort", "fam_intent_understanding", ...
 % (composite: 24 of 24 participants). Every participant did both scenes under
 % every condition, so this does not bias any comparison above; it does mean the
 % absolute numbers are an average of an easy and a hard scene.
-% * *Minimum clearance measures the safety envelope, not the metal.* The
-% −3.4 cm in every condition is the envelope being entered during the grasp;
-% no trial came close to a real collision, and the metric cannot separate
-% conditions because the grasp is identical in all of them.
-% * *One trial is numerically corrupt in one metric*: the barrier multiplier of
-% P18 rack JF. It affects only the bar and whisker of that panel in 6b, not the
-% rank-based statistics, and no other metric of that trial.
+% * *Several metrics grow with trial length, and the conditions differ in
+% length.* Force guidance alone took ~45% longer than FB. Anything that
+% accumulates over a trial inherits that: hand path length (correlation with
+% task time 0.76), haptic force impulse (0.60), time in autonomous grasp
+% phases (0.59), clutch presses (0.35), and the seconds-based safety
+% quantities. The opposite bias exists too: any *fraction of the trial* rises
+% when the free-space part of the trial shrinks (sections 3b and 6b show this
+% for the safety filter and the near misses). SPARC smoothness also correlates
+% with task time (−0.61), partly because a longer drive contains more
+% sub-movements, so part of its assistance effect is the time effect seen
+% again. Metrics that are neither counts nor fractions — mean clearance,
+% typical barrier push, tracking slack, joint rates, time to confident intent
+% — carry no such bias, and the episode count barely does (0.12). The
+% conclusions above lean on the biased quantities only where a time-free one
+% agrees with them.
+% * *Minimum clearance is set by the controller, not the operator.* About 2 cm
+% in every condition is the barrier holding the arm at its limit; the metric
+% confirms no condition breached it, and cannot separate conditions because
+% the limit is the same in all of them. It is the safety envelope that is
+% measured, a few centimetres outside the metal.
+% * *The barrier multiplier is heavy-tailed everywhere*, not in one trial. About
+% one trial in eight contains a spike of a thousand or more (the largest, P18
+% rack JF, reaches eight million for fifteen seconds during a hard barrier
+% fight). Those are real events, not corrupt data — the slack and joint rates
+% of the same seconds confirm the arm was genuinely stuck against the barrier
+% — so no trial is dropped; the panel uses the median push when active, which
+% those seconds cannot dominate, and the plain mean is kept only as a
+% diagnostic.
 % * *Only objective measures are shown.* What the operators _felt_ — workload,
 % trust, preference — is collected through the post-trial questionnaire and is
 % not part of this document. In the paper this study follows, that subjective
@@ -554,8 +647,9 @@ fig_paper_panels(S, items, ["fam_human_effort", "fam_intent_understanding", ...
 % within-mode results are summarised in 6f.
 % * *"Not significant" is not the same as "no difference"* — but with 24
 % participants in a within-person design, effects of moderate size are detected
-% reliably, and where this study reports no difference (clearance, time to
-% confident intent, user activity, barrier multiplier) the estimated gaps are
-% close to zero. Those are most likely genuine nulls, not missed effects.
+% reliably, and where this study reports no difference (minimum clearance,
+% typical barrier push, time to confident intent, user activity) the estimated
+% gaps are close to zero. Those are most likely genuine nulls, not missed
+% effects.
 
 fprintf('\nBuilt from %s\n', RESULTS_DIR);

@@ -258,24 +258,36 @@ disp(spec(spec.family ~= "", {'name', 'label', 'unit', 'dir', 'family', 'cell_sc
 % re-indexings of the workspace). Defined in Clutch mode only.
 
 %% 3.4 Safety
-% The controller publishes at every tick the signed distance $d(t)$ between
-% the closest pair of collision bodies (robot links, objects, table, shelf).
-% Samples inside the autonomous-grasp window are excluded, because the
-% intentional gripper-object overlap during a grasp would otherwise read as a
-% collision.
+% The collision barrier publishes at every tick, *per arm*, its own clearance
+% $h_a(t)$: the SoftMin over that arm's active collision pairs of the signed
+% distance to every other body (the other arm, the objects, the rack, the
+% table). A cylinder that arm is carrying is fused to its gripper and excluded,
+% and the pair being deliberately grasped is bypassed, so $h_a$ measures
+% distance to *obstacles*, not to the payload. $h_a$ is a smooth lower bound of
+% the true nearest distance (conservative by up to a couple of centimetres when
+% several bodies are equally close), is capped at the 0.15 m sensing range, and
+% samples inside the autonomous-grasp window are excluded. The controller's
+% raw scalar minimum over all pairs is *not* used: it reads $-3.5$ cm whenever
+% a cylinder is held, because the payload overlaps the gripper's own envelope.
 %
-% * *Minimum clearance* $d_{min} = \min_t d(t)$ over the teleoperated samples.
-% Higher is better.
-% * *Near-miss time fraction*: share of teleoperated samples with $d(t) <
-% 0.05$ m. Lower is better.
-% * *Near-miss episodes*: number of separate dips of $d(t)$ below 0.05 m
-% (rising edges of the indicator). Lower is better.
+% * *Minimum clearance (worst hand)* $\min_a \min_t h_a(t)$ over the
+% teleoperated samples. Higher is better.
+% * *Mean clearance* $\overline{h_a(t)}$, weighted over the two arms by the time
+% each was active. Higher is better.
+% * *Near-miss time fraction*: share of teleoperated samples with $h_a(t) <
+% 0.05$ m, weighted over arms. Lower is better.
+% * *Near-miss episodes*: number of separate dips of $h_a(t)$ below 0.05 m
+% (rising edges of the indicator), summed over both arms. Lower is better.
 % * *Safety filter active*: fraction of samples in which the Lagrange
 % multiplier $\lambda$ of the collision barrier constraint exceeds 1, i.e. the
 % safety filter is actively altering the commanded motion. Lower is better:
-% the operator kept the robot away from the barrier by themselves.
-% * *Mean barrier multiplier* $\bar\lambda$: the average of $\lambda$. Lower is
-% better: it measures how hard the filter had to push against the command.
+% the operator kept the robot away from the barrier by themselves. Its
+% companion *safety filter active time* (the same in seconds) is a diagnostic:
+% a fraction rises when the trial gets shorter even if the barrier time does not.
+% * *Typical barrier push*: the median of $\lambda$ over the samples where it
+% exceeded 1. The plain mean is heavy-tailed -- a hard barrier fight spikes
+% $\lambda$ by three to six orders of magnitude for seconds and then owns the
+% average -- so the mean is reported only as a diagnostic.
 
 %% 3.5 Motion quality
 % * *Smoothness (SPARC)*, the spectral arc length of the hand speed profile
@@ -302,7 +314,11 @@ disp(spec(spec.family ~= "", {'name', 'label', 'unit', 'dir', 'family', 'cell_sc
 % candidate goal $k$ (which object, which grasp side, which placement).
 %
 % * *Peak intent confidence* $\max_t \max_k P_k(t)$. Higher is better: the
-% robot became sure of what the operator wanted.
+% robot became sure of what the operator wanted. In this data set it saturates
+% above 0.99 in every trial, so it separates nothing.
+% * *Mean intent confidence* $\overline{\max_k P_k(t)}$: the time-average of
+% the leading goal's probability over the trial, which also counts how long the
+% estimator stayed unsure after every reset. Higher is better.
 % * *Time to confident intent*: the first $t$ with $\max_k P_k(t) \ge 0.80$,
 % NaN if never reached. Lower is better. It is measured from the start of the
 % recording, so it also contains the time the operator needed to start moving
@@ -550,7 +566,7 @@ show_results(R(R.question == "QW_world" & R.is_family_score, :), "world")
 % cells, Q6 trend. Grey lines are participants, coloured markers are means
 % with 95% CI, brackets mark Holm-significant pairs. Larger versions of the
 % same figures are in figures/metric_<name>.png in the results folder.
-headlineMetrics = ["duration_s" "qdot_cmd_rms" "safety_min_dist_m" "ee_sparc" "belief_max_prob" "agreement_mean_cos" "composite"];
+headlineMetrics = ["duration_s" "qdot_cmd_rms" "safety_min_dist_m" "ee_sparc" "belief_mean_prob" "agreement_mean_cos" "composite"];
 metricItems = items(~items.is_family | items.name == "composite", :);
 if ~SHOW_ALL_METRIC_FIGURES
     metricItems = metricItems(ismember(metricItems.name, headlineMetrics), :);

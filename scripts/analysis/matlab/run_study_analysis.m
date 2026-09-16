@@ -181,6 +181,17 @@ R.significant_raw = R.p_raw < ALPHA;
 R.significant_holm = R.p_holm < ALPHA;
 R = movevars(R, {'p_holm', 'significant_raw', 'significant_holm'}, 'After', 'p_raw');
 
+% Diagnostic six-cell views: drawn next to their family metric to explain it
+% (a fraction against its seconds, a mean against its robust version); they
+% enter no family, no composite and no master-table row.
+DIAG_Q3 = ["cbf_active_s" "safety_nearmiss_s" "cbf_lambda_mean"];
+for nm = DIAG_Q3
+    if ~ismember(nm, trial.Properties.VariableNames), continue; end
+    d = spec.dir(spec.name == nm);
+    M = participant_means(trial, nm, "cell", CELLS6);
+    S.Q3.(nm) = stat_rm_twoway(M, CELLS6, MODES6, ASSIST6, 'alpha', ALPHA, 'dir', d);
+end
+
 %% ---- console verdict ----
 fprintf('\n%s\n VERDICT PER FAMILY (family scores; z-units, higher = better)\n%s\n', line, line);
 for f = 1:height(families)

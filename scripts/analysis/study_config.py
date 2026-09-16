@@ -243,7 +243,8 @@ TIMESERIES_FORMAT = "parquet"   # "parquet" (preferred) or "csv"
 # ---------------------------------------------------------------------------
 # Offline metric thresholds  (consumed by study_metrics.py, not the recorder)
 # ---------------------------------------------------------------------------
-NEAR_MISS_DISTANCE_M = 0.05     # /qp_debug/min_distance below this = near-miss
+NEAR_MISS_DISTANCE_M = 0.05     # per-arm clearance below this = near-miss
+CLEARANCE_RANGE_M = 0.15        # sensing range of the clearance (cfg.DISTANCE_FILTER_THRESHOLD); farther = "clear"
 CBF_ACTIVE_LAMBDA = 1.0         # /qp_debug/lambda_cbf above this = barrier active
 BELIEF_CONFIDENCE = 0.80        # goal probability above this = "intent locked"
 
