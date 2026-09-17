@@ -1052,21 +1052,12 @@ All sessions ran on a single workstation --- Ubuntu 22.04 LTS, ROS~2 Humble, Gaz
 
 \textbf{Startup homing.}
 \label{sec:homing}
-Every session opens with a homing phase in which the only rendered wrench is a soft parking spring of the form of~\eqref{eq:fhome}, drawing the handle to a fixed neutral pose and faded in over a fixed interval, so that every participant begins from the same handle configuration; the spring is far softer than either mapping's operating spring, since the operator need not be holding the handle while it runs. The phase ends once the handle has held within position and orientation tolerances for a settle window, or after a timeout. Both teleoperation nodes suspend their output while it runs, so the homing motion is never fed to the robot, and the anchors of the clutch-hold alignment~\eqref{eq:clutchalign} are pinned at its end.
-
-The safety controller and the shared-autonomy node run outside this bringup. Either can be restarted after a parameter change or a fault without tearing down and rebuilding the simulator --- which is what makes an eight-condition session practical to run.
-
-\subsection{Data capture and questionnaire}
-\label{sec:studydata}
-
-Each trial is captured as a single time-stamped recording of the robot and telemetry topics, started and stopped from a small experimenter interface that also writes the trial's provenance --- participant, scenario, condition, a manually assigned success flag, and free-text notes. On save, the interface additionally launches that trial's offline analysis as a low-priority background job, so the per-trial dashboards and metrics are prepared without delaying the next trial.
-
-The subjective instrument is administered once per condition, after the participant has attempted that condition on both scenarios, rather than once per trial; it therefore carries no scenario field. It is a short form: a trimmed subset of standard workload items~\cite{hart1988nasatlx} together with three human--robot-interaction items --- perceived control, trust~\cite{jian2000trust}, and comfort --- each on an ordinal scale. It is collected electronically, with the condition picked from a fixed list rather than typed, so the key that joins a response to its trials cannot be mistyped. All six conditions are surveyed; the unassisted configuration used for familiarisation is not.
+Every session opens with a homing phase in which the only rendered wrench is a soft parking spring of the form of~\eqref{eq:fhome}, drawing the handle to a fixed neutral pose and faded in over a fixed interval, so that every participant begins from the same handle configuration; the spring is far softer than either mapping's operating spring, since the operator need not be holding the handle while it runs. The phase ends once the handle has held within position and orientation tolerances for a settle window, or after a timeout.
 
 \section{Results}
 \label{sec:results}
 
-Twenty-four participants completed the full grid of six conditions on both scenarios, giving 288 analysed trials; a twenty-fifth participant served as a pilot and is excluded. Every quantity below is first reduced to one number per trial, then averaged over the two scenarios so that each participant contributes exactly one value per condition, and it is those participant-level values that enter every test and every figure. Both scenarios are pooled rather than analysed separately because each participant met both under every condition, so the scenario is balanced out of the comparisons; the shield scenario is the easier of the two, and pooling therefore sets the absolute level of each measure between the two difficulties rather than at either one.
+Twenty-four participants completed the full grid of six conditions on both scenarios, giving 288 analysed trials; the count follows the design, not convenience, since the schedule realises twelve counterbalanced orderings of the six conditions, each run by two participants. Every quantity below is first reduced to one number per trial, then averaged over the two scenarios so that each participant contributes exactly one value per condition, and it is those participant-level values that enter every test and every figure.
 
 \subsection{Statistical procedure}
 \label{sec:stats}
