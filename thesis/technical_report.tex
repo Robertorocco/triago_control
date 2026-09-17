@@ -9,6 +9,8 @@
 \usepackage{microtype}
 \usepackage{amsmath,amssymb}
 \usepackage{booktabs}
+\usepackage{subcaption}
+\captionsetup[subfigure]{font=scriptsize,labelfont=bf,skip=1.5pt}
 \usepackage{tabularx}
 \newcolumntype{L}{>{\raggedright\arraybackslash}X}
 \usepackage{enumitem}
@@ -204,16 +206,6 @@ Once obstacle geometry is estimated, it must be represented in a form a real-tim
 
 The preceding sections establish five propositions this thesis builds on: that a hard safety constraint dominates a soft penalty, both generally (Section~\ref{sec:sota-clf-cbf-qp}) and specifically after arbitration (Section~\ref{sec:sota-linear-blending-limits}); that arbitration keyed to directional agreement, rather than confidence or distance, better captures conflict between a human and an autonomous policy (Section~\ref{sec:sota-arbitration}); that a safety filter's own dual variables carry information worth surfacing beyond the controller computing them (Section~\ref{sec:sota-teleop-barriers}); that a barrier constraint is only as trustworthy as the perception pipeline supplying its geometry (Section~\ref{sec:sota-world-representation}); and that a forward-invariance guarantee is only as complete as the obstacle set it is stated over, which a manipulation task itself changes at the moments of grasp and release (Section~\ref{sec:sota-bimanual}). Table~\ref{tab:sota-positioning} situates six representative prior systems, from pure policy blending to the closest published post-blend safety filter, against this thesis along the first four of those propositions. Five gaps emerge, stated as precisely and conservatively as the literature search supports.
 
-First, enforcing safety strictly after arbitration is established as necessary by Chaubey et al.'s formal argument and Guler et al.'s empirical one, but published realizations are approximate, position-space filters. BarrierIK solves a nonlinear program with a position-based update rule at each step, so its guarantee holds only to the tolerance of a local sequential least-squares quadratic programming (SLSQP) solve, validated in simulation and a virtual reality (VR) study rather than on hardware. This thesis instead applies the same post-blend principle inside a strictly convex QP formulated natively in joint velocity, with a first-order barrier condition, validated on a physical bimanual manipulator and evaluated systematically, at human-subject-study scale, in a matched simulation environment.
-
-Second, arbitrating authority on the alignment between the operator's instantaneous twist and the policy's twist, rather than a scalar confidence, distance, or entropy summary, is barely explored. Oh, Toussaint, and Mainprice's disagreement-based arbitration is the nearest neighbour, trusting the operator more when independently reasonable strategies agree and less when they diverge, but it arbitrates on disagreement between sub-policies rather than alignment between the operator's own command and a single belief-weighted policy over a dynamically resolved goal manifold, and is not evaluated inside a safety-critical loop.
-
-Third, using a safety-critical QP's own KKT dual variables, the shadow prices already computed at every solve, to adaptively schedule the QP's own constraint weights, rather than only as an external feedback channel, is, on the evidence surveyed here, unaddressed. Raphalen et al. is closest: it renders the multipliers as operator feedback but does not feed them back into the QP's own cost structure. This is stated carefully: adaptive barrier tuning is not exhaustively covered here, so the claim is that this mechanism is absent from the literature actually reviewed, not from the broader control literature.
-
-Fourth, no reviewed work factorially compares both classical motion mappings of Section~\ref{sec:sota-mappings} with both assistance channels of Sections~\ref{sec:sota-shared-control} and~\ref{sec:sota-haptic-fixtures} in one study. Guler et al.'s study is closest by scale, six conditions and ten participants, but its conditions vary the safety mechanism on a single motion interface, VR controllers without force feedback, not the mapping itself.
-
-Fifth, neither reviewed system says what becomes of the barrier once an assisted grasp succeeds (Section~\ref{sec:sota-bimanual}). Manschitz et al. withhold their own collision-aware assistance for the entire held-object phase, calling it future work; Guler et al.'s safety formulation has no notion of a graspable object, so BarrierIK's pick-and-place evaluation never distinguishes an obstacle from something the operator has just picked up~\cite{manschitz2025samplinggrasp,guler2026barrierik}. The closest conceptual precedent lies outside manipulation entirely: Srinivasan, Santoyo, and Coogan introduce a time-varying term into a control-barrier-function constraint so a mobile robot can transition continuously between sequential reachability tasks rather than switching between quadratic programs discretely~\cite{srinivasan2020continuous}. Their transition is between successive navigation goals, never between an obstacle and a graspable object, and nothing in it addresses the continuity of the constraint row's own Lagrange multiplier through the change. This thesis instead treats a graspable object as a conditionally active obstacle: its barrier is released and re-imposed as a continuous ramp exactly at the moments of attachment and detachment, so the forward-invariance guarantee is never suspended, only ever applied to a changing set (Section~\ref{sec:grasp}).
-
 \begin{table}[b]
 \centering\footnotesize
 \begin{tabularx}{\linewidth}{@{}>{\raggedright\arraybackslash}p{2.1cm} L L L L@{}}
@@ -232,6 +224,18 @@ Raphalen et al.~\cite{raphalen2026feeling} & CBF-QP filter (direct) & N/A & $\la
 \caption{Representative shared-autonomy and safety-critical teleoperation systems contrasted against this thesis by safety mechanism, arbitration signal, barrier feedback, and validation platform. N/A in Arbitration marks a direct filter with no autonomous policy to arbitrate --- shared control in Selvaggio et al.'s~\cite{selvaggio2021autonomy} sense (Section~\ref{sec:sota-taxonomies}) --- as opposed to the shared-autonomy family of the remaining rows, which blend the operator's command with a goal-directed policy. Barrier feedback reports specifically whether the safety constraint itself is disclosed to the operator as a force; this thesis discloses none, and instead reuses the same shadow price internally for the QP's own constraint scheduling (Section~\ref{sec:sched}). This thesis separately renders a goal-directed guidance force (Section~\ref{sec:guidance}), orthogonal to barrier disclosure and not the axis this column compares.}
 \label{tab:sota-positioning}
 \end{table}
+
+First, enforcing safety strictly after arbitration is established as necessary by Chaubey et al.'s formal argument and Guler et al.'s empirical one, but published realizations are approximate, position-space filters. BarrierIK solves a nonlinear program with a position-based update rule at each step, so its guarantee holds only to the tolerance of a local sequential least-squares quadratic programming (SLSQP) solve, validated in simulation and a virtual reality (VR) study rather than on hardware. This thesis instead applies the same post-blend principle inside a strictly convex QP formulated natively in joint velocity, with a first-order barrier condition, validated on a physical bimanual manipulator and evaluated systematically, at human-subject-study scale, in a matched simulation environment.
+
+Second, arbitrating authority on the alignment between the operator's instantaneous twist and the policy's twist, rather than a scalar confidence, distance, or entropy summary, is barely explored. Oh, Toussaint, and Mainprice's disagreement-based arbitration is the nearest neighbour, trusting the operator more when independently reasonable strategies agree and less when they diverge, but it arbitrates on disagreement between sub-policies rather than alignment between the operator's own command and a single belief-weighted policy over a dynamically resolved goal manifold, and is not evaluated inside a safety-critical loop.
+
+Third, using a safety-critical QP's own KKT dual variables, the shadow prices already computed at every solve, to adaptively schedule the QP's own constraint weights, rather than only as an external feedback channel, is, on the evidence surveyed here, unaddressed. Raphalen et al. is closest: it renders the multipliers as operator feedback but does not feed them back into the QP's own cost structure. This is stated carefully: adaptive barrier tuning is not exhaustively covered here, so the claim is that this mechanism is absent from the literature actually reviewed, not from the broader control literature.
+
+Fourth, no reviewed work factorially compares both classical motion mappings of Section~\ref{sec:sota-mappings} with both assistance channels of Sections~\ref{sec:sota-shared-control} and~\ref{sec:sota-haptic-fixtures} in one study. Guler et al.'s study is closest by scale, six conditions and ten participants, but its conditions vary the safety mechanism on a single motion interface, VR controllers without force feedback, not the mapping itself.
+
+Fifth, neither reviewed system says what becomes of the barrier once an assisted grasp succeeds (Section~\ref{sec:sota-bimanual}). Manschitz et al. withhold their own collision-aware assistance for the entire held-object phase, calling it future work; Guler et al.'s safety formulation has no notion of a graspable object, so BarrierIK's pick-and-place evaluation never distinguishes an obstacle from something the operator has just picked up~\cite{manschitz2025samplinggrasp,guler2026barrierik}. The closest conceptual precedent lies outside manipulation entirely: Srinivasan, Santoyo, and Coogan introduce a time-varying term into a control-barrier-function constraint so a mobile robot can transition continuously between sequential reachability tasks rather than switching between quadratic programs discretely~\cite{srinivasan2020continuous}. Their transition is between successive navigation goals, never between an obstacle and a graspable object, and nothing in it addresses the continuity of the constraint row's own Lagrange multiplier through the change. This thesis instead treats a graspable object as a conditionally active obstacle: its barrier is released and re-imposed as a continuous ramp exactly at the moments of attachment and detachment, so the forward-invariance guarantee is never suspended, only ever applied to a changing set (Section~\ref{sec:grasp}).
+
+
 
 The shared conclusion this thesis builds on is that enforcing safety after arbitration is what makes shared autonomy acceptable to an operator, and that soft penalty terms are no substitute for a hard constraint. Table~\ref{tab:sota-positioning} makes visible that this conclusion has, until now, been demonstrated either without hardware or without haptic disclosure of the constraint, never alongside a dual-variable-driven adaptation of the constraint itself. This thesis validates the controller and its perception pipeline on physical hardware and evaluates the full factorial comparison in a matched simulation environment, at a scale no reviewed hardware study reaches. The remaining chapters take up exactly that combination.
 
@@ -970,26 +974,26 @@ The system is the apparatus of a user study run in a matched simulation environm
 \end{itemize}
 This yields six conditions (Table~\ref{tab:cells}). The two channels are orthogonal by construction: F acts only on the handle and never modifies the reference; B acts only on the reference and is never rendered on the handle. Consequently the combined level is the exact superposition of the two single-channel levels --- the guidance wrench under FB is identical to the one under F, and adding B changes only \emph{which} reference the base tether tracks, not the rendered assistance law. Each control mode is also implemented with neither channel active, so the system realises eight configurations in all; the two unassisted ones are used for familiarisation and as a reference trace, and are excluded from the study matrix. The exclusion is a stated assumption rather than an oversight: that assisted teleoperation outperforms unassisted teleoperation on objective task metrics is already established for manipulation, and measured with the same task run both ways (Section~\ref{sec:sota-haptic-fixtures})~\cite{bettini2004vision}. Re-establishing it here would spend participant time on a settled comparison. The question this design does ask --- which channel, under which mapping, and whether the two compose --- is not answered by that literature, so every one of the six conditions contributes to it.
 
-\begin{table}[b]
+\begin{table}[t!]
 \centering\footnotesize
-\begin{tabular}{@{}lccp{4.6cm}p{4.2cm}@{}}
+\begin{tabular}{@{}lcccp{4.1cm}p{3.8cm}@{}}
 \toprule
-Condition & F & B & Operator feels & Arm reference written by \\
+Condition & Code & F & B & Operator feels & Arm reference written by \\
 \midrule
-\textsc{clutch} guided feedback  & \checkmark & --     & tether $+$ guidance bias & teleop \\
-\textsc{clutch} guided blending  & --     & \checkmark & tether (blended reference) & blending layer \\
-\textsc{clutch} full guidance    & \checkmark & \checkmark & tether $+$ guidance bias & blending layer \\
+\textsc{clutch} guided feedback  & CF  & \checkmark & --     & tether $+$ guidance bias & teleop \\
+\textsc{clutch} guided blending  & CB  & --     & \checkmark & tether (blended reference) & blending layer \\
+\textsc{clutch} full guidance    & CFB & \checkmark & \checkmark & tether $+$ guidance bias & blending layer \\
 \addlinespace[2pt]
-\textsc{joystick} guided feedback & \checkmark & --     & spring $+$ guidance bias & teleop \\
-\textsc{joystick} guided blending & --     & \checkmark & spring & blending layer \\
-\textsc{joystick} full guidance   & \checkmark & \checkmark & spring $+$ guidance bias & blending layer \\
+\textsc{joystick} guided feedback & JF  & \checkmark & --     & spring $+$ guidance bias & teleop \\
+\textsc{joystick} guided blending & JB  & --     & \checkmark & spring & blending layer \\
+\textsc{joystick} full guidance   & JFB & \checkmark & \checkmark & spring $+$ guidance bias & blending layer \\
 \bottomrule
 \end{tabular}
-\caption{The six study conditions ($2$ control modes $\times$ $3$ assistance strategies). The guidance bias is~\eqref{eq:fguide}; the blending layer is the arbitration of Section~\ref{sec:blend}.}
+\caption{The six study conditions ($2$ control modes $\times$ $3$ assistance strategies). The code names each condition by its control mode, C for \textsc{clutch} and J for \textsc{joystick}, followed by its active assistance channels, and is the label used on every results figure of Section~\ref{sec:results}. The guidance bias is~\eqref{eq:fguide}; the blending layer is the arbitration of Section~\ref{sec:blend}.}
 \label{tab:cells}
 \end{table}
 
-Fairness across the matrix follows directly from the architecture of Chapter~\ref{ch:method}: the safety controller, belief estimation, goal manifolds, the grasp state machine, and every shared building block (homing, damping, vibrotactile cues, authority cap) are byte-identical across all six conditions. A condition therefore changes only the operator-input mapping and the rendered assistance, so a measured difference between two conditions can only be attributed to the manipulated factors.
+Every condition shares Chapter~\ref{ch:method}'s architecture --- safety controller, belief estimation, goal manifolds, grasp state machine, and every shared building block (homing, damping, vibrotactile cues, authority cap) --- byte-identical throughout; only the operator-input mapping and the rendered assistance change, so a measured difference between two conditions is attributable to those factors alone.
 
 Two asymmetries remain by design and are declared rather than equalised: the joystick base force is a \emph{homing} spring while the clutch base force is an \emph{error-tracking} tether, since each mapping mandates its own base feedback (Section~\ref{sec:columnbase}); and the guidance saturation is absolute in the clutch mapping but deadzone-exit-calibrated in the joystick mapping~\eqref{eq:kappacal}, to stay commensurate with that base-force landscape.
 
@@ -1000,22 +1004,20 @@ Each participant works through two scenarios under every assigned condition. The
 
 \textbf{Relay scenario.} The task is a bimanual relay. Two industrial batteries --- modelled as plain cylinders for collision purposes --- rest on a table in front of the robot, and both must be delivered to a single station on a conveyor unit standing to the robot's right. A storage-rack shelf spans the table just above the batteries, closing the overhead approach corridor and forcing every pick and every place at the table to be a side grasp. The conveyor sits clear of the shelf, so its station admits a top approach, but only the right arm reaches it. The right arm can therefore pick its battery and carry it straight to the conveyor; the left arm cannot, and instead stages its battery on an intermediate handover disk on the table --- offset toward the robot's right so that it falls within both arms' reach --- from which the right arm relays it onward.
 
-The coordination the task elicits is a property of the workspace geometry, not of an inserted obstacle. No divider stands between the two arms: the handover is forced purely by reach, because the delivery station lies where one arm alone can serve it. An operator who never hands over cannot finish the task. What is measured is therefore a response to the task itself rather than to an artificial barrier added to provoke it.
-
-Both scenes also carry decorative industrial fixtures --- a perimeter fence, an overhead gantry, cabinets, pallets, and the conveyors' own frames and rollers. None of these carry collision geometry, and none enter the safety controller's world model; they give the operator visual context and nothing more. The barrier's forward-invariance guarantee (Section~\ref{sec:cbf}) is stated over the \emph{declared} collision model, so a fixture that is drawn but not declared lies outside that guarantee by construction. Each declared model contains only the table, the two batteries, the scenario's own blocking structure --- the rack shelf with its supports, or the shield pane --- and one convex envelope per conveyor.
+The handover is forced by workspace geometry alone, not by an inserted divider: only the right arm reaches the delivery station, so a run that never hands over cannot finish. Both scenes also carry decorative fixtures --- fencing, a gantry, cabinets, pallets, conveyor frames --- that give visual context but declare no collision geometry; each scenario's declared model is limited to the table, the two batteries, its own blocking structure, and one convex envelope per conveyor.
 
 \begin{figure}[t]
 \centering
 \includegraphics[width=0.85\linewidth]{rackworld.png}
-\caption{The relay scenario, viewed from behind the robot in Gazebo. The storage-rack shelf spans the table directly above the two batteries, closing the overhead approach corridor and forcing every pick and every place at the table into a side grasp; the handover disk (yellow) sits on the table between them, and the conveyor station (green, right) is reachable only by the right arm, so the left arm stages its battery on the disk for the right arm to relay onward.}
+\caption{The relay scenario, from behind the robot: the rack shelf forces a side grasp, relayed via the handover disk (yellow) to the right arm.}
 \label{fig:rackworld}
 \end{figure}
 
-\textbf{Independent scenario.} The task is two independent, concurrent pick-and-place errands, one per arm. A thin safety shield --- a glass pane in a steel frame in the Gazebo scene, with only its plain box collision declared to the safety controller --- stands between the robot and the table, spanning its full width so that no lateral window is left; each arm must therefore reach \emph{over} the shield to work. Two conveyor units flank the table, mirror-symmetric about the robot's sagittal plane, each carrying its own delivery station. Each arm picks the battery on its own side and delivers it to the station on that side: the errands are symmetric, with no handover and nothing contested between the arms. Because the shield closes the low approach and leaves the overhead corridor open, every grasp here is a top grasp --- the complement of the relay scenario, where the shelf closes the overhead corridor and every grasp is a side grasp. Between them the two scenarios exercise both grasp manifolds of Section~\ref{sec:policies} and both the coordinated and the independent regimes of the bimanual controller.
+\textbf{Independent scenario.} The task is two independent, concurrent pick-and-place errands, one per arm. A thin safety shield stands between the robot and the table, spanning its full width so that no lateral window is left; each arm must therefore reach \emph{over} the shield to work. Two conveyor units flank the table, mirror-symmetric about the robot's sagittal plane, each carrying its own delivery station. Each arm picks the battery on its own side and delivers it to the station on that side: the errands are symmetric, with no handover and nothing contested between the arms. Because the shield closes the low approach and leaves the overhead corridor open, every grasp here is a top grasp --- the complement of the relay scenario, where the shelf closes the overhead corridor and every grasp is a side grasp. Between them the two scenarios exercise both grasp manifolds of Section~\ref{sec:policies} and both the coordinated and the independent regimes of the bimanual controller.
 
 Each scenario declares its placement stations as platforms --- the handover disk and the conveyor station in the relay scenario, the two mirrored conveyor stations in the independent one. Each is demandable by either arm while that arm holds a battery, and belief estimation together with guidance selects which platform is the active placement goal, exactly as they select among grasp goals (Section~\ref{sec:policies}). Like every platform, they are reference poses for the goal manifold and the guidance law alone, and none enters the collision model.
 
-Both scenarios are built to put every part of the architecture to work, not only the arm being driven. The handover in the relay scenario is a discrete, bimanual instance of the same gap Section~\ref{sec:locality} identifies for a single arm: each arm's policy is a memoryless local feedback toward its own goal, so which arm carries the battery and when the handoff happens is a decision no per-arm policy computes on its own, exactly the kind this architecture leaves to the operator rather than to a global planner. The head is put to the same kind of test: in the independent scenario the shield's collision box spans the full height from below the table top to above the batteries, so a battery is not visible from a head pose that does not look past the shield, and finding that view is itself part of the task. Belief estimation is stressed the same way: every graspable battery carries both a top and a side goal candidate regardless of which one the scenario's geometry actually admits (Section~\ref{sec:policies}), so the object-level belief of~\eqref{eq:objbelief} must resolve not only which object but which approach is intended, from poses that start close together whenever the operator's motion is still small or hesitant --- precisely the split its object-level sum is built to survive. The operator is in turn asked for large reorientations that exercise both mappings' own orientation-synchronisation machinery (Section~\ref{sec:clutchmode}, Section~\ref{sec:joystick}): a full turn from the home or last-placed orientation into a top- or side-grasp approach, and the reverse on placement. And the relay scenario's confined reach under the rack shelf --- table below, shelf above, support legs alongside --- is the cluttered configuration Section~\ref{sec:cbf} names directly as the case its barrier aggregation is sharpened for.
+Both scenarios exercise the whole architecture, not just the driven arm. The relay's handover is a bimanual case of Section~\ref{sec:locality}'s single-arm gap: no per-arm policy decides which arm carries the battery or when to hand off, so the operator does. The head faces the same test: tracking the gripper's top-grasp approach axis (Section~\ref{sec:headtrack}) forces it above the shield's full-height collision box, a viewpoint the relay scenario never demands. Belief estimation is stressed alike: every battery carries a top and a side goal candidate regardless of which the geometry admits (Section~\ref{sec:policies}), so the belief sum~\eqref{eq:objbelief} must resolve the intended approach from poses that start close together. The operator, in turn, swings the gripper through large reorientations exercising both mappings' synchronisation machinery (Section~\ref{sec:clutchmode}, Section~\ref{sec:joystick}), and threads the relay's confined reach under the rack shelf, the cluttered case Section~\ref{sec:cbf} names as sharpening its barrier aggregation.
 
 \subsection{Environment model and camera use}
 \label{sec:studyenv}
@@ -1027,7 +1029,7 @@ The perception pipeline was validated separately on the physical robot. The head
 \begin{figure}[t]
 \centering
 \includegraphics[width=0.85\linewidth]{shieldworld.png}
-\caption{The independent scenario, viewed from behind the robot in Gazebo. A transparent safety shield spans the table's full width, closing the low approach and forcing every grasp into a top grasp; two mirrored conveyor stations (green) flank the table, each reachable only by the arm on its own side, so the two errands run independently with no handover.}
+\caption{The independent scenario, from behind the robot: the shield forces a top grasp; each arm serves its own mirrored conveyor, independently.}
 \label{fig:shieldworld}
 \end{figure}
 
@@ -1059,7 +1061,212 @@ Each trial is captured as a single time-stamped recording of the robot and telem
 The subjective instrument is administered once per condition, after the participant has attempted that condition on both scenarios, rather than once per trial; it therefore carries no scenario field. It is a short form: a trimmed subset of standard workload items~\cite{hart1988nasatlx} together with three human--robot-interaction items --- perceived control, trust~\cite{jian2000trust}, and comfort --- each on an ordinal scale. It is collected electronically, with the condition picked from a fixed list rather than typed, so the key that joins a response to its trials cannot be mistyped. All six conditions are surveyed; the unassisted configuration used for familiarisation is not.
 
 \section{Results}
-% TODO: to be written
+\label{sec:results}
+
+Twenty-four participants completed the full grid of six conditions on both scenarios, giving 288 analysed trials; a twenty-fifth participant served as a pilot and is excluded. Every quantity below is first reduced to one number per trial, then averaged over the two scenarios so that each participant contributes exactly one value per condition, and it is those participant-level values that enter every test and every figure. Both scenarios are pooled rather than analysed separately because each participant met both under every condition, so the scenario is balanced out of the comparisons; the shield scenario is the easier of the two, and pooling therefore sets the absolute level of each measure between the two difficulties rather than at either one.
+
+\subsection{Statistical procedure}
+\label{sec:stats}
+
+The design is fully within-subject with two factors, the control mode --- clutch or joystick --- and the assistance channel --- force guidance alone, reference blending alone, or both. Each measure is therefore examined with a two-way repeated-measures analysis of variance over mode and assistance, and, because the six conditions are also of interest individually, with a Friedman test over the six cells followed by pairwise Wilcoxon signed-rank tests whose $p$ values are corrected with the Holm step-down procedure inside each metric family. The significance level is $0.05$ throughout.
+
+Two assumptions govern which of those two tracks carries a claim. Normality was assessed with the Shapiro--Wilk test applied to every condition separately, and sphericity with Mauchly's test; where sphericity is rejected, the Greenhouse--Geisser correction is applied to the degrees of freedom and the corrected $p$ value is the one reported. Sphericity is not testable, and is assumed, for a factor with only two levels, which covers the mode factor everywhere and the assistance factor in the four-cell measures of Section~\ref{sec:resauthority}. Table~\ref{tab:assumptions} collects both checks together with the outcome of the three analysis-of-variance effects.
+
+The picture that table paints is the reason the non-parametric track is treated as primary here. Nine of the fourteen measures fail Shapiro--Wilk in at least one condition, several of them decisively, and five fail Mauchly as well. Minimum clearance is the extreme case on both counts, for a reason that is structural rather than statistical and is taken up in Section~\ref{sec:ressafety}. Consequently, the analysis of variance is reported for the structure it reveals --- whether an effect lives in the mode, in the assistance, or in their interaction, and how much variance it explains --- while every claim that one condition differs from another rests on the Holm-corrected rank tests drawn on the figures. Partial eta squared, written $\eta^2_p$, accompanies each effect as its magnitude. Four panels are drawn on a vertical axis clipped to the data range rather than starting at zero --- movement smoothness, minimum clearance, mean intent confidence, and the rendered force under the joystick mapping --- because in each of them the values occupy a narrow band far from zero and bars grown from zero would be indistinguishable. In those four the differences must be read against the axis and never as ratios of bar heights.
+
+
+
+\subsection{Task performance}
+\label{sec:resperf}
+
+Five measures describe how the task was carried out. The task time
+\begin{equation}
+T = t_f - t_0,
+\label{eq:mT}
+\end{equation}
+with $t_0$ and $t_f \in \mathbb{R}$ the first and last instants of the recording, is the coarsest of them. The distance the two hands travelled to achieve it,
+\begin{equation}
+L = \sum_{a \in \{R,L\}} \int_{t_0}^{t_f} \lVert \dot{p}_a(t) \rVert \, \mathrm{d}t,
+\label{eq:mL}
+\end{equation}
+with $p_a(t) \in \mathbb{R}^3$ the position of gripper $a$, separates a direct execution from a wandering one of the same duration. Movement quality is summarised by the spectral arc length
+\begin{equation}
+\Phi = -\int_{0}^{\omega_c} \left[ \left(\frac{1}{\omega_c}\right)^{2} + \left(\frac{\mathrm{d}\hat{V}(\omega)}{\mathrm{d}\omega}\right)^{2} \right]^{1/2} \mathrm{d}\omega,
+\label{eq:mPhi}
+\end{equation}
+where $\hat{V}(\omega) = V(\omega)/V(0)$ is the magnitude spectrum of the hand speed profile normalised by its zero-frequency value and $\omega_c \in \mathbb{R}^+$ is the cutoff frequency. Because $\Phi$ is the negative arc length of that spectrum, it is at most zero and grows towards zero as motion becomes smoother. The mean hand speed
+\begin{equation}
+\bar{v} = \frac{1}{t_f-t_0} \int_{t_0}^{t_f} \lVert \dot{p}_A(t) \rVert \, \mathrm{d}t,
+\label{eq:mv}
+\end{equation}
+taken over the arm $A$ the operator is driving, completes the kinematic picture, and the mean relaxation of the tracking constraint,
+\begin{equation}
+\bar{\delta} = \frac{1}{t_f-t_0} \int_{t_0}^{t_f} \delta_A(t) \, \mathrm{d}t,
+\label{eq:mdelta}
+\end{equation}
+with $\delta_A$ the slack variable of~\eqref{eq:cost} for that arm, reports how much tracking the safety filter had to give up in order to stay feasible. A small $\bar{\delta}$ means the commanded motion was compatible with the constraints and was followed; a large one means it was not.
+
+Figure~\ref{fig:resmain} shows these five in its panels (a) to (e). Task time and path length tell one story twice. Assistance dominates both --- it explains roughly three quarters of the variance in each, $\eta^2_p = 0.74$ for $T$ and $0.77$ for $L$ --- while the control mode explains almost none of the task time and a moderate share of the path length. Force guidance alone is the worst configuration in both modes, and adding blending to it removes about a quarter of the task time and a third of the path length. The interaction on task time is significant but small, and its shape is worth stating plainly: the two modes are not equivalent at every level of assistance. Joystick with force guidance alone is the slowest condition of the six at $306$~s, and joystick with both channels is the quickest at $196$~s, so the same mode occupies both extremes depending on what assistance accompanies it. Neither mode is faster in general, which is what the non-significant main effect of mode says, and Section~\ref{sec:reslearning} gives a further reason to distrust any mode claim built on time.
+
+Smoothness and speed separate the two modes where time does not. The joystick conditions are smoother --- $\Phi$ rises from $-9.73$ in the worst clutch condition to $-7.18$ in the best joystick one, a large effect of mode with $\eta^2_p = 0.52$ --- and, at the same time, slower in hand speed by a comparable margin. Read together with the path lengths, this says that clutch operators moved faster along longer and less regular paths, which is consistent with a position-mapped device whose workspace must be re-indexed: each re-index interrupts the motion and adds distance. The interaction on $\bar{v}$ is itself significant and large, $\eta^2_p = 0.38$, and reverses direction between modes: assistance slows the clutch hand and speeds the joystick one.
+
+The tracking slack is the measure on which blending acts most directly. Both factors are large and independent --- $\eta^2_p = 0.62$ for mode and $0.64$ for assistance, with no interaction --- and in both modes the two blended conditions sit roughly a quarter below the force-guidance-only one. Because $\bar\delta$ counts exactly the tracking the safety filter had to abandon, this is a statement about the commands themselves: a blended reference asks the controller for motion it is able to deliver, whereas an unassisted reference more often asks for motion that the constraints then have to refuse.
+
+
+
+\subsection{Safety}
+\label{sec:ressafety}
+
+Safety is reported through the barrier itself rather than through a raw distance. For the arm being driven, let $h_A(t) \in \mathbb{R}$ denote the aggregated barrier value of~\eqref{eq:softmin}, that is, the smooth lower bound on the distance between that arm and the nearest obstacle, with the carried object and the grasp target excluded from the pair set. The worst clearance of a trial is
+\begin{equation}
+h_{\min} = \min_{t \in \mathcal{T}_h} h_A(t),
+\label{eq:mhmin}
+\end{equation}
+where $\mathcal{T}_h \subset [t_0,t_f]$ collects the instants under operator control, the autonomous grasp phases being excluded because the gripper closes on the object by design during them. How long the filter was actually intervening is
+\begin{equation}
+T_{\lambda} = \int_{t_0}^{t_f} \mathbb{1}\!\left[\lambda_A(t) > 1\right] \mathrm{d}t,
+\label{eq:mTlam}
+\end{equation}
+with $\lambda_A$ the multiplier of the collision constraint for that arm and $\mathbb{1}[\cdot]$ the indicator function, so that $T_{\lambda}$ measures the seconds during which the commanded motion had to be altered to remain safe.
+
+Panels (f) and (g) of Figure~\ref{fig:resmain} report both. The clearance result is a null result, and it is the most important one in this section: no factor moves $h_{\min}$ --- mode, assistance, and their interaction all return $p > 0.26$, the Friedman test over the six conditions gives $p = 0.122$, and every condition sits between $1.9$ and $2.0$~cm. That figure is not an operator achievement but the barrier's own design margin, and its constancy is the evidence that the safety layer did what it was built to do irrespective of who was driving or what help they were given. The severe departure from normality that Table~\ref{tab:assumptions} records for this measure has the same origin: the distribution is a narrow spike at the constraint boundary with a short tail of trials in which a genuine barrier fight pushed slightly past it, which is not a shape any test of means was designed for.
+
+Given that the floor never moves, the informative safety measure is the second one, the time spent holding it. Here both factors are large --- $\eta^2_p = 0.46$ for mode and $0.51$ for assistance --- and the ordering is unambiguous: the filter is active for $83$~s under clutch with force guidance alone and for $53$~s under joystick with both channels, a reduction of about a third. Since the clearance attained is identical in every case, this difference is not a difference in safety but in how often the operator drove into a situation from which the filter had to rescue the motion. Assistance, and blending in particular, reduces the number of such situations rather than the margin kept when one arises.
+
+
+
+\subsection{Intent estimation and shared authority}
+\label{sec:resauthority}
+
+The remaining robot-side measures describe the assistance itself: how confidently the intention estimator committed to a goal, how well its policy agreed with the operator, how much of the motion it was granted, and how far the command it produced departed from the one it was given. The first is the time-averaged confidence in the leading goal,
+\begin{equation}
+\bar{b} = \frac{1}{t_f-t_0} \int_{t_0}^{t_f} \max_k b_k(t) \, \mathrm{d}t,
+\label{eq:mb}
+\end{equation}
+with $b_k(t)$ the posterior probability of goal $k$. The peak of that same quantity is not informative, since it reaches its ceiling in nearly every trial of every condition; the time average is what distinguishes an estimator that commits early and holds from one that keeps changing its mind. Agreement between operator and policy is the mean cosine
+\begin{equation}
+\rho = \frac{1}{|\mathcal{T}_a|} \sum_{t \in \mathcal{T}_a} \frac{v_h(t)^{\top} \pi(t)}{\lVert v_h(t)\rVert \, \lVert \pi(t)\rVert},
+\label{eq:mrho}
+\end{equation}
+where $v_h(t)$ is the twist the operator commands, $\pi(t)$ the belief-weighted policy twist, and $\mathcal{T}_a$ the set of instants at which the operator is actually driving, so that idle intervals do not contribute. The share of the trial in which the policy held the larger part of the authority is
+\begin{equation}
+\phi_\alpha = \frac{\left|\left\{ t : \alpha(t) > 1/2 \right\}\right|}{\left|\left\{ t \in [t_0,t_f] \right\}\right|},
+\label{eq:mphi}
+\end{equation}
+with $\alpha(t) \in [0,1]$ the arbitration weight of~\eqref{eq:blend}. Finally, the extent to which arbitration rewrote the operator's command is
+\begin{equation}
+\bar{\Delta} = \frac{1}{|\mathcal{T}_a|} \sum_{t \in \mathcal{T}_a} \lVert v_b(t) - v_h(t) \rVert, \qquad
+\Delta_{\max} = \max_{t \in \mathcal{T}_a} \lVert v_b(t) - v_h(t) \rVert,
+\label{eq:mDelta}
+\end{equation}
+with $v_b(t)$ the blended twist finally sent to the safety filter and the norms taken over the linear part alone, so that both are expressed in metres per second. These two are the transparency measure of the shared-control literature: a system that executes faithfully what it is asked keeps them near zero, and one that overrides its operator does not. Neither is given a preferred direction here, because altering the command is the declared purpose of the blending channel; whether a given amount of alteration is help or interference is decided by the measures that surround it, not by $\bar{\Delta}$ alone. The four measures of this section exist only where arbitration exists, that is, in the four conditions that include the blending channel.
+
+Panel (h) of Figure~\ref{fig:resmain} and panels (a) to (d) of Figure~\ref{fig:resextra} report them. Confidence is a mode effect and nothing else: the estimator is surer under joystick control, $\eta^2_p = 0.60$, and entirely indifferent to which assistance accompanies it. The mechanism is the one built into the estimator, which scores the operator's twist against goal-directed policies; a velocity mapping produces a continuous stream of such evidence, while a position mapping interrupts it at every re-index. Agreement and authority then move together and, unusually for this study, both show a significant interaction of comparable size to their main effects. Agreement roughly triples from the weakest condition to the strongest, and the share of autonomy-led time roughly doubles, and in both the gain from adding force guidance to blending is about twice as large under joystick control as under clutch. This is the clearest mechanistic finding of the study: force guidance and reference blending act through the same channel in a velocity mapping, since the force the operator feels is a velocity cue and the blending alters a velocity, whereas in a position mapping the two speak different languages and reinforce each other less.
+
+The two transparency measures are the ones that most repay careful reading, because they disagree. On the average, arbitration alters the joystick command more --- $\bar{\Delta}$ rises from $1.4$~cm\,s$^{-1}$ under clutch with blending to $2.2$~cm\,s$^{-1}$ under joystick with both channels. On the worst single instant, the ordering reverses and the margin widens: $\Delta_{\max}$ reaches $19$~cm\,s$^{-1}$ under clutch with both channels against $8$~cm\,s$^{-1}$ under joystick. Arbitration in the joystick mapping is therefore a steady, small hand on the command, while in the clutch mapping it mostly stands aside and then intervenes in large discrete corrections. The same behaviour appears in the peak measure's departure from normality in Table~\ref{tab:assumptions}, which is produced by exactly those rare large interventions. Taken with the agreement result, this explains why the joystick conditions score better without the operator being overridden more violently: the assistance is present more of the time and disagrees with the operator less when it is.
+
+
+
+\subsection{Operator effort at the interface}
+\label{sec:reseffort}
+
+The measures considered so far are recorded on the robot side. What the operator physically did is described by the wrench the device rendered against the hand,
+\begin{equation}
+\bar{f} = \frac{1}{t_f-t_0} \int_{t_0}^{t_f} \lVert f_d(t) \rVert \, \mathrm{d}t,
+\label{eq:mf}
+\end{equation}
+with $f_d(t) \in \mathbb{R}^3$ the commanded device force, and, in the clutch mapping only, by the number of re-indexing operations
+\begin{equation}
+N_c = \left| \left\{ t : c(t^-) = 0 \ \wedge \ c(t^+) = 1 \right\} \right|,
+\label{eq:mNc}
+\end{equation}
+that is, the count of rising edges of the clutch signal $c(t) \in \{0,1\}$.
+
+These two must be read within a mode and never across one. The two mappings render different things through the same actuator: in the clutch mapping the wrench is a tether that pulls the handle towards the gripper pose, whereas in the joystick mapping it is a centring spring that returns the handle to neutral and whose magnitude therefore encodes commanded velocity rather than tracking error. Both are newtons, but a clutch newton and a joystick newton do not denote the same physical situation, and the absolute levels in panels (e) and (f) of Figure~\ref{fig:resextra} are consequently not comparable between them. Re-indexing has no counterpart at all outside the clutch mapping. For this reason no mode effect is reported for either measure in Table~\ref{tab:assumptions}, and each is analysed as a one-way repeated-measures comparison of the three assistance levels inside its own mode.
+
+Within the clutch mapping the effect is large and unambiguous. Mean rendered force falls from $0.82$~N under force guidance alone to $0.48$~N with blending, a reduction of about $40$~per cent with $\eta^2_p = 0.77$, and the number of re-indexing operations falls from $22$ to $16$ per trial with $\eta^2_p = 0.44$. Blending therefore reduces both the force the operator absorbs and the number of times the workspace limit must be worked around. Within the joystick mapping the same comparison returns nothing: the three levels sit within $0.1$~N of each other and the test does not separate them, $p = 0.197$. This asymmetry follows from what each wrench represents. The clutch tether grows with the discrepancy between the handle and the gripper, and blending reduces that discrepancy by steering the reference towards the goal, so the tether relaxes; the joystick centring spring is a function of how far the operator displaces the handle, which is a matter of how fast they choose to drive and is largely unaffected by what the arbitration does downstream.
+
+
+
+
+
+
+
+\begin{figure}[p]
+\centering
+\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/res_T.pdf}\caption{Task time}\label{fig:resT}\end{subfigure}\hfill
+\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/res_L.pdf}\caption{Hand path length}\label{fig:resL}\end{subfigure}
+\vspace{0.35em}
+\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/res_Phi.pdf}\caption{Movement smoothness}\label{fig:resPhi}\end{subfigure}\hfill
+\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/res_vbar.pdf}\caption{Mean hand speed}\label{fig:resv}\end{subfigure}
+\vspace{0.35em}
+\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/res_deltabar.pdf}\caption{Mean tracking slack}\label{fig:resdelta}\end{subfigure}\hfill
+\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/res_hmin.pdf}\caption{Minimum clearance}\label{fig:reshmin}\end{subfigure}
+\vspace{0.35em}
+\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/res_Tlambda.pdf}\caption{Filter active time}\label{fig:resTlam}\end{subfigure}\hfill
+\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/res_bbar.pdf}\caption{Mean intent confidence}\label{fig:resb}\end{subfigure}
+\caption{Condition means with the standard error of the mean; brackets mark the Holm-corrected significant pairs. Symbols and units are defined in Sections~\ref{sec:resperf}--\ref{sec:resauthority}.}
+\label{fig:resmain}
+\end{figure}
+
+\begin{figure}[p]
+\centering
+\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/res_rho.pdf}\caption{Operator--policy agreement}\label{fig:resrho}\end{subfigure}\hfill
+\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/res_phialpha.pdf}\caption{Autonomy-led time}\label{fig:resphi}\end{subfigure}
+\vspace{0.35em}
+\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/res_Dmean.pdf}\caption{Mean command alteration}\label{fig:resDmean}\end{subfigure}\hfill
+\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/res_Dpeak.pdf}\caption{Peak command alteration}\label{fig:resDpeak}\end{subfigure}
+\vspace{0.35em}
+\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/res_fbarC.pdf}\caption{Rendered force, clutch}\label{fig:resfC}\end{subfigure}\hfill
+\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/res_fbarJ.pdf}\caption{Rendered force, joystick}\label{fig:resfJ}\end{subfigure}
+\vspace{0.35em}
+\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/res_Nc.pdf}\caption{Re-indexing operations}\label{fig:resNc}\end{subfigure}\hfill
+\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/res_learn_slot.pdf}\caption{Score along the session}\label{fig:reslearnslot}\end{subfigure}
+\caption{Panels (a) to (d) exist only where blending is active and show four conditions; (e) to (g) compare assistance inside one mapping and their levels are not comparable across panels; (h) tracks three standardised scores over the session.}
+\label{fig:resextra}
+\end{figure}
+
+\subsection{Practice and order}
+\label{sec:reslearning}
+
+Each participant met the six conditions in a fixed sequence of slots, the three conditions of one mode before the three of the other, with the mode order balanced across participants. Balancing makes the averages fair, but it does not make them free of practice, since whichever mode a participant met second was performed by a more practised operator. Two checks decide whether any comparison above is contaminated. Panel (h) of Figure~\ref{fig:resextra} reports the first of them.
+
+The first asks whether performance drifts along the session. The composite score, obtained by averaging the standardised family scores, is flat: its slope over the six slots is not significant, so the study as a whole shows no overall practice trend. Two families do drift, in opposite directions. Time and effectiveness improves, which is the expected shape of learning, while operator effort deteriorates, that is, participants were working the handle harder by the end of the session than at its beginning. Fatigue is the natural reading of a measure that worsens monotonically while task performance improves, and it is a caution for any effort claim that relies on ordering.
+
+The second check asks whether the difference between the two modes depends on which of them a participant met first. Splitting the twenty-four participants into the twelve who met the clutch mapping first and the twelve who met the joystick mapping first, the joystick-minus-clutch difference in composite score is statistically indistinguishable between the two groups, $p = 0.544$ by rank-sum test, the two group means differing by less than a tenth of a standard deviation. This is the single most important number for the mode conclusion, because it establishes that the advantage is not an artefact of practice accumulated before the second mode was reached. The same check fails, however, for the time-and-effectiveness and operator-effort families, which is why no claim in Section~\ref{sec:resperf} rests on task time alone, and why the speed comparison between modes is reported there as undetermined rather than as a result.
+
+
+
+
+
+
+\begin{table}[t]
+\centering
+\small
+\caption{Assumption checks and analysis-of-variance outcomes for every reported measure. Symbols are defined with the corresponding measure in Sections~\ref{sec:resperf}--\ref{sec:reseffort}. The Shapiro--Wilk column gives the smallest $p$ over the conditions of that measure, so a value below $0.05$ means at least one condition departs from normality; Mauchly's $p$ and the Greenhouse--Geisser $\varepsilon$ refer to the assistance factor, and the last three columns give the $p$ values of the two main effects and of their interaction, Greenhouse--Geisser corrected wherever $\varepsilon<1$. A dash marks a test that does not apply because the factor has only two levels or only one mode is involved.}
+\label{tab:assumptions}
+\begin{tabular}{lcccccc}
+\toprule
+ & Shapiro--Wilk & Mauchly & $\varepsilon$ & Mode & Assist. & Interaction \\
+\midrule
+$T$            & $0.003$   & $0.180$   & $0.87$ & $0.345$   & $<0.001$ & $0.033$ \\
+$L$            & $<0.001$  & $<0.001$  & $0.67$ & $0.002$   & $<0.001$ & $0.090$ \\
+$\Phi$         & $0.005$   & $0.282$   & $0.90$ & $<0.001$  & $<0.001$ & $0.306$ \\
+$\bar{v}$      & $0.247$   & $0.389$   & $0.92$ & $<0.001$  & $0.074$  & $<0.001$ \\
+$\bar{\delta}$ & $0.007$   & $0.006$   & $0.73$ & $<0.001$  & $<0.001$ & $0.707$ \\
+$h_{\min}$     & $<0.001$  & $<0.001$  & $0.68$ & $0.983$   & $0.262$  & $0.722$ \\
+$T_{\lambda}$  & $0.003$   & $0.633$   & $0.96$ & $<0.001$  & $<0.001$ & $0.323$ \\
+$\bar{b}$      & $0.169$   & $0.152$   & $0.86$ & $<0.001$  & $0.194$  & $0.175$ \\
+$\rho$         & $0.407$   & ---       & ---    & $<0.001$  & $<0.001$ & $<0.001$ \\
+$\phi_\alpha$  & $0.432$   & ---       & ---    & $<0.001$  & $<0.001$ & $<0.001$ \\
+$\bar{\Delta}$ & $0.375$   & ---       & ---    & $<0.001$  & $0.002$  & $0.743$ \\
+$\Delta_{\max}$& $<0.001$  & ---       & ---    & $<0.001$  & $0.031$  & $0.070$ \\
+$\bar{f}$      & $0.025$   & $<0.001$  & $0.66$ & ---       & $<0.001$ & --- \\
+$N_c$          & $0.002$   & $0.592$   & $0.96$ & ---       & $<0.001$ & --- \\
+\bottomrule
+\end{tabular}
+\end{table}
+
 
 
 %───────────────────────────────────────────────────────────────────────────────
