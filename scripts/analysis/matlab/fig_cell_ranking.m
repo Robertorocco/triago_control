@@ -38,7 +38,9 @@ hold(ax, 'on');
 rng(5, 'twister');
 for j = 1:numel(cells)
     k = order(j);
-    bar(ax, j, means(k), 0.6, 'FaceColor', studyplot.color(cells(k)), 'EdgeColor', 'none');
+    fc = studyplot.color(cells(k));
+    bar(ax, j, means(k), 0.6, 'FaceColor', fc, 'EdgeColor', fc * 0.72, ...
+        'LineWidth', 0.5, 'ShowBaseLine', 'off');
     errorbar(ax, j, means(k), cis(k), 'k', 'LineWidth', 1.2, 'CapSize', 8);
     plot(ax, j + (rand(n, 1) - 0.5) * 0.3, M(:, k), 'o', 'MarkerSize', 4, 'MarkerFaceColor', [0.75 0.75 0.75], 'MarkerEdgeColor', [0.4 0.4 0.4]);
 end

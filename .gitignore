@@ -11,6 +11,8 @@ __pycache__/
 *.lof
 *.lot
 *.toc
+*.fls
+*.fdb_latexmk
 technical_report.pdf
 
 # User-study data (rosbags, per-trial timeseries, figures) must stay local,

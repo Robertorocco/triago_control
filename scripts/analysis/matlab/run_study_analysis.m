@@ -184,12 +184,19 @@ R = movevars(R, {'p_holm', 'significant_raw', 'significant_holm'}, 'After', 'p_r
 % Diagnostic six-cell views: drawn next to their family metric to explain it
 % (a fraction against its seconds, a mean against its robust version); they
 % enter no family, no composite and no master-table row.
-DIAG_Q3 = ["cbf_active_s" "safety_nearmiss_s" "cbf_lambda_mean"];
+DIAG_Q3 = ["cbf_active_s" "safety_nearmiss_s" "cbf_lambda_mean" "cbf_lambda_peak" ...
+           "slack_peak" "qdot_meas_rms" "qdot_meas_max" "safety_min_dist_graspincl_m" ...
+           "intervention_mean_mps" "intervention_peak_mps"];
 for nm = DIAG_Q3
     if ~ismember(nm, trial.Properties.VariableNames), continue; end
     d = spec.dir(spec.name == nm);
-    M = participant_means(trial, nm, "cell", CELLS6);
-    S.Q3.(nm) = stat_rm_twoway(M, CELLS6, MODES6, ASSIST6, 'alpha', ALPHA, 'dir', d);
+    if spec.cell_scope(spec.name == nm) == "blend_only"
+        M = participant_means(trial, nm, "cell", CELLS4);
+        S.Q3.(nm) = stat_rm_twoway(M, CELLS4, MODES4, ASSIST4, 'alpha', ALPHA, 'dir', d);
+    else
+        M = participant_means(trial, nm, "cell", CELLS6);
+        S.Q3.(nm) = stat_rm_twoway(M, CELLS6, MODES6, ASSIST6, 'alpha', ALPHA, 'dir', d);
+    end
 end
 
 %% ---- console verdict ----

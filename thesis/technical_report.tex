@@ -1271,6 +1271,67 @@ $N_c$          & $0.002$   & $0.592$   & $0.96$ & ---       & $<0.001$ & --- \\
 \end{table}
 
 
+\subsection{Subjective experience}
+\label{sec:ressubj}
+
+Twenty-four volunteers took part, eighteen men and five women, one of whom did not return the opening form. Ages range from $20$ to $58$~years, with a mean of $28.0$ and a standard deviation of $7.7$ over the twenty-two who reported one. Twenty are right-handed and three report no strong hand preference. Self-rated familiarity with teleoperation devices averages $2.3$ on a five-point scale, with eleven participants placing themselves at the lowest level and six in the top two, so the sample is predominantly inexperienced. Every participant returned all six condition forms and the closing form, which yields 144 condition reports with no missing rating and forty-eight complete preference rankings.
+
+The instrument of Section~\ref{sec:studydata} carries six items answered on a seven-point ordinal scale. Mental demand $S_{\mathrm{md}}$ and physical demand $S_{\mathrm{pd}}$ are costs, on which a high score is unfavourable. Perceived success $S_{\mathrm{pf}}$, the sense of being in control of the robot's motion $S_{\mathrm{ct}}$, trust that the robot did what was intended $S_{\mathrm{tr}}$, and the judgement that the motion was smooth and comfortable $S_{\mathrm{sm}}$ are benefits, on which a high score is favourable. Reversing the two demand items as $8-S$ and averaging all six yields one subjective quality index $\bar{S}$ per condition, on the same seven-point scale and oriented so that a higher value denotes a better experience; the items are consistent enough for that summary to carry meaning, with Cronbach's $\alpha = 0.853$ over the 144 reports. Because the responses are ordinal, they are examined with the rank procedure of Section~\ref{sec:stats} alone, and Kendall's coefficient of concordance $W_{\mathrm{K}}$ accompanies each Friedman test as the magnitude of its effect.
+
+\begin{figure}[t]
+\centering
+\begin{subfigure}[t]{0.32\linewidth}\centering\includegraphics{results/res_subj_md.pdf}\caption{Mental demand}\label{fig:subjmd}\end{subfigure}\hfill
+\begin{subfigure}[t]{0.32\linewidth}\centering\includegraphics{results/res_subj_pd.pdf}\caption{Physical demand}\label{fig:subjpd}\end{subfigure}\hfill
+\begin{subfigure}[t]{0.32\linewidth}\centering\includegraphics{results/res_subj_pf.pdf}\caption{Perceived success}\label{fig:subjpf}\end{subfigure}
+\vspace{0.35em}
+\begin{subfigure}[t]{0.32\linewidth}\centering\includegraphics{results/res_subj_ct.pdf}\caption{Sense of control}\label{fig:subjct}\end{subfigure}\hfill
+\begin{subfigure}[t]{0.32\linewidth}\centering\includegraphics{results/res_subj_tr.pdf}\caption{Trust}\label{fig:subjtr}\end{subfigure}\hfill
+\begin{subfigure}[t]{0.32\linewidth}\centering\includegraphics{results/res_subj_sm.pdf}\caption{Motion comfort}\label{fig:subjsm}\end{subfigure}
+\caption{Questionnaire responses by condition, as means over the twenty-four participants with the standard error of the mean. Every item is answered on the same scale, running from $1$ at the axis floor to $7$; the vertical rule separates the clutch mapping from the joystick mapping, and the conditions are coded as in Table~\ref{tab:cells}. Brackets above the scale give the Holm-corrected Wilcoxon $p$ values of the two contrasts against force guidance alone within each mapping. Symbols are defined in the text.}
+\label{fig:ressubj}
+\end{figure}
+
+\begin{table}[t]
+\centering
+\small
+\caption{Effect of the assistance channel on each questionnaire item, collapsed over the two mappings, under force guidance alone (F), reference blending alone (B), and both together (FB). The Friedman test runs over those three settings, with Kendall's coefficient of concordance $W_{\mathrm{K}}$ as its effect size, and the last three columns are Holm-corrected Wilcoxon $p$ values. $\bar{S}$ is the composite index; a high score is unfavourable for $S_{\mathrm{md}}$ and $S_{\mathrm{pd}}$ and favourable otherwise. Symbols are defined in Section~\ref{sec:ressubj}.}
+\label{tab:subjassist}
+\begin{tabular}{lcccccccccc}
+\toprule
+ & \multicolumn{3}{c}{Mean rating} & \multicolumn{3}{c}{Friedman} & \multicolumn{3}{c}{Holm-corrected $p$} \\
+\cmidrule(lr){2-4}\cmidrule(lr){5-7}\cmidrule(lr){8-10}
+ & F & B & FB & $\chi^2(2)$ & $p$ & $W_{\mathrm{K}}$ & F--B & F--FB & B--FB \\
+\midrule
+$S_{\mathrm{md}}$ & $4.35$ & $3.23$ & $3.21$ & $19.50$ & $<0.001$ & $0.41$ & $0.002$   & $0.002$   & $0.985$ \\
+$S_{\mathrm{pd}}$ & $3.62$ & $2.62$ & $2.90$ & $18.30$ & $<0.001$ & $0.38$ & $0.008$   & $0.009$   & $0.062$ \\
+$S_{\mathrm{pf}}$ & $5.17$ & $5.90$ & $6.08$ & $17.26$ & $<0.001$ & $0.36$ & $0.003$   & $0.004$   & $0.154$ \\
+$S_{\mathrm{ct}}$ & $4.54$ & $5.77$ & $5.65$ & $17.46$ & $<0.001$ & $0.36$ & $<0.001$  & $0.008$   & $0.818$ \\
+$S_{\mathrm{tr}}$ & $4.42$ & $5.81$ & $5.77$ & $24.21$ & $<0.001$ & $0.50$ & $<0.001$  & $<0.001$  & $0.873$ \\
+$S_{\mathrm{sm}}$ & $4.29$ & $5.65$ & $5.83$ & $22.07$ & $<0.001$ & $0.46$ & $0.001$   & $<0.001$  & $0.180$ \\
+\midrule
+$\bar{S}$         & $4.41$ & $5.55$ & $5.54$ & $27.85$ & $<0.001$ & $0.58$ & $<0.001$  & $<0.001$  & $0.987$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[t]
+\centering
+\includegraphics{results/res_subj_ranks.pdf}
+\caption{Preference ranking of the three assistance settings within each mapping, as the number of the twenty-four participants placing each condition first, second, or third. The horizontal axis counts participants, so every row sums to twenty-four, and every segment is annotated with its own count. The horizontal rule separates the clutch mapping from the joystick mapping, and the conditions are coded as in Table~\ref{tab:cells}.}
+\label{fig:subjranks}
+\end{figure}
+
+Figure~\ref{fig:ressubj} reports every item in every condition, and one pattern governs all six. The assistance channel separates the conditions, it separates them in the same direction under both mappings, and force guidance alone is the least favourable of the three settings on every item. Table~\ref{tab:subjassist} gives the statistics collapsed over the mapping. The Friedman test rejects for all six items and for the index, with $W_{\mathrm{K}}$ between $0.36$ and $0.58$, a large effect for a within-subject design of this size, and the index rises from $4.41$ under force guidance alone to $5.55$ under blending and $5.54$ under both channels together.
+
+Two features of that pattern matter more than the omnibus result. The first is which items move most. Blending removes authority from the operator, yet the two items it raises most are precisely the ones that a loss of authority might have been expected to cost: the sense of control climbs from $4.54$ to $5.77$, and trust from $4.42$ to $5.81$. Participants did not experience the arbitration as authority taken away but as the robot doing what they meant. The second is what does not move. Blending alone and blending with force guidance are indistinguishable on every item and on the index, the corrected $p$ never falling below $0.06$, so the haptic channel adds nothing the operator can detect once the reference is already being blended. The one exception is physical demand inside the clutch mapping, where the two blended settings do differ, $p = 0.026$; it has no counterpart under the joystick mapping and does not survive collapsing the two.
+
+The mapping itself is subjectively invisible. None of the six items separates the two, and neither does the index, which differs by $0.13$ points in favour of the clutch mapping, $p = 0.498$. The largest of the seven contrasts is motion comfort, at $0.29$ points, and it too favours the clutch mapping, $p = 0.092$. This deserves to be stated against the objective record, because the two disagree: the joystick mapping produces the shorter hand path $L$ and the more confident intent estimate $\bar{b}$, yet none of that advantage appears in what the operators reported, and the one subjective trend that does appear points the other way.
+
+
+
+Ranking the three assistance settings inside each mapping reproduces that result through a different question format. Figure~\ref{fig:subjranks} gives the distributions. Under the clutch mapping the mean ranks are $2.62$, $1.75$, and $1.62$ for force guidance, blending, and both together, $\chi^2(2) = 14.25$, $p < 0.001$, $W_{\mathrm{K}} = 0.30$; under the joystick mapping they are $2.88$, $1.50$, and $1.62$, $\chi^2(2) = 27.75$, $p < 0.001$, $W_{\mathrm{K}} = 0.58$. Force guidance alone was placed last by seventeen of the twenty-four participants under the clutch mapping and by twenty-one of twenty-four under the joystick mapping, where it drew no first place at all. The two blended settings are again indistinguishable from one another, $p = 0.663$ in both mappings, so the ordering the ratings establish is confirmed by an instrument that forces a choice rather than inviting a score.
+
+Asked at the end of the session which of the two mappings had been the better overall, thirteen participants chose the clutch and eleven the joystick, an even split, exact binomial $p = 0.839$. The question offered no neutral option, so the count cannot separate a divided population from an indifferent one; read together with the flat index contrast above, indifference is at least as plausible a reading as division.
 
 %───────────────────────────────────────────────────────────────────────────────
 \chapter{Discussion}

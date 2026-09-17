@@ -71,7 +71,9 @@ hold(ax, 'on');
 rng(5, 'twister');
 for r = 1:6
     k = ord(r);
-    barh(ax, r, mu(k), 0.62, 'FaceColor', studyplot.color(CELLS(k)), 'EdgeColor', 'none');
+    fc = studyplot.color(CELLS(k));
+    barh(ax, r, mu(k), 0.62, 'FaceColor', fc, 'EdgeColor', fc * 0.72, ...
+         'LineWidth', 0.5, 'ShowBaseLine', 'off');
     errorbar(ax, mu(k), r, ci(k), 'horizontal', 'k', 'LineStyle', 'none', 'LineWidth', 1.1, 'CapSize', 6);
     plot(ax, M(:, k), r + (rand(n, 1) - 0.5) * 0.35, 'o', 'MarkerSize', 4, 'MarkerFaceColor', [0.8 0.8 0.8], 'MarkerEdgeColor', [0.45 0.45 0.45]);
 end

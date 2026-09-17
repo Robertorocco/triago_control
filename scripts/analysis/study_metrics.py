@@ -540,6 +540,7 @@ def compute_metrics(series: dict, metadata: dict | None = None,
         m["alpha_autonomy_frac"] = round(float(np.nanmean(np.asarray(alpha) > 0.5)), 4)
         vu = _stack(bd, range(1, 7))
         vp = _stack(bd, range(7, 13))
+        vb = _stack(bd, range(13, 19))
         if vu is not None and vp is not None:
             nu = np.linalg.norm(vu, axis=1)
             act = nu > 1e-4
@@ -555,9 +556,22 @@ def compute_metrics(series: dict, metadata: dict | None = None,
                 m["user_active_frac"] = 0.0
         else:
             m["agreement_mean_cos"] = m["user_active_frac"] = nan
+        # Transparency in the sense this literature uses it: the magnitude by which
+        # arbitration altered the operator's own command, ||v_blend - v_user||.
+        # Linear part only, so the number is one physical quantity in m/s, and only
+        # while the operator is actually driving -- an idle user commands zero and
+        # the idle autonomous crawl would otherwise read as total intervention.
+        if vu is not None and vb is not None and np.any(np.linalg.norm(vu, axis=1) > 1e-4):
+            act = np.linalg.norm(vu, axis=1) > 1e-4
+            dv = np.linalg.norm((vb - vu)[act, :3], axis=1)
+            m["intervention_mean_mps"] = round(float(np.nanmean(dv)), 4)
+            m["intervention_peak_mps"] = round(float(np.nanmax(dv)), 4)
+        else:
+            m["intervention_mean_mps"] = m["intervention_peak_mps"] = nan
     else:
         m["alpha_mean"] = m["alpha_autonomy_frac"] = nan
         m["agreement_mean_cos"] = m["user_active_frac"] = nan
+        m["intervention_mean_mps"] = m["intervention_peak_mps"] = nan
 
     # --- intent inference (shared) ---
     gp = series.get(T_GOALPROB)
@@ -618,6 +632,8 @@ _SUMMARY_LAYOUT = [
     ("Assistance", [("alpha_mean", "mean authority alpha", ""),
                     ("alpha_autonomy_frac", "time autonomy-led", "frac"),
                     ("agreement_mean_cos", "user-policy agreement", "cos"),
+                    ("intervention_mean_mps", "command alteration (mean)", "m/s"),
+                    ("intervention_peak_mps", "command alteration (peak)", "m/s"),
                     ("autonomy_grasp_time_s", "autonomous grasp time", "s")]),
     ("Intent inference", [("belief_max_prob", "max belief prob", ""),
                           ("belief_mean_prob", "mean belief prob", ""),

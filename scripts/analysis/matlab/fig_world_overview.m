@@ -39,7 +39,9 @@ if opts.compact
     hold(ax, 'on');
     for j = 1:2
         x = (1:nf) - 0.2 + 0.4 * (j - 1);
-        bar(ax, x, V(:, j), 0.36, 'FaceColor', studyplot.color(worlds(j)), 'EdgeColor', 'none', 'DisplayName', worlds(j));
+        fc = studyplot.color(worlds(j));
+        bar(ax, x, V(:, j), 0.36, 'FaceColor', fc, 'EdgeColor', fc * 0.72, 'LineWidth', 0.5, ...
+            'ShowBaseLine', 'off', 'DisplayName', worlds(j));
         errorbar(ax, x, V(:, j), C(:, j), 'k', 'LineStyle', 'none', 'LineWidth', 0.8, 'CapSize', 3, 'HandleVisibility', 'off');
     end
     for i = 1:nf

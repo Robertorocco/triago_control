@@ -33,8 +33,12 @@ REST_METRICS = ["teleop_time_s", "ee_path_efficiency", "ee_speed_mean_mps", "aut
                 "safety_mean_dist_m", "safety_nearmiss_frac", "safety_nearmiss_s", "safety_nearmiss_episodes", ...
                 "cbf_active_s", "cbf_lambda_active_median", ...
                 "slack_mean", "qdot_cmd_max", ...
-                "belief_mean_prob", "belief_max_prob", "belief_time_to_conf_s", ...
+                "belief_mean_prob", "belief_max_prob", "belief_time_to_conf_s", "belief_confident_ever", ...
                 "agreement_mean_cos", "alpha_mean", "alpha_autonomy_frac", "user_active_frac", ...
+                "intervention_mean_mps", "intervention_peak_mps", ...
+                "force_mean_N", "force_peak_N", "force_impulse_Ns", "clutch_presses", "clutch_duty_frac", ...
+                "cbf_lambda_peak", "slack_peak", "qdot_meas_rms", "qdot_meas_max", ...
+                "safety_min_dist_graspincl_m", "cbf_lambda_mean", ...
                 "fam_human_effort", "fam_intent_understanding", "fam_assistance_quality"];
 
 if isempty(RESULTS_DIR)
@@ -692,6 +696,138 @@ fig_paper_panels(S, items, ["fam_human_effort", "fam_intent_understanding", ...
 % of the variation. Keep the caveat of 6e in mind: this measures how well the
 % help and the operator lined up, which is a precondition for the help being
 % useful rather than a performance outcome in itself.
+%% 6g. Operator effort at the handle — comparable only inside one mode
+% These are the quantities that measure *the operator* rather than the robot,
+% and they are the reason section 6f's "human effort" score is thin. They are
+% shown here in the only framing that is valid for them.
+%
+% *Why there is no six-bar chart.* In clutch mode the handle renders a tether
+% that pulls towards the gripper; in joystick mode it renders a centring spring
+% that returns to neutral. Both are newtons, but they are not the same physical
+% quantity — a clutch newton and a joystick newton mean different things, so a
+% bar chart putting them side by side would invite a comparison that is not
+% meaningful. Clutch presses exist only in the three clutch conditions at all.
+% Each metric is therefore drawn *within* one mode, three bars, F against B
+% against FB. Read down a chart, never across two.
+
+fig_paper_panels(S, items, ["force_mean_N", "force_peak_N", "force_impulse_Ns"], ...
+                 'source', "Q2_withinC", 'cols', 1, 'panel_h', 235, 'name', 'handle effort, clutch');
+%%
+% *Clutch mode.* Mean force is the average magnitude the hand had to absorb,
+% peak is the worst instant, and impulse is force integrated over the trial —
+% the closest thing here to total physical work done against the device. Impulse
+% inherits trial length, so a condition that finishes sooner is credited partly
+% for being quicker; read it next to mean force, which does not.
+
+fig_paper_panels(S, items, ["force_mean_N", "force_peak_N", "force_impulse_Ns"], ...
+                 'source', "Q2_withinJ", 'cols', 1, 'panel_h', 235, 'name', 'handle effort, joystick');
+%%
+% *Joystick mode.* Same three quantities inside the joystick conditions. The
+% absolute level is not comparable with the chart above; the pattern across
+% F/B/FB is.
+
+fig_paper_panels(S, items, ["clutch_presses", "clutch_duty_frac"], ...
+                 'source', "Q2_withinC", 'cols', 1, 'panel_h', 235, 'name', 'clutch usage');
+%%
+% *Clutch usage, clutch conditions only.* A press is one disengage-reposition-
+% re-engage cycle — the indexing motion a position-mapped device needs when the
+% hand runs out of workspace. Duty is the share of the trial spent disengaged.
+% Both are pure overhead: time and attention spent on the device instead of on
+% the task, with no counterpart in joystick mode.
+%% 6h. How much the assistance altered the command
+% This is the *transparency* measure of the shared-control literature, which the
+% rest of this page did not have: the size of the gap between what the operator
+% asked for and what the arbitration actually sent to the robot,
+% ‖v_blend − v_user‖, averaged over the moments the operator was driving.
+%
+% It exists only where there is arbitration to measure — the *B* and *FB*
+% conditions — so these are *four-bar* charts. It is deliberately marked
+% "neither better nor worse": altering the command is what blending is for, so a
+% large value is invasiveness and a small one is deference, and which of those is
+% desirable is the question the rest of the study answers, not something this
+% number settles on its own. Read it against agreement in 6e: alteration that
+% goes *with* the operator is help, alteration that goes against them is a fight.
+
+fig_paper_panels(S, items, ["intervention_mean_mps", "intervention_peak_mps"], ...
+                 'cols', 1, 'panel_h', 235, 'name', 'command alteration');
+%%
+% The mean is the steady level of intervention; the peak is the single largest
+% moment, which is what the operator actually notices as a tug. Both are in m/s
+% of end-effector command, linear part only, so they are one physical quantity.
+%% 6i. Quantities kept for completeness, with their defects
+% Nothing here is part of any family score or of the composite. Each is shown
+% because it was measured and might be asked about, and each carries the reason
+% it is not used.
+
+fig_paper_panels(S, items, ["cbf_lambda_peak", "slack_peak", "qdot_meas_rms", "qdot_meas_max"], ...
+                 'cols', 1, 'panel_h', 235, 'name', 'peak and plant-side diagnostics');
+%%
+% *Peak barrier multiplier* and *peak tracking slack* are single worst instants,
+% so one bad moment in one trial moves a whole condition's average: the barrier
+% multiplier in particular spikes by three to six orders of magnitude during a
+% genuine barrier fight, which is exactly why the safety family uses the median
+% over active samples instead. Treat these two as "did anything extreme happen",
+% not as a level. *Measured joint-rate RMS and peak* are the plant-side echo of
+% the commanded rates in 3c and 6c — they should track them closely, and a
+% divergence would mean the arm was not following its own command; they are
+% here as that check, not as an independent result.
+
+fig_paper_panels(S, items, ["safety_min_dist_graspincl_m", "belief_confident_ever"], ...
+                 'cols', 1, 'panel_h', 235, 'name', 'superseded metrics');
+%%
+% *Raw minimum distance* is the clearance signal before the carried object is
+% excluded. Whenever a cylinder is in the gripper the payload overlaps the
+% gripper's own envelope, so this reads about −3.5 cm in every condition and
+% measures the grasp, not the obstacles. It is superseded by the per-arm
+% clearance of 3b and shown only so the two are not confused.
+%
+% *Intent ever confident* asks whether the belief crossed 0.80 at any point in
+% the trial. It did, in essentially every trial of every condition, which is a
+% real result — the estimator never failed outright — but it leaves nothing to
+% compare. Mean intent confidence in 6d is the discriminating version.
+%% 6j. Did people simply get better as they went?
+% Everything above compares conditions. This section asks the other question:
+% how much of any difference is just *practice*. It is the evidence behind the
+% first warning of section 7, which until now this page only asserted.
+%
+% Each participant met the six conditions in a fixed sequence of *slots*, and
+% the order was balanced across participants — half met the three clutch
+% conditions first, half the three joystick ones. That balancing is what makes
+% the averages fair. It does not make them free of practice: if people improve
+% over the session, whichever mode a participant met *second* was performed by a
+% more practised operator.
+%
+% The two checks are: does the score drift along the slots (practice), and does
+% the joystick-minus-clutch gap depend on which mode came first (order bias). A
+% family that fails the second one cannot support a clean mode claim, however
+% small its p-value in section 3.
+
+fig_learning_overview(S, items, study_families(), 'compact', true);
+%%
+% The top panel is each family score against the slot — a line that climbs
+% means people got better at that family as the session went on, whatever
+% condition they happened to be in; the thick black line is the composite. The
+% bottom panel is the order check: each participant's joystick-minus-clutch gap,
+% split by which mode they met first. (The line colours identify families, not
+% conditions; they are not the blue and orange of the rest of this page.)
+%
+% *The composite is clean on both counts* — flat across the slots, and the same
+% mode gap whichever mode came first (p = 0.54). That is the single most
+% important result on this page for the mode conclusion: the headline "joystick
+% is better" is not a practice artefact.
+%
+% *Human effort is the steepest line by far*, and it runs downhill: the score
+% falls across the session, i.e. operators were working the handle harder by
+% the end, not less. *Time and effectiveness climbs.* Those two are exactly the
+% families the order check flags in section 7, and it is why the mode
+% comparison on task time is reported as "none detected" and the speed result
+% is never claimed as a win. *Safety, motion quality, intent understanding and
+% the composite are flat*, so the claims built on them are not practice in
+% disguise.
+%
+% The full per-family order split — each family's mode gap divided by which
+% mode the participant met first — is in the long report; only the composite
+% version is shown here, because it is the one the headline conclusion rests on.
 %% 7. What this page does not tell you
 % * *The mode comparison on time-based quantities is partly a practice effect.*
 % Participants improved over their twelve trials — task time fell by about 11 s

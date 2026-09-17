@@ -10,20 +10,24 @@ methods (Static)
 
     function c = color(name)
         % Palette: control modes, assistance levels, worlds, and the 6 cells.
+        % Each mode is one hue ramp (Clutch blue, Joystick amber->vermillion) so
+        % a cell's mode is readable before its code is; the ramps rotate hue as
+        % well as lightness because three steps of a single hue cannot hold the
+        % >=15 OKLab dE that neighbouring bars need to stay apart in print.
         switch string(name)
-            case "C",      c = [0.20 0.42 0.68];
-            case "J",      c = [0.85 0.45 0.20];
-            case "F",      c = [0.55 0.70 0.35];
-            case "B",      c = [0.25 0.60 0.55];
-            case "FB",     c = [0.15 0.40 0.50];
-            case "rack",   c = [0.20 0.42 0.68];
-            case "shield", c = [0.85 0.45 0.20];
-            case "CF",     c = [0.55 0.70 0.90];
-            case "CB",     c = [0.35 0.55 0.80];
-            case "CFB",    c = [0.15 0.35 0.65];
-            case "JF",     c = [0.95 0.72 0.50];
-            case "JB",     c = [0.90 0.55 0.30];
-            case "JFB",    c = [0.75 0.35 0.10];
+            case "C",      c = [0.169 0.424 0.690];
+            case "J",      c = [0.910 0.451 0.059];
+            case "F",      c = [0.553 0.827 0.373];
+            case "B",      c = [0.098 0.620 0.541];
+            case "FB",     c = [0.059 0.373 0.471];
+            case "rack",   c = [0.169 0.424 0.690];
+            case "shield", c = [0.910 0.451 0.059];
+            case "CF",     c = [0.455 0.682 0.910];
+            case "CB",     c = [0.239 0.486 0.745];
+            case "CFB",    c = [0.090 0.290 0.490];
+            case "JF",     c = [0.976 0.753 0.290];
+            case "JB",     c = [0.937 0.486 0.122];
+            case "JFB",    c = [0.800 0.200 0.067];
             case "grey",   c = [0.55 0.55 0.55];
             otherwise,     c = [0.40 0.40 0.40];
         end
@@ -164,7 +168,9 @@ methods (Static)
         k = numel(vals);
         hold(ax, 'on');
         for j = 1:k
-            bar(ax, j, vals(j), 0.6, 'FaceColor', studyplot.color(levels(j)), 'EdgeColor', 'none');
+            fc = studyplot.color(levels(j));
+            bar(ax, j, vals(j), 0.6, 'FaceColor', fc, 'EdgeColor', fc * 0.72, ...
+                'LineWidth', 0.5, 'ShowBaseLine', 'off');
             if ~isnan(lo(j)), errorbar(ax, j, vals(j), vals(j) - lo(j), hi(j) - vals(j), 'k', 'LineWidth', 1.2, 'CapSize', 8); end
         end
         hold(ax, 'off');

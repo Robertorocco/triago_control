@@ -53,7 +53,9 @@ if opts.compact
         for j = 1:k
             y = (1:nf)' - 0.375 + wdt * (j - 0.5);
             ypos(:, j) = y;
-            barh(ax, y, V(:, j), wdt * 0.9, 'FaceColor', studyplot.color(levels(j)), 'EdgeColor', 'none', 'DisplayName', levels(j));
+            fc = studyplot.color(levels(j));
+            barh(ax, y, V(:, j), wdt * 0.9, 'FaceColor', fc, 'EdgeColor', fc * 0.72, 'LineWidth', 0.5, ...
+                 'ShowBaseLine', 'off', 'DisplayName', levels(j));
             errorbar(ax, V(:, j), y, Lo(:, j) - V(:, j), Hi(:, j) - V(:, j), 'horizontal', 'k', ...
                      'LineStyle', 'none', 'LineWidth', 0.8, 'CapSize', 2, 'HandleVisibility', 'off');
         end

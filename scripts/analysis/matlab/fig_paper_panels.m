@@ -30,12 +30,20 @@ arguments
     opts.max_brackets (1,1) double = 4
     opts.name (1,1) string = "paper panels"
     opts.compact (1,1) logical = false   % size and fonts for the Live Editor canvas
+    % Which result set the bars come from. "Q3" is the six-cell comparison; the
+    % within-mode sets are how a metric that is NOT comparable across modes (a
+    % clutch tether force and a joystick centring spring are different physical
+    % quantities) can still be shown honestly -- three bars inside one mode.
+    opts.source (1,1) string = "Q3"
 end
 
-metrics = metrics(arrayfun(@(m) isfield(S.Q3, m), metrics));
+if ~isfield(S, opts.source)
+    error('fig_paper_panels:noSource', 'Result set "%s" is not in S.', opts.source);
+end
+metrics = metrics(arrayfun(@(m) isfield(S.(opts.source), m), metrics));
 k = numel(metrics);
 if k == 0
-    error('fig_paper_panels:noMetrics', 'None of the requested metrics has a Q3 (six-cell) result.');
+    error('fig_paper_panels:noMetrics', 'None of the requested metrics has a %s result.', opts.source);
 end
 cols = min(opts.cols, k);
 rows = ceil(k / cols);
@@ -48,10 +56,18 @@ if opts.compact
 end
 tl = tiledlayout(fig, rows, cols, 'TileSpacing', 'compact', 'Padding', 'compact');
 
+fullspec = table();
 for i = 1:k
     nm = metrics(i);
-    R = S.Q3.(nm);
+    R = S.(opts.source).(nm);
     srow = spec(spec.name == nm, :);
+    if isempty(srow)
+        % ITEMS drops the family-less derived metrics, so that a derived
+        % second-count is never double-counted inside its own family score --
+        % but its label, unit and direction still live in the catalogue.
+        if isempty(fullspec), fullspec = study_metric_spec(); end
+        srow = fullspec(fullspec.name == nm, :);
+    end
     if isempty(srow)
         label = nm; unit = ""; d = 0;
     else
@@ -92,15 +108,28 @@ if clipped, base = lo - 0.55 * span; else, base = 0; end
 
 hold(ax, 'on');
 for j = 1:numel(vals)
-    bar(ax, j, vals(j), 0.62, 'FaceColor', studyplot.color(cells(j)), ...
-        'EdgeColor', 'none', 'BaseValue', base);
+    face = studyplot.color(cells(j));
+    % A pale fill needs an outline to read as a bar on white paper. The bar's
+    % own baseline is off: the axis floor below is already that line, and two
+    % of them a few pixels apart read as a drawing error.
+    bar(ax, j, vals(j), 0.62, 'FaceColor', face, 'EdgeColor', face * 0.72, ...
+        'LineWidth', 0.5, 'BaseValue', base, 'ShowBaseLine', 'off');
     errorbar(ax, j, vals(j), sem(j), 'k', 'LineWidth', 1.0, 'CapSize', 6);
 end
 
 % Significance brackets. They must clear the drawing, which for bars grown
 % downward from zero (an all-negative metric) is the zero line, not the bars.
 ytop = max([hi, base]);
-top = ytop;
+% Bars grow from BASE, so the axis floor must BE the baseline; padding under it
+% would hang every bar off a second line. Only data that crosses the base needs
+% room below, and then the base is drawn explicitly as the sign reference.
+if base <= lo
+    ylo = base;
+else
+    ylo = lo - 0.04 * span;
+    yline(ax, base, '-', 'Color', [0.55 0.55 0.55], 'LineWidth', 0.6, 'HandleVisibility', 'off');
+end
+
 % A metric the omnibus test skipped (constant, or too few participants) comes
 % back with an empty pairs table that has no columns at all.
 if ~isempty(R.pairs) && ismember('significant', R.pairs.Properties.VariableNames)
@@ -108,6 +137,7 @@ if ~isempty(R.pairs) && ismember('significant', R.pairs.Properties.VariableNames
 else
     sig = table();
 end
+nb = 0; lvls = []; x1 = []; x2 = []; nlvl = 0;
 if ~isempty(sig)
     ia = arrayfun(@(s) find(cells == s, 1), sig.a);
     ib = arrayfun(@(s) find(cells == s, 1), sig.b);
@@ -117,8 +147,8 @@ if ~isempty(sig)
     [~, ord] = sortrows([sig.p_holm, x2 - x1]);
     sig = sig(ord, :); x1 = x1(ord); x2 = x2(ord);
     nb = min(height(sig), max_brackets);
-    step = 0.16 * span;
     used = [];   % rightmost x already occupied on each stacked level
+    lvls = zeros(1, nb);
     for j = 1:nb
         % Clearance is set by the centred p-label, which is wider than a short
         % bracket, not by the bracket span itself.
@@ -126,23 +156,25 @@ if ~isempty(sig)
         if isempty(lvl), used(end + 1) = x2(j); lvl = numel(used); %#ok<AGROW>
         else,            used(lvl) = x2(j);
         end
-        y = ytop + step * lvl;
-        plot(ax, [x1(j) x1(j) x2(j) x2(j)], [y - 0.22 * step, y, y, y - 0.22 * step], ...
-             'k-', 'LineWidth', 0.8);
-        text(ax, (x1(j) + x2(j)) / 2, y + 0.02 * step, fmt_p(sig.p_holm(j)), ...
-             'HorizontalAlignment', 'center', 'VerticalAlignment', 'bottom', 'FontSize', fs - 2, ...
-             'BackgroundColor', 'w', 'Margin', 0.5);   % stays legible where brackets stack
-        top = max(top, y + 0.9 * step);
+        lvls(j) = lvl;
     end
+    nlvl = numel(used);
+end
+
+% Levels are packed before anything is drawn because the spacing depends on how
+% many there are: see bracket_step.
+step = bracket_step(ax, ytop - ylo, nlvl, span, fs);
+for j = 1:nb
+    y = ytop + step * lvls(j);
+    plot(ax, [x1(j) x1(j) x2(j) x2(j)], [y - 0.18 * step, y, y, y - 0.18 * step], ...
+         'k-', 'LineWidth', 0.8);
+    text(ax, (x1(j) + x2(j)) / 2, y + 0.06 * step, fmt_p(sig.p_holm(j)), ...
+         'HorizontalAlignment', 'center', 'VerticalAlignment', 'bottom', 'FontSize', fs - 2, ...
+         'BackgroundColor', 'w', 'Margin', 0.5);   % stays legible where brackets stack
 end
 hold(ax, 'off');
 
-% Axis extent must hold the bar baseline, the whiskers and the brackets, for
-% data of either sign (a signed margin metric is negative in every cell).
-ylo = min([base, lo]);
-yhi = max([base, top]);
-rngy = max(yhi - ylo, eps);
-ylo = ylo - 0.02 * rngy; yhi = yhi + 0.06 * rngy;
+if nlvl > 0, yhi = ytop + (nlvl + 0.92) * step; else, yhi = ytop + 0.06 * max(span, eps); end
 
 % Mode split is read from the result, so a 4-cell (blending-only) metric is
 % grouped and divided in the same way as the full six.
@@ -155,15 +187,7 @@ end
 ylim(ax, [ylo, yhi]);
 xlim(ax, [0.4, numel(vals) + 0.6]);
 xticks(ax, 1:numel(vals)); xticklabels(ax, cellstr(cells));
-if any(~isJ)
-    text(ax, mean(find(~isJ)), ylo, 'CLUTCH', 'HorizontalAlignment', 'center', ...
-         'VerticalAlignment', 'top', 'FontSize', fs - 2, 'Color', studyplot.color("C"), 'FontWeight', 'bold');
-end
-if any(isJ)
-    text(ax, mean(find(isJ)), ylo, 'JOYSTICK', 'HorizontalAlignment', 'center', ...
-         'VerticalAlignment', 'top', 'FontSize', fs - 2, 'Color', studyplot.color("J"), 'FontWeight', 'bold');
-end
-ax.XRuler.TickLabelGapOffset = 12;
+ax.XRuler.TickLabelGapOffset = 2;
 
 yl = label;
 if strlength(unit) > 0 && unit ~= "-", yl = label + " [" + unit + "]"; end
@@ -174,4 +198,29 @@ sub = studyplot.dirtext(d) + sprintf(" | n=%d", n);
 if clipped, sub = sub + " | clipped axis"; end
 if flat, sub = sub + " | identical in every condition"; end
 subtitle(ax, sub, 'FontSize', fs - 2, 'Color', [0.35 0.35 0.35]);
+end
+
+% ------------------------------------------------------- bracket spacing
+function step = bracket_step(ax, D, nlvl, span, fs)
+%BRACKET_STEP Data-unit gap between stacked significance brackets.
+%   The room one bracket and its p-label need is a FONT height, so a fixed
+%   fraction of the data span under-spaces a tall panel and over-spaces a short
+%   one -- labels then touch the bracket above. Solve instead for the step that
+%   renders as S_PX pixels AFTER the stack has grown the axis itself:
+%   step = (S_PX/H)*D / (1 - (S_PX/H)*(nlvl+0.92)), with D the drawing height.
+step = 0.20 * span;                       % fallback when the pixel height is unknown
+if nlvl < 1 || ~(D > 0), return, end
+s_px = 1.6 * max(fs - 2, 5) + 6;          % label height + clearance
+H = 0;
+try
+    drawnow;
+    p = getpixelposition(ax);
+    H = p(4);
+catch
+    H = 0;
+end
+r = s_px / max(H, eps);
+if H > 0 && r * (nlvl + 0.92) < 0.75      % leave the data at least a quarter of the axis
+    step = (r * D) / (1 - r * (nlvl + 0.92));
+end
 end
