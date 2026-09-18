@@ -33,14 +33,33 @@
 
 \newcommand{\qdot}{\dot{q}}
 
-% Same R/L colours as the MATLAB hardware-trial panels (fig_thesis_hw.m).
+% Same R/L and per-joint colours as the MATLAB hardware-trial panels (fig_thesis_hw.m).
 \definecolor{hwred}{rgb}{0.753,0.224,0.169}
 \definecolor{hwblue}{rgb}{0.133,0.333,0.643}
+\definecolor{hwj1}{rgb}{0.000,0.447,0.698}
+\definecolor{hwj2}{rgb}{0.835,0.369,0.000}
+\definecolor{hwj3}{rgb}{0.000,0.620,0.451}
+\definecolor{hwj4}{rgb}{0.800,0.475,0.655}
+\definecolor{hwj5}{rgb}{0.902,0.624,0.000}
+\definecolor{hwj6}{rgb}{0.337,0.706,0.914}
+\definecolor{hwj7}{rgb}{0.000,0.000,0.000}
 % One shared R/L legend, set once ahead of a multi-panel hardware figure
 % instead of repeating it in every panel.
 \newcommand{\hwrllegend}{%
   \centering
-  {\large\textcolor{hwred}{\rule[0.35em]{2.2em}{2.6pt}}~R \qquad \textcolor{hwblue}{\rule[0.35em]{2.2em}{2.6pt}}~L}\par\vspace{0.4em}%
+  {\textcolor{hwred}{\rule[0.28em]{1.1em}{1.3pt}}~R \quad \textcolor{hwblue}{\rule[0.28em]{1.1em}{1.3pt}}~L}\par\vspace{0.3em}%
+}
+% One shared J1..J7 legend for a joint-space figure.
+\newcommand{\hwjointlegend}{%
+  \centering
+  {\footnotesize
+   \textcolor{hwj1}{\rule[0.25em]{0.9em}{1.1pt}}~J1 \quad
+   \textcolor{hwj2}{\rule[0.25em]{0.9em}{1.1pt}}~J2 \quad
+   \textcolor{hwj3}{\rule[0.25em]{0.9em}{1.1pt}}~J3 \quad
+   \textcolor{hwj4}{\rule[0.25em]{0.9em}{1.1pt}}~J4 \quad
+   \textcolor{hwj5}{\rule[0.25em]{0.9em}{1.1pt}}~J5 \quad
+   \textcolor{hwj6}{\rule[0.25em]{0.9em}{1.1pt}}~J6 \quad
+   \textcolor{hwj7}{\rule[0.25em]{0.9em}{1.1pt}}~J7}\par\vspace{0.3em}%
 }
 
 \title{\textbf{Adaptive Human--Robot Shared Autonomy Based on Safety-Aware Control: A Validation Case in Bimanual Manipulation With the TRIAGo Robotic Platform}}
@@ -996,7 +1015,7 @@ The first hardware test targets the controller alone, with vision excluded from 
 The manoeuvre was logged with the controller's own telemetry (Section~\ref{sec:sched}), reconstructed offline from the recorded rosbag, over a $25.1$~s trial: the shared quintic-timed reference for both arms runs open-loop from $t=0$ to $t\approx10$~s, marked by the dashed vertical line in every panel of Figures~\ref{fig:hwjoints} and~\ref{fig:hwqpdata}, after which the reference is held fixed at the crossed endpoint for the remainder of the recording. The physical robot sustained a mean loop rate of $126$~Hz with $15.7\%$ tick-to-tick jitter against the $150$~Hz nominal --- lower and noisier than in simulation, as expected on hardware --- without weakening the barrier itself, since $h_{\text{soft},X}$, $J_{\text{soft},X}$, and $d_{\text{safe},X}$ are recomputed from the current state on every tick with no filtering (Section~\ref{sec:cbf}). Low-level execution was faithful throughout: the root-mean-square mismatch between the commanded and the measured joint velocity, across all 14 arm joints, was $5.0\times10^{-3}$~rad/s, so the discrepancies reported below originate in the constrained optimum the QP is solving, not in how well the robot executed it.
 
 \begin{figure}[t]
-\centering
+\hwjointlegend
 \begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/hw_q_R.pdf}\caption{Joint positions, right arm}\label{fig:hw-qR}\end{subfigure}\hfill
 \begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/hw_q_L.pdf}\caption{Joint positions, left arm}\label{fig:hw-qL}\end{subfigure}
 \vspace{0.3em}
@@ -1021,7 +1040,7 @@ Figure~\ref{fig:hwjoints} is the trial seen from the joints. No joint exceeds $0
 \vspace{0.4em}
 \begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/hw_gov_ep.pdf}\caption{Governor: position error}\label{fig:hw-govep}\end{subfigure}\hfill
 \begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/hw_gov_theta.pdf}\caption{Governor: orientation error}\label{fig:hw-govtheta}\end{subfigure}
-\caption{Safety-filter and reference-governor telemetry of the same trial.}
+\caption{QP-CLF-CBF and reference-governor data of the same trial.}
 \label{fig:hwqpdata}
 \end{figure}
 
