@@ -33,6 +33,8 @@ arguments
     opts.prefix (1,1) string = "hw_"
     opts.xlabel_on string = string.empty
     opts.t_max double = []
+    opts.broken_panels string = "lambda_cbf"
+    opts.broken_ranges double = [180 500 600]
 end
 
 D = load(mat_path);
@@ -60,19 +62,14 @@ fs = opts.fontsize;
 % --- panel registry: key -> {needs, drawer}. A drawer takes (ax) and returns
 % the legend handles+labels it wants (or empty). Adding a panel is one entry.
 reg = containers.Map('KeyType', 'char', 'ValueType', 'any');
-% Governor ceilings for the "where the cut is done" reference lines: gov_ep's
-% is read off its own data (the governed trace visibly plateaus there once
-% clamping engages -- robust, no config file needed); gov_theta's never
-% clamps in this trial, so there is no plateau to read, and GOV_E_MAX_ORI =
-% 1.0 rad is taken from the real-hw branch config instead (cross-checked
-% against gov_ep's own empirical ceiling matching GOV_E_MAX_POS = 0.30 m on
-% that same branch to 3 significant figures, i.e. those constants were the
-% ones actually active for this capture).
-if isfield(DV, 'gov')
-    gov_ep_ceiling = max(DV.gov.pos_err_gov_r);
-else
-    gov_ep_ceiling = [];
-end
+% Governor ceilings for the "where the cut is done" reference lines: fixed
+% real-hw branch config constants (GOV_E_MAX_POS = 0.30 m, GOV_E_MAX_ORI =
+% 1.0 rad), not read per-trial from the data -- the home-to-crossed trial
+% happens to plateau exactly at these values (empirical cross-check that
+% they were the ones active for that capture), but a trial whose governor
+% barely saturates (e.g. a teleoperated one) would otherwise show a
+% misleading "ceiling" sitting at whatever its own data happened to peak at.
+gov_ep_ceiling = 0.30;
 gov_theta_ceiling = 1.0;
 
 reg('lambda_cbf') = {"qp_debug_lambda_cbf",    @(ax) draw_rl(ax, S.qp_debug_lambda_cbf,    "$\lambda_{\mathrm{cbf}}$")};
@@ -111,14 +108,21 @@ for k = keys
                  'DefaultAxesFontName', 'Helvetica', 'DefaultTextFontName', 'Helvetica', ...
                  'DefaultAxesFontSize', fs, 'DefaultTextFontSize', fs);
 
-    if k == "lambda_cbf"
+    broken_idx = find(opts.broken_panels == k, 1);
+    if ~isempty(broken_idx)
         % A single ~10x taller sample dwarfs the rest of the trial on a linear
-        % axis (557 vs a 150 ceiling everywhere else) -- the standard fix in
-        % print is a broken axis, not clipping the peak away: two stacked axes
-        % sharing x, a small gap between them, and the top one's own ticks
-        % jumping straight to the next natural gridline (600) instead of
-        % continuing linearly. Diagonal marks at the gap mark the break itself.
-        draw_broken_lambda_cbf(fig, S.qp_debug_lambda_cbf, t_max, t_off, ismember(k, xlab_keys));
+        % axis -- the standard fix in print is a broken axis, not clipping the
+        % peak away: two stacked axes sharing x, a small gap between them, and
+        % the top one's own ticks jumping straight to the next natural
+        % gridline instead of continuing linearly. Diagonal marks at the gap
+        % mark the break itself. Which panels get this treatment, and where
+        % the break sits, is per-trial (see caller): a trial whose barrier
+        % never produces an outlier sample needs no break at all.
+        broken_series = struct('lambda_cbf', {{S, "qp_debug_lambda_cbf", "$\lambda_{\mathrm{cbf}}$"}}, ...
+                                'lambda_jl',  {{S, "qp_debug_lambda_joints", "$\lambda_{\mathrm{jl}}$"}});
+        bs = broken_series.(char(k));
+        ser = bs{1}.(bs{2});
+        draw_broken(fig, ser, bs{3}, t_max, t_off, ismember(k, xlab_keys), opts.broken_ranges(broken_idx, :));
     else
         ax = axes(fig, 'Units', 'normalized', 'Position', [0.19 0.20 0.79 0.77]);
         set(ax, 'TickDir', 'out', 'TickLength', [0.015 0.015], 'Box', 'off', ...
@@ -220,14 +224,15 @@ end
         ref_and_label(ax, [], ylab);
     end
 
-    function draw_broken_lambda_cbf(fig, ser, t_max, t_off, show_xlabel)
+    function draw_broken(fig, ser, ylab, t_max, t_off, show_xlabel, brk)
         % Two stacked axes sharing x: bottom covers the trial's normal range,
         % top is a short strip that jumps straight from the bottom's ceiling to
-        % the next round gridline above the true peak (600), with the peak's
-        % single line segment inside it. Diagonal marks at the gap are the
-        % conventional break notation.
-        bottom_top_val = 180;               % bottom axis ceiling (covers everything but the one spike)
-        top_bot_val = 500; top_top_val = 600; % top strip: just enough to hold the 557 peak, next gridline at 600
+        % the next round gridline above the true peak, with the peak's single
+        % line segment inside it. Diagonal marks at the gap are the
+        % conventional break notation. brk = [bottom_ceiling, top_floor, top_ceiling],
+        % chosen per-trial from where the data actually has a gap (see caller).
+        bottom_top_val = brk(1);
+        top_bot_val = brk(2); top_top_val = brk(3);
         axb = axes(fig, 'Units', 'normalized', 'Position', [0.19 0.20 0.79 0.58]);
         axt = axes(fig, 'Units', 'normalized', 'Position', [0.19 0.83 0.79 0.12]);
         for a = [axb axt]
@@ -245,7 +250,7 @@ end
         axt.YLim = [top_bot_val, top_top_val];
         axt.YTick = top_top_val;                 % only the next natural gridline is labelled
         axt.XTick = [];                            % top strip carries no x-ticks of its own
-        ylabel(axb, "$\lambda_{\mathrm{cbf}}$", 'Interpreter', 'latex', 'FontSize', fs + 1);
+        ylabel(axb, ylab, 'Interpreter', 'latex', 'FontSize', fs + 1);
         if show_xlabel
             xlabel(axb, "$t$ [s]", 'Interpreter', 'latex', 'FontSize', fs + 1);
         end
