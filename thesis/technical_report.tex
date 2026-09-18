@@ -983,6 +983,26 @@ The first hardware test targets the controller alone, with vision excluded from 
 \label{fig:hwswap}
 \end{figure}
 
+The manoeuvre was logged with the controller's own telemetry (Section~\ref{sec:sched}) over a $25.1$~s trial: the shared quintic-timed reference for both arms runs open-loop from $t=0$ to $t\approx10$~s, marked by the dashed vertical line in Figures~\ref{fig:hwqpdata} and~\ref{fig:hwtrackingerror}, after which the reference is held fixed at the crossed endpoint for the remainder of the recording. The physical robot sustained a mean loop rate of $126$~Hz with $15.7\%$ tick-to-tick jitter against the $150$~Hz nominal --- lower and noisier than in simulation, as expected on hardware --- without weakening the barrier itself, since $h_{\text{soft},X}$, $J_{\text{soft},X}$, and $d_{\text{safe},X}$ are recomputed from the current state on every tick with no filtering (Section~\ref{sec:cbf}). Low-level execution was faithful throughout: the root-mean-square mismatch between the commanded and the measured joint velocity, across all 14 arm joints, was $5.0\times10^{-3}$~rad/s, so the discrepancies reported below originate in the constrained optimum the QP is solving, not in how well the robot executed it.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.75\linewidth]{results/hw_qp_data.pdf}
+\caption{CLF slack $\delta_X$, CBF shadow price $\lambda_{\text{cbf},X}$, joint-limit shadow price $\lambda_{\text{jl},X}$, CBF safety margin $h_{\text{soft},X}-d_{\text{safe},X}$, and the raw minimum inter-geometry distance, per arm ($X \in \{R,L\}$, red/blue) over the home-to-crossed trial. The dashed vertical line marks the end of the open-loop reference, $t\approx10$~s; the dashed horizontal line in the bottom two panels marks zero, the CBF constraint boundary.}
+\label{fig:hwqpdata}
+\end{figure}
+
+Figure~\ref{fig:hwqpdata} shows how the conflict between tracking and safety was resolved. Both slacks $\delta_R,\delta_L$ climb together to about $1.1$ as the two grippers converge on the crossed configuration, exactly where the CBF and joint-limit shadow prices first turn on; the left arm's collision shadow price spikes to the trial's peak of $557$ near $t=6$~s. Once the reference stops moving, the two arms decouple: the right arm's slack stays pinned near $1.1$ for the rest of the trial, while the left arm's falls to under half that level for most of the hold phase, recovering only in brief bursts that coincide with renewed shadow-price activity. This asymmetry is the adaptive schedule of~\eqref{eq:slacksched} at work, not a fixed relaxation: each arm's slack weight $w_{\delta,X}$ is scheduled independently from its own shadow price, so the two grippers are free to settle on different compromises even though they are driven by the same reference generator. The bottom two panels report the constraint the schedule is protecting: the CBF safety margin $h_{\text{soft},X}-d_{\text{safe},X}$ repeatedly comes within a few millimetres of zero once the reference stops, and the raw minimum inter-geometry distance floors at $4.2$~cm for the same stretch without ever going lower --- clearance is barrier-limited for the whole hold phase, the same signature later confirmed at study scale in Section~\ref{sec:ressafety}.
+
+\begin{figure}[t]
+\centering
+\includegraphics[width=0.75\linewidth]{results/hw_tracking_error.pdf}
+\caption{Cartesian position and velocity tracking error, and geodesic $SO(3)$ orientation and angular-velocity tracking error, per arm ($X \in \{R,L\}$, red/blue) over the same trial as Figure~\ref{fig:hwqpdata}. The dashed vertical line again marks the end of the open-loop reference, $t\approx10$~s.}
+\label{fig:hwtrackingerror}
+\end{figure}
+
+Figure~\ref{fig:hwtrackingerror} reports what that relaxation bought each arm in tracking accuracy. Combined over both arms, the trial's root-mean-square tracking error is $0.354$~m in position and $0.342$~rad ($\approx20^{\circ}$) in orientation, but the two arms do not share it equally: the left gripper's position error peaks at about $0.39$~m during the open-loop segment and decays to a few centimetres by the middle of the hold phase, while the right gripper's position error climbs past $0.55$~m and stays there for the rest of the trial. This mirrors the slack asymmetry of Figure~\ref{fig:hwqpdata} exactly: the right arm's slack stays pinned near its peak over the same stretch that its position error holds near $0.55$~m, while the left arm's slack relaxes over the same stretch that its own error decays --- the two arms settle on visibly different compromises between tracking and safety, exactly as the per-arm scheduling of~\eqref{eq:slacksched} allows them to. Both arms' errors also show brief renewed excursions late in the trial, around $19$~s for the right arm and $22$--$23$~s for the left, that line up with the joint-limit shadow-price bursts visible in the same windows of Figure~\ref{fig:hwqpdata}: the residual motion after the reference has stopped is still constraint-driven, not drift. Upstream of the QP, the reference governor (Section~\ref{sec:governor}) reflects the same conflict: it visibly reshaped the raw reference on $77\%$ of the trial's ticks, consistent with a manoeuvre built specifically to keep its error-bounding step engaged throughout.
+
 \section{Setup of the experiments}
 \label{sec:study}
 
