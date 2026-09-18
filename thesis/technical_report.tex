@@ -33,6 +33,16 @@
 
 \newcommand{\qdot}{\dot{q}}
 
+% Same R/L colours as the MATLAB hardware-trial panels (fig_thesis_hw.m).
+\definecolor{hwred}{rgb}{0.753,0.224,0.169}
+\definecolor{hwblue}{rgb}{0.133,0.333,0.643}
+% One shared R/L legend, set once ahead of a multi-panel hardware figure
+% instead of repeating it in every panel.
+\newcommand{\hwrllegend}{%
+  \centering
+  {\large\textcolor{hwred}{\rule[0.35em]{2.2em}{2.6pt}}~R \qquad \textcolor{hwblue}{\rule[0.35em]{2.2em}{2.6pt}}~L}\par\vspace{0.4em}%
+}
+
 \title{\textbf{Adaptive Human--Robot Shared Autonomy Based on Safety-Aware Control: A Validation Case in Bimanual Manipulation With the TRIAGo Robotic Platform}}
 \author{Roberto Rocco \\ IRISA, Rennes}
 \date{July 2026}
@@ -983,31 +993,7 @@ The first hardware test targets the controller alone, with vision excluded from 
 \label{fig:hwswap}
 \end{figure}
 
-The manoeuvre was logged with the controller's own telemetry (Section~\ref{sec:sched}), reconstructed offline from the recorded rosbag, over a $25.1$~s trial: the shared quintic-timed reference for both arms runs open-loop from $t=0$ to $t\approx10$~s, marked by the dashed vertical line in every panel of Figures~\ref{fig:hwqpdata} and~\ref{fig:hwjoints}, after which the reference is held fixed at the crossed endpoint for the remainder of the recording. The physical robot sustained a mean loop rate of $126$~Hz with $15.7\%$ tick-to-tick jitter against the $150$~Hz nominal --- lower and noisier than in simulation, as expected on hardware --- without weakening the barrier itself, since $h_{\text{soft},X}$, $J_{\text{soft},X}$, and $d_{\text{safe},X}$ are recomputed from the current state on every tick with no filtering (Section~\ref{sec:cbf}). Low-level execution was faithful throughout: the root-mean-square mismatch between the commanded and the measured joint velocity, across all 14 arm joints, was $5.0\times10^{-3}$~rad/s, so the discrepancies reported below originate in the constrained optimum the QP is solving, not in how well the robot executed it.
-
-\begin{figure}[p]
-\centering
-\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/hw_lambda_cbf.pdf}\caption{CBF shadow price}\label{fig:hw-lcbf}\end{subfigure}\hfill
-\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/hw_lambda_jl.pdf}\caption{Joint-limit shadow price}\label{fig:hw-ljl}\end{subfigure}
-\vspace{0.3em}
-\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/hw_margin.pdf}\caption{CBF safety margin}\label{fig:hw-margin}\end{subfigure}\hfill
-\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/hw_dmin.pdf}\caption{Minimum inter-geometry distance}\label{fig:hw-dmin}\end{subfigure}
-\vspace{0.3em}
-\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/hw_dsafe.pdf}\caption{Velocity-dependent safety margin}\label{fig:hw-dsafe}\end{subfigure}\hfill
-\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/hw_wslack.pdf}\caption{Adaptive slack weight}\label{fig:hw-wslack}\end{subfigure}
-\vspace{0.3em}
-\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/hw_gov_v.pdf}\caption{Governor: linear speed}\label{fig:hw-govv}\end{subfigure}\hfill
-\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/hw_gov_w.pdf}\caption{Governor: angular speed}\label{fig:hw-govw}\end{subfigure}
-\vspace{0.3em}
-\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/hw_gov_ep.pdf}\caption{Governor: position error}\label{fig:hw-govep}\end{subfigure}\hfill
-\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/hw_gov_theta.pdf}\caption{Governor: orientation error}\label{fig:hw-govtheta}\end{subfigure}
-\caption{Safety-filter and reference-governor telemetry of the home-to-crossed trial, per arm (R red, L blue). The dashed vertical line is the end of the open-loop reference; dotted lines are zero or the static floor $d_0$; in (g)--(j) dashed is the raw command and solid the governed one. Symbols as in Sections~\ref{sec:qp}--\ref{sec:governor}.}
-\label{fig:hwqpdata}
-\end{figure}
-
-Figures~\ref{fig:hw-lcbf} to~\ref{fig:hw-dsafe} are the safety filter's own account of the conflict. Both collision shadow prices climb together during the transit; the left arm's spikes to the trial's peak of $557$ near $t=6$~s, and both arms show repeated smaller bursts of $100$--$150$ throughout the hold phase, each a fresh barrier engagement rather than one sustained event. The joint-limit shadow price is active mainly during the transit, then returns in two brief late bursts, around $19$~s for the right arm and $22$~s for the left. Figures~\ref{fig:hw-margin} and~\ref{fig:hw-dmin} report what those prices are protecting: the CBF safety margin dips to just below zero at its worst ($-2.6$~mm) and otherwise sits within a few millimetres of it for the whole hold phase, while the raw minimum inter-geometry distance floors at $4.2$~cm over the same stretch --- clearance is barrier-limited, the same signature later confirmed at study scale in Section~\ref{sec:ressafety}. The velocity-dependent margin $d_{\text{safe},X}$ of~\eqref{eq:dsafe} (Figure~\ref{fig:hw-dsafe}) tracks each arm's own speed directly: it rises to as much as $5.3$~cm during the fast transit and relaxes back toward its $1.5$~cm static floor $d_0$ as each arm slows.
-
-Figures~\ref{fig:hw-wslack} to~\ref{fig:hw-govtheta} show the two mechanisms that shape what the QP is even asked to do. The slack weight $w_{\delta,X}$ sits at its ceiling before either arm starts moving, collapses to its floor within the first few seconds of motion, and then cycles back toward the ceiling every time that arm's own shadow price relaxes --- the schedule of~\eqref{eq:slacksched}, now read directly from its own output rather than inferred from the slack it produces. Of the reference governor's four mechanisms (Algorithm~\ref{alg:governor}), only one is exercised by this manoeuvre: the commanded linear speed, angular speed, and orientation-error norm never approach their configured ceilings, so their raw and governed traces coincide throughout, visible as a single curve per panel in Figures~\ref{fig:hw-govv}, \ref{fig:hw-govw}, and~\ref{fig:hw-govtheta}. Position-error bounding (Figure~\ref{fig:hw-govep}) is the exception, and it is not a brief event: once the right arm's real pose falls behind its raw reference, the governed error is pinned at a common ceiling of about $0.30$~m on $78\%$ of the trial's ticks, and the left arm's error is clamped intermittently over the same stretch it is still converging. The raw traces of the same panel are the residual each arm is left with: at the end of the trial the right gripper sits $0.42$~m and $14.7^{\circ}$ from its commanded pose, the left $0.11$~m and $28.8^{\circ}$ --- each arm converges on a different coordinate of the same target pose, the residual falling wherever its own slack left it. This is the same fact the shadow-price and slack panels already showed from the QP's side of the loop, seen here from upstream of it: whenever the safety filter is genuinely fighting the reference, the governor keeps re-issuing one the CLF can still make progress toward, rather than the raw, receding one.
+The manoeuvre was logged with the controller's own telemetry (Section~\ref{sec:sched}), reconstructed offline from the recorded rosbag, over a $25.1$~s trial: the shared quintic-timed reference for both arms runs open-loop from $t=0$ to $t\approx10$~s, marked by the dashed vertical line in every panel of Figures~\ref{fig:hwjoints} and~\ref{fig:hwqpdata}, after which the reference is held fixed at the crossed endpoint for the remainder of the recording. The physical robot sustained a mean loop rate of $126$~Hz with $15.7\%$ tick-to-tick jitter against the $150$~Hz nominal --- lower and noisier than in simulation, as expected on hardware --- without weakening the barrier itself, since $h_{\text{soft},X}$, $J_{\text{soft},X}$, and $d_{\text{safe},X}$ are recomputed from the current state on every tick with no filtering (Section~\ref{sec:cbf}). Low-level execution was faithful throughout: the root-mean-square mismatch between the commanded and the measured joint velocity, across all 14 arm joints, was $5.0\times10^{-3}$~rad/s, so the discrepancies reported below originate in the constrained optimum the QP is solving, not in how well the robot executed it.
 
 \begin{figure}[t]
 \centering
@@ -1016,11 +1002,32 @@ Figures~\ref{fig:hw-wslack} to~\ref{fig:hw-govtheta} show the two mechanisms tha
 \vspace{0.3em}
 \begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/hw_qdot_R.pdf}\caption{Measured joint velocities, right arm}\label{fig:hw-qdR}\end{subfigure}\hfill
 \begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/hw_qdot_L.pdf}\caption{Measured joint velocities, left arm}\label{fig:hw-qdL}\end{subfigure}
-\caption{Joint-space view of the same trial: position and measured velocity of the seven joints of each arm, J1 (shoulder) to J7 (wrist). The dashed vertical line is the end of the open-loop reference.}
+\caption{Joint-space view of the trial: position and measured velocity of the seven joints of each arm, J1 (shoulder) to J7 (wrist).}
 \label{fig:hwjoints}
 \end{figure}
 
-Figure~\ref{fig:hwjoints} is the same trial seen from the joints. No joint exceeds $0.27$~rad/s at any point, and every velocity trace is smooth: there is no trace of the high-frequency ripple that the unanchored cost had produced on this robot before the measured-velocity rate damping of Section~\ref{sec:rate} was introduced. The two arms do not stop when the reference does: the joints keep moving after $t\approx10$~s at up to $0.2$~rad/s, slowly and continuously, which is the settling that the shadow prices of Figures~\ref{fig:hw-lcbf} and~\ref{fig:hw-ljl} account for tick by tick --- the arms are still being moved by the barrier and joint-limit rows, not drifting. The two late joint-limit bursts are visible here as the last inflections of the position traces, around $19$~s on the right arm and $22$~s on the left, after which the configurations settle and the velocities decay to zero.
+Figure~\ref{fig:hwjoints} is the trial seen from the joints. No joint exceeds $0.27$~rad/s at any point, and every velocity trace is smooth: there is no trace of the high-frequency ripple that the unanchored cost had produced on this robot before the measured-velocity rate damping of Section~\ref{sec:rate} was introduced. The two arms do not stop when the reference does: the joints keep moving after $t\approx10$~s at up to $0.2$~rad/s, slowly and continuously, which is the settling that the shadow prices of Figure~\ref{fig:hwqpdata} account for tick by tick --- the arms are still being moved by the barrier and joint-limit rows, not drifting. The two late joint-limit bursts are visible here as the last inflections of the position traces, around $19$~s on the right arm and $22$~s on the left, after which the configurations settle and the velocities decay to zero.
+
+\begin{figure}[p]
+\hwrllegend
+\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/hw_lambda_cbf.pdf}\caption{CBF shadow price}\label{fig:hw-lcbf}\end{subfigure}\hfill
+\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/hw_lambda_jl.pdf}\caption{Joint-limit shadow price}\label{fig:hw-ljl}\end{subfigure}
+\vspace{0.4em}
+\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/hw_margin.pdf}\caption{CBF safety margin}\label{fig:hw-margin}\end{subfigure}\hfill
+\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/hw_dmin.pdf}\caption{Minimum inter-geometry distance}\label{fig:hw-dmin}\end{subfigure}
+\vspace{0.4em}
+\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/hw_dsafe.pdf}\caption{Velocity-dependent safety margin}\label{fig:hw-dsafe}\end{subfigure}\hfill
+\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/hw_wslack.pdf}\caption{Adaptive slack weight}\label{fig:hw-wslack}\end{subfigure}
+\vspace{0.4em}
+\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/hw_gov_ep.pdf}\caption{Governor: position error}\label{fig:hw-govep}\end{subfigure}\hfill
+\begin{subfigure}[t]{0.485\linewidth}\centering\includegraphics{results/hw_gov_theta.pdf}\caption{Governor: orientation error}\label{fig:hw-govtheta}\end{subfigure}
+\caption{Safety-filter and reference-governor telemetry of the same trial.}
+\label{fig:hwqpdata}
+\end{figure}
+
+Figures~\ref{fig:hw-lcbf} to~\ref{fig:hw-dsafe} are the safety filter's own account of the conflict. Both collision shadow prices climb together during the transit; the left arm's spikes to the trial's peak of $557$ near $t=6$~s (arrow, off the top of the axis), and both arms show repeated smaller bursts of $100$--$150$ throughout the hold phase, each a fresh barrier engagement rather than one sustained event. The joint-limit shadow price is active mainly during the transit, then returns in two brief late bursts, around $19$~s for the right arm and $22$~s for the left. Figures~\ref{fig:hw-margin} and~\ref{fig:hw-dmin} report what those prices are protecting: the CBF safety margin dips to just below zero at its worst ($-2.6$~mm) and otherwise sits within a few millimetres of it for the whole hold phase, while the raw minimum inter-geometry distance floors at $4.2$~cm over the same stretch --- clearance is barrier-limited, the same signature later confirmed at study scale in Section~\ref{sec:ressafety}. The velocity-dependent margin $d_{\text{safe},X}$ of~\eqref{eq:dsafe} (Figure~\ref{fig:hw-dsafe}) tracks each arm's own speed directly: it rises to as much as $5.3$~cm during the fast transit and relaxes back toward its $1.5$~cm static floor $d_0$, dotted, as each arm slows.
+
+Figures~\ref{fig:hw-wslack} to~\ref{fig:hw-govtheta} show the two mechanisms that shape what the QP is even asked to do. The slack weight $w_{\delta,X}$ sits at its ceiling before either arm starts moving, collapses to its floor within the first few seconds of motion, and then cycles back toward the ceiling every time that arm's own shadow price relaxes --- the schedule of~\eqref{eq:slacksched}, now read directly from its own output rather than inferred from the slack it produces. Of the reference governor's four mechanisms (Algorithm~\ref{alg:governor}), only one is exercised by this manoeuvre: the commanded linear speed and angular speed never approach their configured ceilings at any point (not shown), and neither does the orientation-error norm, whose raw and governed traces coincide throughout in Figure~\ref{fig:hw-govtheta} (dashed under solid). Position-error bounding (Figure~\ref{fig:hw-govep}) is the exception, and it is not a brief event: once the right arm's real pose falls behind its raw reference, the governed error is pinned at a common ceiling of about $0.30$~m on $78\%$ of the trial's ticks, and the left arm's error is clamped intermittently over the same stretch it is still converging. The raw traces of the same panel are the residual each arm is left with: at the end of the trial the right gripper sits $0.42$~m and $14.7^{\circ}$ from its commanded pose, the left $0.11$~m and $28.8^{\circ}$ --- each arm converges on a different coordinate of the same target pose, the residual falling wherever its own slack left it. This is the same fact the shadow-price and slack panels already showed from the QP's side of the loop, seen here from upstream of it: whenever the safety filter is genuinely fighting the reference, the governor keeps re-issuing one the CLF can still make progress toward, rather than the raw, receding one.
 
 \section{Setup of the experiments}
 \label{sec:study}

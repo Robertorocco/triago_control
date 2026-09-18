@@ -7,9 +7,13 @@ function files = fig_thesis_hw(mat_path, out_dir, opts)
 %   the bag are skipped, so the same call serves a teleoperation bag.
 %
 %   Thesis style, as fig_thesis_panel: no title, no in-panel text, figure sized
-%   in centimetres, Helvetica at print size, LaTeX symbol + unit as y label,
-%   legend inside the axes. Right arm is red, left arm blue, throughout; the
-%   dashed vertical line is the end of the open-loop reference (meta.t_off_s).
+%   in centimetres, Helvetica at print size, LaTeX symbol + unit as y label.
+%   Right arm is red, left arm blue, throughout, but that R/L key is drawn
+%   ONCE by the caller (shared legend ahead of the whole subfigure grid) --
+%   individual panels carry no R/L legend of their own, only a panel-specific
+%   one where something else needs explaining (e.g. dashed=raw in the
+%   governor panels, forced top-right). The dashed vertical line is the end
+%   of the open-loop reference (meta.t_off_s).
 %
 %   Options: panels (string array, default: all available), width_cm (7.4),
 %   height_cm (3.9), fontsize (7.5), prefix ("hw_"), xlabel_on (string array of
@@ -56,7 +60,7 @@ fs = opts.fontsize;
 % --- panel registry: key -> {needs, drawer}. A drawer takes (ax) and returns
 % the legend handles+labels it wants (or empty). Adding a panel is one entry.
 reg = containers.Map('KeyType', 'char', 'ValueType', 'any');
-reg('lambda_cbf') = {"qp_debug_lambda_cbf",    @(ax) draw_rl(ax, S.qp_debug_lambda_cbf,    "$\lambda_{\mathrm{cbf}}$")};
+reg('lambda_cbf') = {"qp_debug_lambda_cbf",    @(ax) draw_rl(ax, S.qp_debug_lambda_cbf,    "$\lambda_{\mathrm{cbf}}$", 'yclip', 180, 'peak', max(S.qp_debug_lambda_cbf.data(:)))};
 reg('lambda_jl')  = {"qp_debug_lambda_joints", @(ax) draw_rl(ax, S.qp_debug_lambda_joints, "$\lambda_{\mathrm{jl}}$")};
 reg('margin')     = {"qp_debug_safety_margin", @(ax) draw_rl(ax, S.qp_debug_safety_margin, "$h_{\mathrm{soft}}-d_{\mathrm{safe}}$ [m]", 'refline', 0)};
 reg('dmin')       = {"qp_debug_min_distance",  @(ax) draw_one(ax, S.qp_debug_min_distance, "$d_{\min}$ [m]", TEAL, 'refline', 0)};
@@ -107,9 +111,12 @@ for k = keys
         xlabel(ax, "$t$ [s]", 'Interpreter', 'latex', 'FontSize', fs + 1);
     end
     if ~isempty(h)
-        if ncol >= 7, loc = 'northoutside'; else, loc = 'best'; end
+        if ncol >= 7,        loc = 'northoutside';
+        elseif ncol == -1,   loc = 'northeast';   % forced top-right (e.g. the "raw" style key)
+        else,                loc = 'best';
+        end
         lg = legend(ax, h, lbl, 'Location', loc, 'Box', 'off', 'FontSize', fs - 0.5, ...
-                    'NumColumns', ncol, 'Interpreter', 'none');
+                    'NumColumns', max(ncol, 1), 'Interpreter', 'none');
         lg.ItemTokenSize = [12 8];
     end
     ax.XRuler.TickLabelGapOffset = 1;
@@ -123,11 +130,32 @@ end
 
 % ----------------------------------------------------------------- drawers
     function [h, lbl, ncol] = draw_rl(ax, ser, ylab, varargin)
-        p = inputParser; p.addParameter('refline', []); p.parse(varargin{:});
-        h(1) = plot(ax, ser.t, ser.data(:, 1), '-', 'Color', RED,  'LineWidth', 1.1);
-        h(2) = plot(ax, ser.t, ser.data(:, 2), '-', 'Color', BLUE, 'LineWidth', 1.1);
-        lbl = {'R', 'L'}; ncol = 1;
+        % R/L colour is explained once by the shared legend ahead of the whole
+        % figure (fig_thesis_hw draws no per-panel R/L legend) -- so h/lbl are
+        % empty here unless 'yclip' asks for the off-scale-peak arrow below.
+        p = inputParser;
+        p.addParameter('refline', []);
+        p.addParameter('yclip', []);    % clip the axis to this value...
+        p.addParameter('peak', []);     % ...and annotate the true peak at the clip point
+        p.parse(varargin{:});
+        plot(ax, ser.t, ser.data(:, 1), '-', 'Color', RED,  'LineWidth', 1.1);
+        plot(ax, ser.t, ser.data(:, 2), '-', 'Color', BLUE, 'LineWidth', 1.1);
+        h = []; lbl = {}; ncol = 1;
         ref_and_label(ax, p.Results.refline, ylab);
+        if ~isempty(p.Results.yclip)
+            yl = p.Results.yclip;
+            ylim(ax, [ax.YLim(1), yl]);
+            [pk, i1] = max(ser.data(:, 1)); [pk2, i2] = max(ser.data(:, 2));
+            if pk2 > pk, pk = pk2; i1 = i2; end
+            tpk = ser.t(i1);
+            % Off-scale-peak marker: a short upward arrow at the clipped top,
+            % annotated with the true value -- the break is stated, not hidden.
+            plot(ax, [tpk tpk], [yl * 0.90, yl], '-', 'Color', [0.35 0.35 0.35], 'LineWidth', 1.0, 'HandleVisibility', 'off');
+            plot(ax, tpk, yl, '^', 'MarkerSize', 4, 'MarkerFaceColor', [0.35 0.35 0.35], ...
+                 'MarkerEdgeColor', 'none', 'HandleVisibility', 'off');
+            text(ax, tpk, yl, sprintf(' %.0f', p.Results.peak), 'FontSize', fs - 1, ...
+                 'Color', [0.35 0.35 0.35], 'VerticalAlignment', 'top', 'HorizontalAlignment', 'left');
+        end
     end
 
     function [h, lbl, ncol] = draw_one(ax, ser, ylab, col, varargin)
@@ -138,13 +166,15 @@ end
     end
 
     function [h, lbl, ncol] = draw_gov(ax, DVs, stem, ylab)
+        % R/L colour is shared (see draw_rl); the only thing this panel needs
+        % to explain locally is dashed=raw vs solid=governed, forced top-right.
         G = DVs.gov;
         plot(ax, G.t, G.(stem + "_raw_r"), '--', 'Color', RED,  'LineWidth', 0.9);
         plot(ax, G.t, G.(stem + "_raw_l"), '--', 'Color', BLUE, 'LineWidth', 0.9);
-        h(1) = plot(ax, G.t, G.(stem + "_gov_r"), '-', 'Color', RED,  'LineWidth', 1.2);
-        h(2) = plot(ax, G.t, G.(stem + "_gov_l"), '-', 'Color', BLUE, 'LineWidth', 1.2);
-        h(3) = plot(ax, nan, nan, '--', 'Color', [0.35 0.35 0.35], 'LineWidth', 0.9);
-        lbl = {'R', 'L', 'raw'}; ncol = 1;
+        plot(ax, G.t, G.(stem + "_gov_r"), '-', 'Color', RED,  'LineWidth', 1.2);
+        plot(ax, G.t, G.(stem + "_gov_l"), '-', 'Color', BLUE, 'LineWidth', 1.2);
+        h = plot(ax, nan, nan, '--', 'Color', [0.35 0.35 0.35], 'LineWidth', 0.9);
+        lbl = {'raw'}; ncol = -1;   % -1 = forced top-right, see the legend-placement block above
         ref_and_label(ax, [], ylab);
     end
 
