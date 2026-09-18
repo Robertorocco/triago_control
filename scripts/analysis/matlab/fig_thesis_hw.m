@@ -100,8 +100,11 @@ reg('hap_pos')    = {"virtuose_pose",     @(ax) draw_xyz(ax, S.virtuose_pose.t, 
 reg('hap_rpy')    = {"virtuose_pose",     @(ax) draw_xyz(ax, S.virtuose_pose.t, quat_xyzw_to_rpy(S.virtuose_pose.data(:, 4:7)), "$\phi_h,\theta_h,\psi_h$ [rad]")};
 reg('hap_vlin')   = {"virtuose_velocity", @(ax) draw_one(ax, norm_of(S.virtuose_velocity, 1:3), "$\|v_h\|$ [m/s]", TEAL)};
 reg('hap_vang')   = {"virtuose_velocity", @(ax) draw_one(ax, norm_of(S.virtuose_velocity, 4:6), "$\|\omega_h\|$ [rad/s]", TEAL)};
-reg('hap_force')  = {"virtuose_force_cmd", @(ax) draw_xyz(ax, S.virtuose_force_cmd.t, S.virtuose_force_cmd.data(:, 1:3), "$F_h$ [N]", 'reflines', [-10 10])};
-reg('hap_torque') = {"virtuose_force_cmd", @(ax) draw_xyz(ax, S.virtuose_force_cmd.t, S.virtuose_force_cmd.data(:, 4:6), "$\tau_h$ [N\,m]", 'reflines', [-1 1])};
+% No +-10N/+-1Nm clip reflines here: the trial never gets close to them, so
+% forcing the axis to include them would flatten the real signal down to a
+% sliver -- the clip values are already stated numerically in the text.
+reg('hap_force')  = {"virtuose_force_cmd", @(ax) draw_xyz(ax, S.virtuose_force_cmd.t, S.virtuose_force_cmd.data(:, 1:3), "$F_h$ [N]")};
+reg('hap_torque') = {"virtuose_force_cmd", @(ax) draw_xyz(ax, S.virtuose_force_cmd.t, S.virtuose_force_cmd.data(:, 4:6), "$\tau_h$ [N\,m]")};
 
 % Shared-autonomy telemetry: blend_debug = [alpha, v_user(6), v_policy(6),
 % v_blend(6)]; the blended-action share is (1-a)|v_user| vs a|v_policy| as a
