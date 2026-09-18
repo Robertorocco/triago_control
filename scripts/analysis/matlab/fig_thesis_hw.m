@@ -142,7 +142,10 @@ for k = keys
             end
             lg = legend(ax, h, lbl, 'Location', loc, 'Box', 'off', 'FontSize', fs - 0.5, ...
                         'NumColumns', max(ncol, 1), 'Interpreter', 'none');
-            lg.ItemTokenSize = [12 8];
+            % A short swatch shows too few dash segments to read as dashed
+            % (looks solid) -- the "raw" key needs a longer one to actually
+            % show the gap; R/L(-less) legends have no dash to worry about.
+            if ncol == -1, lg.ItemTokenSize = [26 8]; else, lg.ItemTokenSize = [12 8]; end
         end
         ax.XRuler.TickLabelGapOffset = 1;
     end
