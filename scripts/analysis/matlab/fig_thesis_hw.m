@@ -118,7 +118,7 @@ if isfield(S, 'virtuose_deadman') && isfield(S, 'virtuose_button_right')
 else
     control_iv = zeros(0, 2);
 end
-SHADE = [0.99 0.93 0.62];   % light yellow: operator in control
+SHADE = [0.996 0.976 0.878];   % pale yellow: operator in control (same tone as \hwshade)
 
 keys = string(reg.keys);
 if ~isempty(opts.panels), keys = opts.panels; end
@@ -153,7 +153,13 @@ for k = keys
         ser = bs{1}.(bs{2});
         draw_broken(fig, ser, bs{3}, t_max, t_off, ismember(k, xlab_keys), opts.broken_ranges(broken_idx, :));
     else
-        ax = axes(fig, 'Units', 'normalized', 'Position', [0.19 0.20 0.79 0.77]);
+        % Axes reclaim the strip normally reserved for the "$t$ [s]" label
+        % when this panel doesn't carry one (only the bottom row of a
+        % multi-row figure does -- see xlabel_on) -- tick numbers stay either
+        % way, only the label text + its margin are dropped.
+        has_xlabel = ismember(k, xlab_keys);
+        if has_xlabel, ax_pos = [0.19 0.20 0.79 0.77]; else, ax_pos = [0.19 0.10 0.79 0.87]; end
+        ax = axes(fig, 'Units', 'normalized', 'Position', ax_pos);
         set(ax, 'TickDir', 'out', 'TickLength', [0.015 0.015], 'Box', 'off', ...
                 'LineWidth', 0.6, 'XColor', [0.25 0.25 0.25], 'YColor', [0.25 0.25 0.25], ...
                 'FontSize', fs, 'NextPlot', 'add');
@@ -168,7 +174,7 @@ for k = keys
         if ~isnan(t_off)
             xline(ax, t_off, '--', 'Color', [0.45 0.45 0.45], 'LineWidth', 0.7, 'HandleVisibility', 'off');
         end
-        if ismember(k, xlab_keys)
+        if has_xlabel
             xlabel(ax, "$t$ [s]", 'Interpreter', 'latex', 'FontSize', fs + 1);
         end
         if ~isempty(h)
@@ -266,7 +272,11 @@ end
         % chosen per-trial from where the data actually has a gap (see caller).
         bottom_top_val = brk(1);
         top_bot_val = brk(2); top_top_val = brk(3);
-        axb = axes(fig, 'Units', 'normalized', 'Position', [0.19 0.20 0.79 0.58]);
+        % Same xlabel-driven reclaim as the single-axes path: the bottom axis
+        % keeps its top edge fixed (where the break sits) and grows downward
+        % into the label's freed strip when this panel isn't in the bottom row.
+        if show_xlabel, axb_bottom = 0.20; else, axb_bottom = 0.10; end
+        axb = axes(fig, 'Units', 'normalized', 'Position', [0.19 axb_bottom 0.79 0.78 - axb_bottom]);
         axt = axes(fig, 'Units', 'normalized', 'Position', [0.19 0.83 0.79 0.12]);
         for a = [axb axt]
             set(a, 'TickDir', 'out', 'TickLength', [0.015 0.015], 'Box', 'off', ...
@@ -415,7 +425,7 @@ function shade_intervals(ax, iv, c)
 yl = ax.YLim;
 for i = 1:size(iv, 1)
     p = patch(ax, [iv(i, 1) iv(i, 2) iv(i, 2) iv(i, 1)], [yl(1) yl(1) yl(2) yl(2)], c, ...
-              'FaceAlpha', 0.45, 'EdgeColor', 'none', 'HandleVisibility', 'off');
+              'FaceAlpha', 0.8, 'EdgeColor', 'none', 'HandleVisibility', 'off');
     uistack(p, 'bottom');
 end
 ylim(ax, yl);
