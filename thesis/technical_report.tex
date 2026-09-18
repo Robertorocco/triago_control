@@ -11,6 +11,7 @@
 \usepackage{booktabs}
 \usepackage{subcaption}
 \captionsetup[subfigure]{font=scriptsize,labelfont=bf,skip=1.5pt}
+\usepackage[section]{placeins}
 \usepackage{tabularx}
 \newcolumntype{L}{>{\raggedright\arraybackslash}X}
 \usepackage{enumitem}
@@ -972,7 +973,7 @@ The perception pipeline was validated separately on the physical robot. The head
 \subsection{Home-to-crossed reaching}
 \label{sec:hwswap}
 
-A second hardware test exercises the bimanual controller itself rather than perception. Each arm is driven open-loop, by the same quintic-timed Cartesian reference source used throughout controller development, from a common home configuration --- both grippers raised and held away from the body (Figure~\ref{fig:hwhome}) --- to the pose sampled from the other arm at the start of the motion, so the two arms swap sides and end up crossed in front of the torso (Figure~\ref{fig:hwcrossed}). The manoeuvre puts the self-collision and inter-arm rows of the safety filter (Section~\ref{sec:cbf}) under a large, simultaneous bimanual displacement that a single-arm test cannot exercise.
+The first hardware test targets the controller alone, with vision excluded from the loop. Both arms are driven open-loop, by the same quintic-timed Cartesian reference source used throughout controller development, from a common home configuration --- both grippers raised and held away from the body (Figure~\ref{fig:hwhome}) --- to the pose sampled from the other arm at the start of the motion, so each arm is commanded straight through the space the other one occupies (Figure~\ref{fig:hwcrossed}). That target pair is not jointly reachable without the self-collision and inter-arm rows of the safety filter (Section~\ref{sec:cbf}) becoming active, so the manoeuvre is posed as a conflict between tracking and safety rather than a compliant reach: it tests whether the CLF's tracking slack yields gracefully under that conflict (Section~\ref{sec:clf}), by exactly as much as each arm's adaptively scheduled weight (Section~\ref{sec:sched}) allows, so the controller settles on the best pose the hard constraints admit for both grippers rather than stalling or violating one.
 
 \begin{figure}[t]
 \centering
