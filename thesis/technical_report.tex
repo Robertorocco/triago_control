@@ -987,8 +987,8 @@ The manoeuvre was logged with the controller's own telemetry (Section~\ref{sec:s
 
 \begin{figure}[t]
 \centering
-\includegraphics[width=0.78\linewidth]{results/hw_3d_trajectory.pdf}
-\caption{Commanded (dotted) and executed (solid) gripper path of each arm ($X \in \{R,L\}$, red/blue) over the home-to-crossed trial, in the robot base frame. A circle marks each path's start; a star marks the executed path's end and a diamond the commanded path's end, joined by a thin grey segment whenever the two differ. The black triad at each executed end pose is the gripper's own axes at the orientation actually reached. The faint floor traces are the executed paths' vertical projection, added as a depth cue.}
+\includegraphics[width=0.97\linewidth]{results/hw_3d_trajectory.pdf}
+\caption{Commanded (dotted) and executed (solid) gripper path of each arm ($X \in \{R,L\}$, red/blue) over the home-to-crossed trial, in the robot base frame. A circle marks each path's start; a star marks the executed path's end and a diamond the commanded path's end, joined by a thin grey segment whenever the two differ. The dark triad at each executed end pose is the gripper's own axes ($x$, $y$, $z$, arrow length arbitrary), showing the orientation actually reached. The faint floor traces below each path are its vertical projection, added as a depth cue.}
 \label{fig:hw3d}
 \end{figure}
 
@@ -998,7 +998,7 @@ Figure~\ref{fig:hw3d} shows what that conflict looks like in the workspace. Both
 \centering
 \begin{subfigure}[t]{0.48\linewidth}\centering\includegraphics[width=\linewidth]{results/hw_qp_colA.pdf}\caption{Safety filter}\label{fig:hwqpdata-a}\end{subfigure}\hfill
 \begin{subfigure}[t]{0.48\linewidth}\centering\includegraphics[width=\linewidth]{results/hw_qp_colB.pdf}\caption{Adaptive weight and reference governor}\label{fig:hwqpdata-b}\end{subfigure}
-\caption{Safety-filter and upstream-shaping telemetry over the same trial as Figure~\ref{fig:hw3d}, per arm ($X \in \{R,L\}$, red/blue); the dashed vertical line in every panel marks $t\approx10$~s, the end of the open-loop reference. (a), top to bottom: CBF shadow price $\lambda_{\text{cbf},X}$; joint-limit shadow price $\lambda_{\text{jl},X}$; CBF safety margin $h_{\text{soft},X}-d_{\text{safe},X}$ (dotted line at zero, the constraint boundary); raw minimum inter-geometry distance $d_{\min}$ (dotted line at zero); and the velocity-dependent safety margin $d_{\text{safe},X}$ of~\eqref{eq:dsafe} (dotted line at its static floor $d_0$). (b), top to bottom: the adaptively scheduled slack weight $w_{\delta,X}$ of~\eqref{eq:slacksched}; then the reference governor's raw (dashed) and governed (solid) linear speed $\|v\|$, angular speed $\|\omega\|$, position-error norm $\|e_p\|$, and orientation-error angle $\theta$ (Algorithm~\ref{alg:governor}, Section~\ref{sec:governor}).}
+\caption{Safety-filter (a) and adaptive-weight/reference-governor (b) telemetry over the same trial as Figure~\ref{fig:hw3d}, per arm ($X \in \{R,L\}$, red/blue); each panel is labelled in-image with the quantity it shows. The dashed vertical line in every panel marks $t\approx10$~s, the end of the open-loop reference; a dotted horizontal line marks the fixed reference value named in that panel's label (zero, or a floor). In (b), the governor panels distinguish the raw commanded quantity (dashed) from the one the CLF actually tracks after governing (solid) --- Algorithm~\ref{alg:governor}, Section~\ref{sec:governor}. Symbols: CBF and joint-limit shadow prices $\lambda_{\text{cbf},X}$, $\lambda_{\text{jl},X}$; CBF safety margin $h_{\text{soft},X}-d_{\text{safe},X}$; minimum inter-geometry distance $d_{\min}$; velocity-dependent safety margin $d_{\text{safe},X}$ of~\eqref{eq:dsafe}; adaptively scheduled slack weight $w_{\delta,X}$ of~\eqref{eq:slacksched}.}
 \label{fig:hwqpdata}
 \end{figure}
 
