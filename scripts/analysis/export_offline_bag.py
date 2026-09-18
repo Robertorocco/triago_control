@@ -218,12 +218,24 @@ class Replay:
             T[f"e_angvel_{k}"].append(float(np.linalg.norm(ref[9:12] - w_est[s])))
 
     def on_gov(self, t_ns, diff):
-        if len(diff) < 24 or self.ref["right"] is None or self.ref["left"] is None:
+        # Each arm's reference starts publishing independently -- a
+        # teleoperated trial's inactive arm has no /arm_*/cartesian_reference
+        # at all until the operator switches to it (unlike the open-loop
+        # home-to-crossed trial, where both start at t=0). Gating the whole
+        # tick on both sides being ready silently drops the active side's
+        # real data for as long as the other side is idle; NaN-fill only the
+        # side that truly has nothing to govern yet.
+        if len(diff) < 24 or (self.ref["right"] is None and self.ref["left"] is None):
             return
         G = self.gov
         G["t"].append(self._t(t_ns))
         for s, k, off in (("right", "r", 0), ("left", "l", 12)):
             ref = self.ref[s]
+            if ref is None:
+                for stem in ("lin_vel_raw", "lin_vel_gov", "ang_vel_raw", "ang_vel_gov",
+                             "pos_err_raw", "pos_err_gov", "ori_err_raw", "ori_err_gov"):
+                    G[f"{stem}_{k}"].append(np.nan)
+                continue
             d_pos, d_ori, d_vel, d_w = diff[off:off + 3], diff[off + 3:off + 6], diff[off + 6:off + 9], diff[off + 9:off + 12]
             raw_pos, raw_rpy, raw_vel, raw_w = ref[0:3], ref[3:6], ref[6:9], ref[9:12]
             gov_pos, gov_rpy, gov_vel, gov_w = raw_pos - d_pos, raw_rpy - d_ori, raw_vel - d_vel, raw_w - d_w
