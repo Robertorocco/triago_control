@@ -245,8 +245,24 @@ TIMESERIES_FORMAT = "parquet"   # "parquet" (preferred) or "csv"
 # ---------------------------------------------------------------------------
 NEAR_MISS_DISTANCE_M = 0.05     # per-arm clearance below this = near-miss
 CLEARANCE_RANGE_M = 0.15        # sensing range of the clearance (cfg.DISTANCE_FILTER_THRESHOLD); farther = "clear"
-CBF_ACTIVE_LAMBDA = 1.0         # /qp_debug/lambda_cbf above this = barrier active
+# Dual feasibility tolerance: the solver returns an exact 0 for an inactive
+# constraint, so any positive value below the smallest genuine multiplier works.
+CBF_ACTIVE_LAMBDA = 1e-3        # /qp_debug/lambda_cbf above this = barrier active
 BELIEF_CONFIDENCE = 0.80        # goal probability above this = "intent locked"
+
+# Active-driving gate: the controller's own stillness thresholds
+# (main_shared_autonomy.STILL_LIN / STILL_ANG), so the metrics judge the same
+# instants the blending logic acts on.
+STILL_LIN_MPS = 0.005
+STILL_ANG_RADPS = 0.05
+
+# SPARC (Balasubramanian 2015): spectrum cut at SPARC_FC_HZ and, inside that,
+# at the last frequency where the normalised magnitude is still above the
+# amplitude threshold; a driving segment shorter than SPARC_MIN_SEGMENT_S has
+# too little spectral content to score.
+SPARC_FC_HZ = 10.0
+SPARC_AMP_TH = 0.05
+SPARC_MIN_SEGMENT_S = 0.5
 
 
 # ---------------------------------------------------------------------------

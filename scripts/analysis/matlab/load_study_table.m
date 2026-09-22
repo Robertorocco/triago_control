@@ -157,7 +157,8 @@ switch nm
     case "cbf_active_s"
         % Absolute seconds, so a fraction that only rose because the trial got
         % shorter can be told apart from more time actually spent at the barrier.
-        v = trial.cbf_active_frac .* getnum(Traw, 'right_duration_s');
+        % The fraction is already over T_h, so the base is the time under human control.
+        v = trial.cbf_active_frac .* trial.teleop_time_s;
     case "safety_nearmiss_s"
         v = trial.safety_nearmiss_frac .* trial.teleop_time_s;
     otherwise

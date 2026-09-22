@@ -1,8 +1,8 @@
 """Thesis-styled panels for the questionnaire results.
 
-Drawn to match the MATLAB panels of the objective chapter: no title, sans face at
-the size it is printed at, LaTeX-style math for the axis symbol, no grid, sized in
-centimetres so LaTeX includes them at native size, vector PDF.
+Drawn to match the MATLAB panels of the objective chapter: no title, every string
+typeset by the real LaTeX engine in the document's own Latin Modern face, no grid,
+sized in centimetres so LaTeX includes them at native size, vector PDF.
 """
 import os
 import numpy as np
@@ -20,9 +20,16 @@ W_ITEM, H_ITEM = 4.95 * CM, 4.0 * CM
 W_RANK, H_RANK = 10.5 * CM, 4.3 * CM
 
 plt.rcParams.update({
-    'font.family': 'sans-serif',
-    'font.sans-serif': ['Nimbus Sans', 'Helvetica', 'Liberation Sans', 'DejaVu Sans'],
-    'mathtext.fontset': 'cm',          # the axis symbol matches the thesis body math
+    # Same engine and same font package as the document, so ticks and labels are
+    # set in the body face rather than merely resembling it. The three family
+    # lists are named away from matplotlib's own Computer Modern aliases, which
+    # would pull in type1ec/cm-super; lmodern already supplies scalable T1 faces.
+    'text.usetex': True,
+    'text.latex.preamble': r'\usepackage[T1]{fontenc}\usepackage{lmodern}',
+    'font.family': 'serif',
+    'font.serif': ['Latin Modern Roman'],
+    'font.sans-serif': ['Latin Modern Sans'],
+    'font.monospace': ['Courier'],
     'font.size': FS, 'axes.linewidth': 0.6, 'axes.edgecolor': '0.25',
     'xtick.color': '0.25', 'ytick.color': '0.25', 'axes.labelcolor': '0.15',
     'text.color': '0.15', 'axes.spines.top': False, 'axes.spines.right': False,
@@ -49,7 +56,7 @@ BASE = 1.0          # the floor of the response scale, not zero
 
 
 def _fmt_p(p):
-    return 'p<0.001' if p < 0.001 else 'p=%.3f' % p
+    return r'$p<0.001$' if p < 0.001 else r'$p=%.3f$' % p
 
 
 def _sig_pairs(X):
@@ -134,7 +141,9 @@ def _item_panel(X, symbol, ylo, yhi, base, step, path):
 
 def item_panels(r, out_dir):
     """The six items on one common vertical scale so the matrix reads as a unit."""
-    base, step = 7.30, 0.60
+    # step clears a whole p-label: LaTeX math sets them taller than the sans
+    # text it replaced, and at 0.60 the lower level touched the bracket above.
+    base, step = 7.30, 0.82
     nlvl = max(_levels(r['R'][it]) for it in sd.ITEMS)
     ylo, yhi = BASE, base + step * max(nlvl - 1, 0) + 0.62
     for it in sd.ITEMS:

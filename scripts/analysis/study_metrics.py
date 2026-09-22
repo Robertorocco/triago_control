@@ -204,7 +204,7 @@ def load_bag(bag_dir: str) -> dict:
 # Pure numpy helpers
 # =============================================================================
 def sparc(speed: np.ndarray, fs: float, padlevel: int = 4,
-          fc: float = 10.0, amp_th: float = 0.05) -> float:
+          fc: float = sc.SPARC_FC_HZ, amp_th: float = sc.SPARC_AMP_TH) -> float:
     """Spectral Arc Length smoothness (Balasubramanian 2015). More negative =
     less smooth; near 0 = very smooth. NaN if the profile is too short/flat."""
     speed = np.asarray(speed, dtype=float)
@@ -308,6 +308,93 @@ def _smooth(x: np.ndarray, win: int) -> np.ndarray:
     return np.convolve(x, k, mode="same")
 
 
+def _runs(mask: np.ndarray):
+    """(start, stop) index pairs of the maximal True runs of a boolean vector."""
+    m = np.asarray(mask, dtype=bool)
+    if m.size == 0:
+        return []
+    edges = np.diff(np.concatenate(([0], m.astype(int), [0])))
+    return list(zip(np.where(edges == 1)[0], np.where(edges == -1)[0]))
+
+
+# =============================================================================
+# Time sets shared by several metrics
+#   T_h : operator in control (autonomous grasp phases excluded)
+#   c   : clutch engaged; only the clutch mapping re-indexes on that button
+#   T_a : actively driving = T_h, clutch released, hand faster than stillness
+# =============================================================================
+def _mode_letter(metadata: dict | None) -> str:
+    md = metadata or {}
+    cell = str(md.get("cell") or "")
+    if cell[:1] in ("C", "J"):
+        return cell[0]
+    return {"CLUTCH": "C", "JOYSTICK": "J"}.get(str(md.get("control_mode") or "").upper(), "")
+
+
+def _teleop_mask(series: dict, t_target: np.ndarray) -> np.ndarray:
+    ga = series.get(T_GRASP_ACTIVE)
+    if ga and ga.col("value") is not None and len(ga):
+        m = ~_zoh(t_target, ga.t, np.asarray(ga.col("value")) > 0.5).astype(bool)
+        if np.any(m):
+            return m
+    return np.ones(len(t_target), dtype=bool)
+
+
+def _clutch_mask(series: dict, t_target: np.ndarray, mode: str) -> np.ndarray:
+    cl = series.get(T_CLUTCH)
+    if mode == "C" and cl and cl.col("value") is not None and len(cl):
+        return _zoh(t_target, cl.t, np.asarray(cl.col("value")) > 0.5).astype(bool)
+    return np.zeros(len(t_target), dtype=bool)
+
+
+def _user_twist(series: dict, t_target: np.ndarray):
+    """Operator's commanded twist held onto t_target, or None when not recorded."""
+    bd = series.get(T_BLEND)
+    vu = _stack(bd, range(1, 7)) if bd else None
+    if vu is None or not len(vu):
+        return None
+    idx = np.clip(np.searchsorted(bd.t, t_target, side="right") - 1, 0, len(vu) - 1)
+    return vu[idx]
+
+
+def _driving_mask(series: dict, t_target: np.ndarray, mode: str):
+    """T_a on t_target, or None when the operator's twist was not recorded."""
+    vu = _user_twist(series, t_target)
+    if vu is None:
+        return None
+    moving = np.linalg.norm(vu[:, :3], axis=1) >= sc.STILL_LIN_MPS
+    return _teleop_mask(series, t_target) & ~_clutch_mask(series, t_target, mode) & moving
+
+
+def _channel_cos(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """Row-wise cosine of two (T,3) arrays; 0 where either vector is (near) zero,
+    exactly as the controller's own alignment scores a silent channel."""
+    na = np.linalg.norm(a, axis=1)
+    nb = np.linalg.norm(b, axis=1)
+    ok = (na > 1e-9) & (nb > 1e-9)
+    out = np.zeros(len(a))
+    out[ok] = np.clip(np.sum(a[ok] * b[ok], axis=1) / (na[ok] * nb[ok]), -1.0, 1.0)
+    return out
+
+
+def segment_sparc(t: np.ndarray, speed: np.ndarray, driving: np.ndarray, fs: float):
+    """Mean SPARC over the driving segments long enough to carry a spectrum.
+
+    Scoring each segment on its own keeps the zero-velocity holds between them
+    out of the spectrum; a hold is not part of any movement. Returns (mean, M).
+    """
+    vals = []
+    for a, b in _runs(driving):
+        if t[b - 1] - t[a] < sc.SPARC_MIN_SEGMENT_S:
+            continue
+        phi = sparc(speed[a:b], fs)
+        if np.isfinite(phi):
+            vals.append(phi)
+    if not vals:
+        return float("nan"), 0
+    return float(np.mean(vals)), len(vals)
+
+
 # =============================================================================
 # EE speed (from PUBLISHED velocity -- /qp_debug/ee_real slots, ground truth)
 # =============================================================================
@@ -395,6 +482,7 @@ def compute_metrics(series: dict, metadata: dict | None = None,
     """Flat dict of metrics for ONE arm (+ trial-shared quantities)."""
     m: dict = {"arm": arm}
     nan = float("nan")
+    mode = _mode_letter(metadata)
 
     spans = [(s.t[0], s.t[-1]) for s in series.values() if len(s)]
     m["duration_s"] = round(max(b for _, b in spans) - min(a for a, _ in spans), 3) \
@@ -425,9 +513,20 @@ def compute_metrics(series: dict, metadata: dict | None = None,
     if speed is not None and speed.size:
         m["ee_speed_mean_mps"] = round(float(np.nanmean(speed)), 4)
         m["ee_speed_max_mps"] = round(float(np.nanmax(speed)), 4)
-        m["ee_sparc"] = round(sparc(speed, _fs_of(ts)), 4)
+        fs = _fs_of(ts)
+        # Whole-profile value kept as a diagnostic: it folds every clutch hold
+        # into the spectrum, which is the distortion the segmented one removes.
+        m["ee_sparc_whole"] = round(sparc(speed, fs), 4)
+        drive = _driving_mask(series, ts, mode)
+        if drive is None:
+            m["ee_sparc"], m["ee_sparc_nseg"] = m["ee_sparc_whole"], 0
+        else:
+            phi, nseg = segment_sparc(ts, speed, drive, fs)
+            m["ee_sparc"], m["ee_sparc_nseg"] = round(phi, 4), nseg
     else:
-        m["ee_speed_mean_mps"] = m["ee_speed_max_mps"] = m["ee_sparc"] = nan
+        m["ee_speed_mean_mps"] = m["ee_speed_max_mps"] = nan
+        m["ee_sparc"] = m["ee_sparc_whole"] = nan
+        m["ee_sparc_nseg"] = 0
 
     # --- QP solution + measured joint velocity (this arm's 7 joints) ---
     qc = _joint_block(series.get(T_QDOT_CMD), arm)
@@ -455,10 +554,14 @@ def compute_metrics(series: dict, metadata: dict | None = None,
     lcol = lam.col(f"d{_LAMBDA_IDX[arm]}") if lam else None
     if lcol is not None and len(lcol):
         lv = np.asarray(lcol, dtype=float)
-        active = lv > sc.CBF_ACTIVE_LAMBDA
+        # Counted over T_h only, as the clearance is: during an autonomous grasp
+        # the barrier is bypassed on purpose and its multiplier says nothing
+        # about the operator's driving.
+        teleop = _teleop_mask(series, lam.t)
+        active = (lv > sc.CBF_ACTIVE_LAMBDA) & teleop
         m["cbf_lambda_peak"] = round(float(np.nanmax(lv)), 4)
         m["cbf_lambda_mean"] = round(float(np.nanmean(lv)), 4)
-        m["cbf_active_frac"] = round(float(np.nanmean(active)), 4)
+        m["cbf_active_frac"] = round(float(np.sum(active) / max(int(np.sum(teleop)), 1)), 4)
         # The multiplier is heavy-tailed (a hard barrier fight spikes it by 1e3-1e6
         # for seconds), so the mean is owned by the worst second; the median of the
         # active samples is the typical push and is what the analysis compares.
@@ -483,11 +586,7 @@ def compute_metrics(series: dict, metadata: dict | None = None,
         h = np.asarray(mcol, dtype=float) + _zoh(smg.t, dsf.t, np.asarray(dsf.col(f"d{_LAMBDA_IDX[arm]}"), dtype=float))
         rng = sc.CLEARANCE_RANGE_M
         h = np.where(h >= 0.5, rng, np.minimum(h, rng))      # 1.0 sentinel -> "clear"
-        teleop = np.ones(len(h), dtype=bool)
-        if ga and ga.col("value") is not None and len(ga):
-            teleop = ~_zoh(smg.t, ga.t, np.asarray(ga.col("value")) > 0.5).astype(bool)
-        if not np.any(teleop):
-            teleop = np.ones(len(h), dtype=bool)
+        teleop = _teleop_mask(series, smg.t)
         below = (h < sc.NEAR_MISS_DISTANCE_M) & teleop
         m["safety_min_dist_m"] = round(float(np.nanmin(h[teleop])), 4)
         m["safety_mean_dist_m"] = round(float(np.nanmean(h[teleop])), 4)
@@ -534,43 +633,61 @@ def compute_metrics(series: dict, metadata: dict | None = None,
 
     # --- assistance / blending (shared) ---
     bd = series.get(T_BLEND)
-    if bd and bd.col("d0") is not None and len(bd):
-        alpha = bd.col("d0")
-        m["alpha_mean"] = round(float(np.nanmean(alpha)), 4)
-        m["alpha_autonomy_frac"] = round(float(np.nanmean(np.asarray(alpha) > 0.5)), 4)
-        vu = _stack(bd, range(1, 7))
+    vu = _stack(bd, range(1, 7)) if bd else None
+    if bd and bd.col("d0") is not None and len(bd) and vu is not None:
+        alpha = np.asarray(bd.col("d0"), dtype=float)
         vp = _stack(bd, range(7, 13))
         vb = _stack(bd, range(13, 19))
-        if vu is not None and vp is not None:
-            nu = np.linalg.norm(vu, axis=1)
-            act = nu > 1e-4
-            if np.any(act):
-                a, b2 = vu[act], vp[act]
-                denom = np.linalg.norm(a, axis=1) * np.linalg.norm(b2, axis=1)
-                good = denom > 1e-9
-                cos = np.sum(a[good] * b2[good], axis=1) / denom[good]
-                m["agreement_mean_cos"] = round(float(np.nanmean(cos)), 4) if cos.size else nan
-                m["user_active_frac"] = round(float(np.mean(act)), 4)
-            else:
-                m["agreement_mean_cos"] = nan
-                m["user_active_frac"] = 0.0
+        # Every quantity below is taken over T_a. Outside it the arbitration is
+        # suspended by construction (clutch, stillness, grasp all zero alpha), so
+        # a whole-trial average would measure how long the operator paused.
+        nlin = np.linalg.norm(vu[:, :3], axis=1)
+        nang = np.linalg.norm(vu[:, 3:], axis=1)
+        Ta = (_teleop_mask(series, bd.t) & ~_clutch_mask(series, bd.t, mode)
+              & (nlin >= sc.STILL_LIN_MPS))
+        m["alpha_mean"] = round(float(np.nanmean(alpha)), 4)
+        m["alpha_autonomy_frac_total"] = round(float(np.nanmean(alpha > 0.5)), 4)
+        m["user_active_frac"] = round(float(np.mean(Ta)), 4)
+        if np.any(Ta):
+            m["alpha_autonomy_frac"] = round(float(np.nanmean(alpha[Ta] > 0.5)), 4)
         else:
-            m["agreement_mean_cos"] = m["user_active_frac"] = nan
+            m["alpha_autonomy_frac"] = nan
+
+        if vp is not None and np.any(Ta):
+            # Agreement per channel, as the controller's own alignment computes
+            # it: a cosine in m/s and one in rad/s are never mixed in one dot
+            # product, and the angular channel only votes while it is driven.
+            rho_lin = _channel_cos(vu[:, :3], vp[:, :3])
+            rho_ang = _channel_cos(vu[:, 3:], vp[:, 3:])
+            ang_on = nang >= sc.STILL_ANG_RADPS
+            rho = np.where(ang_on, 0.5 * (rho_lin + rho_ang), rho_lin)
+            m["agreement_mean_cos"] = round(float(np.nanmean(rho[Ta])), 4)
+            m["agreement_lin_mean_cos"] = round(float(np.nanmean(rho_lin[Ta])), 4)
+            m["agreement_ang_mean_cos"] = round(float(np.nanmean(rho_ang[Ta & ang_on])), 4) \
+                if np.any(Ta & ang_on) else nan
+            # Legacy six-dimensional cosine, kept only for the before/after check.
+            act6 = np.linalg.norm(vu, axis=1) > 1e-4
+            d6 = np.linalg.norm(vu, axis=1) * np.linalg.norm(vp, axis=1)
+            ok6 = act6 & (d6 > 1e-9)
+            m["agreement_mean_cos6d"] = round(float(np.mean(np.sum(vu[ok6] * vp[ok6], axis=1) / d6[ok6])), 4) \
+                if np.any(ok6) else nan
+        else:
+            m["agreement_mean_cos"] = m["agreement_lin_mean_cos"] = nan
+            m["agreement_ang_mean_cos"] = m["agreement_mean_cos6d"] = nan
         # Transparency in the sense this literature uses it: the magnitude by which
-        # arbitration altered the operator's own command, ||v_blend - v_user||.
-        # Linear part only, so the number is one physical quantity in m/s, and only
-        # while the operator is actually driving -- an idle user commands zero and
-        # the idle autonomous crawl would otherwise read as total intervention.
-        if vu is not None and vb is not None and np.any(np.linalg.norm(vu, axis=1) > 1e-4):
-            act = np.linalg.norm(vu, axis=1) > 1e-4
-            dv = np.linalg.norm((vb - vu)[act, :3], axis=1)
+        # arbitration altered the operator's own command, ||v_blend - v_user||,
+        # linear part only so the number is one physical quantity in m/s.
+        if vb is not None and np.any(Ta):
+            dv = np.linalg.norm((vb - vu)[Ta, :3], axis=1)
             m["intervention_mean_mps"] = round(float(np.nanmean(dv)), 4)
             m["intervention_peak_mps"] = round(float(np.nanmax(dv)), 4)
         else:
             m["intervention_mean_mps"] = m["intervention_peak_mps"] = nan
     else:
-        m["alpha_mean"] = m["alpha_autonomy_frac"] = nan
-        m["agreement_mean_cos"] = m["user_active_frac"] = nan
+        m["alpha_mean"] = m["alpha_autonomy_frac"] = m["alpha_autonomy_frac_total"] = nan
+        m["agreement_mean_cos"] = m["agreement_lin_mean_cos"] = nan
+        m["agreement_ang_mean_cos"] = m["agreement_mean_cos6d"] = nan
+        m["user_active_frac"] = nan
         m["intervention_mean_mps"] = m["intervention_peak_mps"] = nan
 
     # --- intent inference (shared) ---

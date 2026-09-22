@@ -140,9 +140,20 @@ def build_trial_mat(bag_dir: str, metadata: dict):
     return mat_dict, metrics_right, metrics_left
 
 
+def _matval(v):
+    """A loaded .mat value back to the plain Python type _pyval expects."""
+    if hasattr(v, "_fieldnames"):
+        return _struct_to_dict(v)
+    if isinstance(v, np.ndarray):
+        return [_matval(x) for x in v.ravel().tolist()] if v.size != 1 else _matval(v.ravel()[0])
+    if isinstance(v, np.generic):
+        return v.item()
+    return v
+
+
 def _struct_to_dict(mstruct) -> dict:
     """Flatten a loaded scipy mat_struct (struct_as_record=False) back to a dict."""
-    return {name: getattr(mstruct, name) for name in mstruct._fieldnames}
+    return {name: _matval(getattr(mstruct, name)) for name in mstruct._fieldnames}
 
 
 def _series_from_mat(series_struct) -> dict:
@@ -264,6 +275,39 @@ def _check_scipy() -> bool:
     return False
 
 
+class _MatTrial:
+    """The (participant, world, cell) identity of a trial, parsed from its .mat name."""
+    def __init__(self, mat_name: str):
+        m = re.match(r"(P\d+)_([a-z]+)_([A-Z]+)\.mat$", mat_name)
+        if not m:
+            raise ValueError(f"not a trial .mat name: {mat_name}")
+        self.participant, self.world, self.cell = m.groups()
+        self.folder = f"{self.world}_{self.cell}"
+
+
+def recompute_from_mats(out_dir: str) -> int:
+    """Re-run every metric from the .mat files alone, for a machine without the bags.
+
+    metadata comes back out of each .mat's own `meta` struct; the manifest is
+    rewritten from the result exactly as the bag-driven path writes it.
+    """
+    mat_dir = os.path.join(out_dir, "mat")
+    names = sorted(n for n in os.listdir(mat_dir) if n.endswith(".mat"))
+    rows = []
+    for i, name in enumerate(names, 1):
+        r = _MatTrial(name)
+        mat_path = os.path.join(mat_dir, name)
+        print(f"[{i}/{len(names)}] {r.participant}/{r.folder} -- recomputing metrics...", flush=True)
+        cached = sio.loadmat(mat_path, struct_as_record=False, squeeze_me=True)
+        metadata = {**_struct_to_dict(cached["meta"]), "cell": r.cell}
+        mat_dict, metrics_right, metrics_left = recompute_trial_mat(mat_path, metadata)
+        sio.savemat(mat_path, mat_dict, long_field_names=True, oned_as="column", do_compression=True)
+        rows.append(manifest_row(r, metadata, metrics_right, metrics_left, os.path.join("mat", name)))
+    write_manifest(out_dir, rows)
+    print(f"\n{len(rows)} trial(s) recomputed in {mat_dir}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -282,7 +326,19 @@ def main() -> int:
                          "series already stored in each .mat (minutes, not an hour of bag decoding)")
     ap.add_argument("--dry-run", action="store_true",
                     help="only print what would be included/excluded, export nothing")
+    ap.add_argument("--from-mats", action="store_true",
+                    help="recompute metrics from an existing matlab_export/ alone (no bags, "
+                         "no data root): every mat/*.mat is re-scored and the manifest rewritten")
     args = ap.parse_args()
+
+    if args.from_mats:
+        out_dir = args.out_dir or os.path.join(args.data_root, "matlab_export")
+        if not os.path.isdir(os.path.join(out_dir, "mat")):
+            print(f"no mat/ folder under {out_dir}", file=sys.stderr)
+            return 2
+        if not _check_scipy():
+            return 2
+        return recompute_from_mats(out_dir)
 
     if not os.path.isdir(args.data_root):
         print(f"data root not found: {args.data_root}", file=sys.stderr)
@@ -330,7 +386,8 @@ def main() -> int:
         reuse = args.skip_existing and fresh and not recompute
         how = '(reusing existing .mat)' if reuse else '-- recomputing metrics...' if recompute else '-- reading bag...'
         print(f"[{i}/{len(included)}] {r.participant}/{r.folder} {how}", flush=True)
-        metadata = sm.load_metadata(r.path)
+        # The folder name is the ground truth for the cell; metadata.json is free-typed.
+        metadata = {**sm.load_metadata(r.path), "cell": r.cell}
         if reuse:
             cached = sio.loadmat(mat_path, struct_as_record=False, squeeze_me=True)
             metrics_right = _struct_to_dict(cached["metrics_right"])

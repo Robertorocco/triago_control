@@ -13,8 +13,8 @@ W = 7.4; H = 4.8;
 
     function [fig, ax] = newpanel()
         fig = figure('Color', 'w', 'Units', 'centimeters', 'Position', [2 2 W H], ...
-                     'DefaultTextInterpreter', 'none', 'DefaultAxesTickLabelInterpreter', 'none', ...
-                     'DefaultAxesFontName', 'Helvetica', 'DefaultTextFontName', 'Helvetica', ...
+                     'DefaultTextInterpreter', 'latex', 'DefaultAxesTickLabelInterpreter', 'latex', ...
+                     'DefaultLegendInterpreter', 'latex', ...
                      'DefaultAxesFontSize', fs, 'DefaultTextFontSize', fs);
         ax = axes(fig, 'Units', 'normalized', 'Position', [0.165 0.175 0.815 0.795]);
         set(ax, 'TickDir', 'out', 'TickLength', [0.012 0.012], 'Box', 'off', ...
@@ -24,7 +24,7 @@ W = 7.4; H = 4.8;
 
 % ---------------------------------------------------------------- slot panel
 series = ["composite" "fam_time_effectiveness" "fam_human_effort"];
-labels = ["Composite" "Time & effectiveness" "Human effort"];
+labels = ["Composite" "Time \& effectiveness" "Human effort"];
 styles = {'-', '--', ':'};
 marks  = {'o', 's', '^'};
 cols   = [0 0 0; studyplot.color("C"); studyplot.color("J")];
