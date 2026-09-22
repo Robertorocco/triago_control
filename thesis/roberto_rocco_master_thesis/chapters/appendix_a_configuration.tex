@@ -1,0 +1,291 @@
+\chapter{Configuration parameters}
+\label{app:config}
+
+
+All parameter values live in centralised configuration modules (one per subsystem) and are reported here, grouped by function, in the same order as the corresponding sections of Chapter~\ref{ch:method}. Symbols refer to the equations of that chapter.
+
+\begingroup\footnotesize
+
+\section{Control loop}
+\begin{tabularx}{\linewidth}{@{}lllX@{}}
+\toprule
+Symbol & Name & Value & Meaning \\
+\midrule
+$f_{\text{ctrl}}$ & \texttt{CONTROL\_FREQ\_DEFAULT} & 150~Hz & loop rate \\
+--- & \texttt{PUBLISH\_EVERY\_N} & 2 & telemetry decimation \\
+--- & \texttt{WATCHDOG\_TIMEOUT} & 0.5~s & stale-reference freeze \\
+\bottomrule
+\end{tabularx}
+
+The QP is solved by the Goldfarb--Idnani dual active-set method, an exact finite algorithm with no tolerance parameter, and the loop-rate telemetry above is a window mean over $N = $~\texttt{PUBLISH\_EVERY\_N} ticks, doubled to 4 on the physical robot.
+
+\section{CLF and task tracking}
+\begin{tabularx}{\linewidth}{@{}lllX@{}}
+\toprule
+Symbol & Name & Value & Meaning \\
+\midrule
+$\gamma$ & \texttt{GAMMA\_CLF\_DEFAULT} & 0.75 & CLF rate \eqref{eq:clf} \\
+$\gamma_{\max}$ & \texttt{GAMMA\_MAX} & 1.2 & CLF rate, held arm \\
+$W_{\text{task}}$ & \texttt{TASK\_WEIGHTS\_6D} & $\mathrm{diag}(10,10,10,0.5,0.5,0.5)$ & task weights \eqref{eq:clf} \\
+$W_{\text{task}}^{\text{grasp}}$ & \texttt{TASK\_WEIGHTS\_6D\_GRASP} & $\mathrm{diag}(10,10,10,2,2,2)$ & task weights, precision \\
+$w_{\delta}^{\text{base}}, w_{\delta}^{\max}$ & \texttt{BASE/MAX\_WEIGHT\_SLACK} & 150.75 / 250 & slack-weight range \eqref{eq:slacksched} \\
+$\beta$ & \texttt{BETA} & 0.2 & schedule sensitivity \eqref{eq:slacksched} \\
+$\tau_{\lambda}$ & \texttt{SLACK\_FILTER\_TAU} & 0.15~s & shadow-price LPF \\
+$\tau_{w}$ & \texttt{WEIGHT\_SLACK\_FILTER\_TAU} & 0.2~s & slack-weight LPF \eqref{eq:slacksched} \\
+\bottomrule
+\end{tabularx}
+
+\section{CBF and collision avoidance}
+\begin{tabularx}{\linewidth}{@{}lllX@{}}
+\toprule
+Symbol & Name & Value & Meaning \\
+\midrule
+$\alpha_s$ & \texttt{ALPHA\_SOFTMIN} & 60 & SoftMin sharpness \eqref{eq:softmin} \\
+$\gamma_{\text{cbf}}$ & \texttt{GAMMA\_CBF} & 0.70 & barrier gain \eqref{eq:cbf} \\
+$d_0$ & \texttt{D\_SAFE\_BASE} & 0.015~m & base margin \eqref{eq:dsafe} \\
+$k_v$ & \texttt{K\_V\_SAFE} & 0.1~m$\cdot$s/rad & closing-speed gain \eqref{eq:dsafe}, $\tau_v = k_v/\ell_{\max} \approx$ 14--29~ms \eqref{eq:tauv} \\
+--- & \texttt{DISTANCE\_FILTER\_THRESHOLD} & 0.15~m & pair activation radius \\
+$K$ & \texttt{K\_MAX\_PAIRS} & 60 & closest pairs kept \\
+--- & \texttt{CAPSULE\_RADIUS} & 0.06~m & arm-capsule radius \\
+\bottomrule
+\end{tabularx}
+
+\section{QP cost and joint limits}
+\begin{tabularx}{\linewidth}{@{}lllX@{}}
+\toprule
+Symbol & Name & Value & Meaning \\
+\midrule
+$\lambda$ & \texttt{DAMP} & 12 & joint-velocity damping \eqref{eq:cost} \\
+$w_c$ & \texttt{W\_CENTER} & 0.96 & posture weight \eqref{eq:cost} \\
+$k_g$ & \texttt{K\_GRADIENT} & 0.07 & posture gradient gain \\
+$v_{\max}^{\text{post}}$ & \texttt{V\_MAX\_POSTURE} & 1.0~rad/s & posture reference clamp \\
+--- & \texttt{POSTURE\_GRASP\_SCALE} & 0.05 & posture scale, precision phases \\
+--- & \texttt{POSTURE\_SCALE\_TAU} & 0.2~s & posture-scale ramp \\
+$\rho$ & \texttt{RATE\_WEIGHT} & 50 & rate-damping weight, near convergence \\
+--- & \texttt{RATE\_WEIGHT\_GRASP} & 20 & rate-damping weight, relaxed \\
+--- & \texttt{STALL\_ERR\_POS\_THRESH} & 0.10~m & $\rho$ switching threshold \\
+--- & \texttt{RATE\_DAMPING\_VS\_MEASURED} & true & measured anchor \\
+$k_p$ & \texttt{P\_GAIN\_LIMITS} & 1.8 & joint-limit gain \eqref{eq:jlbrake} \\
+$b_0$ & \texttt{JOINT\_LIMIT\_BUFFER\_BASE} & 0.15~rad & base buffer \eqref{eq:jlbrake} \\
+$k_b$ & \texttt{JOINT\_LIMIT\_K\_V} & 0.1~s & buffer velocity horizon \\
+\bottomrule
+\end{tabularx}
+
+\section{Reference limiter}
+\begin{tabularx}{\linewidth}{@{}lllX@{}}
+\toprule
+Symbol & Name & Value & Meaning \\
+\midrule
+$V_{\max}^{\text{lin}}$ & \texttt{GOV\_V\_MAX\_LIN} & 0.20~m/s & reference linear speed cap \\
+$V_{\max}^{\text{ang}}$ & \texttt{GOV\_V\_MAX\_ANG} & 0.3~rad/s & reference angular speed cap \\
+$E_{\max}^{\text{pos}}$ & \texttt{GOV\_E\_MAX\_POS} & 0.30~m & position-error bound \\
+$E_{\max}^{\text{ori}}$ & \texttt{GOV\_E\_MAX\_ORI} & 1.0~rad & orientation-error bound \\
+$A_{\max}^{\text{lin}}$ & \texttt{GOV\_A\_MAX\_LIN} & 0.75~m/s$^2$ & linear acceleration cap \\
+$A_{\max}^{\text{ang}}$ & \texttt{GOV\_A\_MAX\_ANG} & 3.0~rad/s$^2$ & angular acceleration cap \\
+\bottomrule
+\end{tabularx}
+
+\section{Shared autonomy}
+\begin{tabularx}{\linewidth}{@{}lllX@{}}
+\toprule
+Symbol & Name & Value & Meaning \\
+\midrule
+$W$ & --- & $\mathrm{diag}(10,10,10,2,2,2)$ & twist metric \eqref{eq:policyqp}, \eqref{eq:cost-belief} \\
+$w_{\text{pos}}$ & --- & 0.1 & position-cost weight \eqref{eq:cost-belief} \\
+$K_p$ & --- & 0.5 & policy gain \eqref{eq:vgeo} \\
+$v_{\max},\omega_{\max}$ & --- & 0.1~m/s, 0.3~rad/s & robot-policy saturation \\
+$v_{\max}^{u},\omega_{\max}^{u}$ & --- & 0.04~m/s, 0.10~rad/s & user-policy saturation \\
+$\beta_0$ & --- & 0.04 & belief step \eqref{eq:effgains} \\
+$\alpha_0$ & --- & 0.995 & belief forgetting \eqref{eq:effgains} \\
+$v_{\text{lo}}, v_{\text{hi}}$ & \texttt{BELIEF\_V\_LOW/HIGH} & 0.005 / 0.030~m/s & engagement ramp \eqref{eq:engagement} \\
+$g_{\min}$ & --- & 0.05 & engagement floor \\
+--- & \texttt{BELIEF\_WARMUP\_S} & 2.5~s & post-reset warm-up \\
+$g_{\text{warmup}}^{\min}$ & \texttt{BELIEF\_WARMUP\_FLOOR} & 0.25 & warm-up floor \\
+$B_{\text{obj}}^{\text{ent}}, B_{\text{obj}}^{\text{stay}}$ & \texttt{BELIEF\_ENTER/STAY} & 0.90 / 0.75 & grasp-trigger hysteresis \eqref{eq:objbelief} \\
+$\alpha_{\min},\alpha_{\max}$ & \texttt{ALIGN\_ALPHA\_MIN/MAX} & 0.2 / 0.8 & authority ramp \eqref{eq:alpha} \\
+$v_{\text{still}},\omega_{\text{still}}$ & --- & 0.005~m/s, 0.05~rad/s & stillness gate; also bounds $\mathcal{T}_a$ \eqref{eq:Ta} and $\mathcal{C}_{\mathrm{act}}$ \eqref{eq:mrho} \\
+--- & \texttt{ALIGN\_ALPHA\_LPF\_COEFF} & 0.1 & authority LPF \\
+$\tau_{\text{dir}}$ & \texttt{GOAL\_DIRECTION\_FILTER\_TAU} & 4.0~s & goal free-direction filter \\
+--- & \texttt{SIDE\_STANDOFF\_FROM\_CENTER} & 0.03~m & side-grasp standoff \\
+--- & \texttt{ORIENT\_LOCK\_NEAR/FAR} & 0.12 / 0.30~m & finger-orientation hysteresis \\
+\bottomrule
+\end{tabularx}
+
+\section{Grasp lifecycle}
+\begin{tabularx}{\linewidth}{@{}lllX@{}}
+\toprule
+Symbol & Name & Value & Meaning \\
+\midrule
+--- & \texttt{POS/ANG\_ERR\_ENTER} & 0.040~m / 0.16~rad & \textsc{Pre-Grasp} entry gate \\
+--- & \texttt{POS/ANG\_ERR\_STAY} & 0.072~m / 0.224~rad & \textsc{Pre-Grasp} stay gate \\
+--- & \texttt{ALIGN\_POS/ANG\_TOL} & 0.0209~m / 0.103~rad & \textsc{Align} standoff tolerance \\
+--- & \texttt{ALIGN\_CENTERING\_TOL} & 20.7~mm & \textsc{Align} centring tolerance \\
+--- & \texttt{GRASP\_CBF\_MARGIN} & $-0.08$~m & grasp margin allowance \\
+--- & \texttt{GRASP\_CONTACT\_DEPTH\_TOP/SIDE} & $-0.030$ / $-0.032$~m & closure contact depth \\
+--- & \texttt{GRASP\_INSERTION\_TRAVEL\_TOP/SIDE} & 0.09 / 0.068~m & insertion travel \\
+--- & \texttt{ALIGN/GRASP\_APPROACH\_TIMEOUT\_S} & 12 / 15~s & phase timeouts \\
+--- & \texttt{RELEASE\_RETREAT\_DISTANCE/VELOCITY} & 0.14~m, 0.10~m/s & release retreat (current revision) \\
+--- & \texttt{RELEASE\_RETREAT\_MAX\_S} & 3.5~s & release retreat cap \\
+--- & \texttt{ABORT\_RETREAT\_DISTANCE/VELOCITY} & 0.10~m, 0.05~m/s & abort retreat (current revision) \\
+--- & \texttt{ABORT\_RETREAT\_MAX\_S} & 6.0~s & abort retreat cap \\
+--- & \texttt{ATTACH\_RAMP\_S} & 3.0~s & attach/detach pair-set ramp duration \\
+--- & \texttt{ATTACH\_RAMP\_SHIFT\_MAX} & 0.30~m & initial distance shift of a freshly attached or detached object \\
+--- & \texttt{RECOVER\_RAMP\_S} & 1.5~s & post-abort margin ramp duration \\
+--- & \texttt{RECOVER\_CONFIRM\_S} & 0.5~s & clearance debounce before the ramp \\
+--- & \texttt{RECOVER\_SAFETY\_BUFFER} & 0.02~m & live-contact clamp during recovery \\
+\bottomrule
+\end{tabularx}
+
+\section{Head perception and world convergence}
+\begin{tabularx}{\linewidth}{@{}lllX@{}}
+\toprule
+Symbol & Name & Value & Meaning \\
+\midrule
+--- & \texttt{WORLD\_CONF\_MIN} & 0.85 & confidence floor \\
+$c_{\min}$ & \texttt{WORLD\_MIN\_ARC\_COVERAGE} & 0.55 & arc-coverage floor \\
+$\varepsilon_{\text{pos}}$ & \texttt{WORLD\_CONVERGE\_POS\_AMP} & 1~mm & centre band \eqref{eq:amplock} \\
+$\varepsilon_{\text{dim}}$ & \texttt{WORLD\_CONVERGE\_DIM\_AMP} & 1.5~mm & radius/height band \eqref{eq:amplock} \\
+$T_w$ & \texttt{WORLD\_CONVERGE\_WINDOW\_S} & 1.0~s & amplitude-lock window \\
+--- & \texttt{WORLD\_EXPECTED\_CYLINDERS} & 2 & expected objects \\
+--- & \texttt{INTEGRATE\_VEL\_THRESH} & 0.04~rad/s & head-settled gate \\
+--- & \texttt{ACTIVE\_VISION\_TIME\_BUDGET\_S} & 45~s & active-vision time budget \\
+--- & \texttt{ACTIVE\_VISION\_PLATEAU\_EPS} & 0.01 & coverage plateau threshold \\
+--- & \texttt{ACTIVE\_VISION\_REFINE\_OFFSET} & 0.06~m & refine fixation offset \\
+--- & \texttt{CYL\_RADIUS\_INFLATION} & 0~m & optional radius inflation, unused in all reported experiments \\
+\bottomrule
+\end{tabularx}
+
+\section{Head active-arm tracking}
+\begin{tabularx}{\linewidth}{@{}lllX@{}}
+\toprule
+Symbol & Name & Value & Meaning \\
+\midrule
+$\lambda_v$ & \texttt{LAMBDA\_VISUAL} & 2.5 & visual-servo gain \eqref{eq:headvel} \\
+$\qdot_{\max}$ & \texttt{MAX\_VELOCITY} & 0.20~rad/s & head joint velocity cap \eqref{eq:headvel} \\
+$Z^{\star}$ & \texttt{TARGET\_DISTANCE} & 0.7~m & camera stand-off \eqref{eq:headtask} \\
+$\gamma_{\text{head}}$ & \texttt{GAMMA\_CBF\_HEAD} & 0.35 & head barrier gain \eqref{eq:headcbf} \\
+$d_{\text{extra}}$ & \texttt{D\_SAFE\_HEAD\_EXTRA} & 0.03~m & head extra clearance \eqref{eq:headcbf} \\
+$\gamma_{\text{fov}}$ & \texttt{GAMMA\_FOV} & 5.0 & FOV barrier gain \eqref{eq:headfov} \\
+$m_{\text{fov}}$ & \texttt{FOV\_MARGIN} & 50~px & FOV barrier margin \eqref{eq:headfov} \\
+$W_s$ & \texttt{W\_SLACK\_PIXELS/DEPTH} & $1.0$, $10^{4}$ & IBVS slack weights \eqref{eq:headqp} \\
+$W_s$ (PBVS) & \texttt{W\_SLACK\_PBVS} & $10^{4}$ & PBVS slack weight \eqref{eq:headqp} \\
+$\lambda_{h,i}$ & \texttt{JOINT\_WEIGHTS} & 5.0 & joint regularisation \eqref{eq:headqp} \\
+$k_g^{\text{head}}$ & \texttt{K\_POSTURE\_GRADIENT} & 0.05 & head posture gain \\
+--- & \texttt{V\_MAX\_POSTURE} & 0.15~rad/s & head posture clamp \\
+--- & \texttt{K\_HOME} & 1.5~s$^{-1}$ & homing servo gain \\
+--- & \texttt{HOME\_TOL} & 0.12~rad & homing tolerance \\
+--- & \texttt{HOME\_TIMEOUT\_S} & 5.0~s & homing timeout \\
+--- & \texttt{HOME\_Y\_BIAS} & 0.20~m & home lateral bias \\
+--- & \texttt{LEAN\_FRACTION} & 0.6 & chain-lean fraction \\
+--- & \texttt{K\_LEAN} & 1.5~s$^{-1}$ & chain-lean gain \\
+$w_{\text{roll}}$ & \texttt{W\_ROLL\_ALIGN} & 50.0 & roll-preference weight \eqref{eq:headqp} \\
+$w_{\text{app}}$ & \texttt{W\_APPROACH\_ALIGN} & 50.0 & approach-preference weight \eqref{eq:headqp} \\
+--- & \texttt{APPROACH\_GATE\_ANGLE\_DEG} & $40^{\circ}$ & approach-alignment gate \\
+--- & \texttt{TOP\_VIEW\_BIAS} & 0.3 & top-view bias \\
+--- & \texttt{K\_ROLL\_ALIGN} & 1.0~s$^{-1}$ & roll-alignment gain \\
+--- & \texttt{ROLL\_GATE\_ANGLE\_DEG} & $30^{\circ}$ & roll-alignment gate \\
+$f_{\text{head}}$ & \texttt{CONTROL\_HZ} & 50~Hz & head loop rate \\
+\bottomrule
+\end{tabularx}
+
+\section{Teleoperation: device and control modes}
+\begin{tabularx}{\linewidth}{@{}l>{\raggedright\arraybackslash}p{4.1cm}lX@{}}
+\toprule
+Symbol & Name & Value & Meaning \\
+\midrule
+$f_{\text{dev}}$ & \texttt{VIRTUOSE\_FREQUENCY} & 150~Hz & device loop rate \\
+$T_{\text{dp}}$ & \texttt{DOUBLE\_CLICK\_WINDOW} & 0.5~s & double-press window \\
+--- & \texttt{K\_trans}, \texttt{K\_rot} & 1.0 & clutch motion scale \\
+$\varepsilon_{\text{lin}}$ & \texttt{JOYSTICK\_\allowbreak DEADBAND\_\allowbreak LIN} & 0.03456~m & linear deadband \eqref{eq:db} \\
+$\varepsilon_{\text{ang}}$ & \texttt{JOYSTICK\_\allowbreak DEADBAND\_\allowbreak ANG} & 0.16330~rad & angular deadband \eqref{eq:db} \\
+$K_t$ & \texttt{JOYSTICK\_K\_TRANS} & 1.6~s$^{-1}$ & linear twist gain \eqref{eq:jtwist} \\
+$K_r$ & \texttt{JOYSTICK\_K\_ROT} & 1.65~s$^{-1}$ & angular twist gain \eqref{eq:jtwist} \\
+$c_v, c_\omega$ & \texttt{JOYSTICK\_\allowbreak DAMP\_\allowbreak LIN/ANG} & 0.225 / 0.075 & twist damping \eqref{eq:jtwist} \\
+$V_{\max}, \Omega_{\max}$ & \texttt{JOYSTICK\_\allowbreak V\_\allowbreak MAX\_\allowbreak LIN/ANG} & 0.10~m/s, 0.50~rad/s & twist clamps \eqref{eq:jtwist} \\
+$s_r$ & \texttt{JOYSTICK\_\allowbreak ROT\_\allowbreak HOME\_\allowbreak SCALE} & 1.7 & home compression \eqref{eq:homerot} \\
+$L_{\text{lin}}, L_{\text{ang}}$ & \texttt{MAX\_\allowbreak REF\_\allowbreak LEAD\_\allowbreak LIN/ANG} & 0.10~m, 0.35~rad & reference lead caps \eqref{eq:latchlead} \\
+$p_{\text{home}}$ & \texttt{JOYSTICK\_\allowbreak NEUTRAL\_\allowbreak POSITION\_\allowbreak M} & $[0.262, 0.010, -0.073]$~m & home position \eqref{eq:fhome} \\
+$R_0$ & \texttt{JOYSTICK\_\allowbreak NEUTRAL\_\allowbreak ORIENTATION\_\allowbreak XYZW} & $[-0.015, 0.817, 0.061, 0.573]$ & neutral orientation \eqref{eq:homerot} \\
+\bottomrule
+\end{tabularx}
+
+\section{Haption Desktop 6D Compact envelope}
+\begin{tabularx}{\linewidth}{@{}lllX@{}}
+\toprule
+Symbol & Name & Value & Meaning \\
+\midrule
+J1 & \texttt{joint\_min/max} & $[-0.785,\ 0.784]$~rad & device joint travel, measured \\
+J2 & \texttt{joint\_min/max} & $[-1.571,\ -0.002]$~rad & \\
+J3 & \texttt{joint\_min/max} & $[0.793,\ 2.496]$~rad & \\
+J4 & \texttt{joint\_min/max} & $[-2.393,\ 2.354]$~rad & \\
+J5 & \texttt{joint\_min/max} & $[-1.023,\ 0.880]$~rad & \\
+J6 & \texttt{joint\_min/max} & $[-2.229,\ 2.213]$~rad & \\
+$x$ & --- & $[0.14,\ 0.36]$~m & Cartesian workspace, device frame \\
+$y$ & --- & $[-0.24,\ 0.22]$~m & \\
+$z$ & --- & $[-0.18,\ 0.18]$~m & \\
+\bottomrule
+\end{tabularx}
+
+\section{Haptic force rendering}
+\begin{tabularx}{\linewidth}{@{}lllX@{}}
+\toprule
+Symbol & Name & Value & Meaning \\
+\midrule
+$K_p^{s}, K_R^{s}$ & \texttt{Kp\_sync}, \texttt{Kp\_sync\_ang} & 15~N/m, 0.1~Nm/rad & clutch sync tether \eqref{eq:fsync} \\
+$K_a$ & \texttt{K\_align} & 0.3~Nm/rad & alignment stiffness \eqref{eq:aligntorque} \\
+$M_a$ & \texttt{MAX\_ALIGN\_TORQUE} & 0.35~Nm & alignment torque bound \eqref{eq:aligntorque} \\
+--- & \texttt{CLUTCH\_ALIGN\_FADE\_MARGIN} & 0.35~rad & alignment fade margin at joint limits \\
+$K_P$ & \texttt{JOYSTICK\_SPRING\_KP\_LIN} & 30~N/m & centring spring, linear \eqref{eq:fhome} \\
+$K_R$ & \texttt{JOYSTICK\_SPRING\_KP\_ANG} & 0.75~Nm/rad & centring spring, angular \eqref{eq:fhome} \\
+$K_d^{\text{lin}}, K_d^{\text{ang}}$ & \texttt{damping\_lin/ang} & 0.35~Ns/m, 0.025~Nms/rad & driver-side damper \\
+--- & \texttt{slew\_lin/ang} & 10~N/s, 6~Nm/s & commanded-wrench slew bounds \\
+$F_{\text{cap}}, \tau_{\text{cap}}$ & \texttt{MAX\_TOTAL\_FORCE/TORQUE} & 5~N, 0.5~Nm & authority cap \\
+--- & \texttt{MAX\_FORCE/TORQUE} & 5~N, 0.5~Nm & device clip \\
+--- & \texttt{LIMIT\_OUTER} & 0.10~rad & joint-limit cue margin \\
+--- & \texttt{LIMIT/VIB/GRASP\_VIB\_AMP} & 0.009~Nm & vibrotactile cue amplitude \\
+--- & \texttt{K\_home\_lin/ang} & 20~N/m, 0.5~Nm/rad & parking-spring stiffness \\
+--- & \texttt{MAX\_HOMING\_FORCE/TORQUE} & 2~N, 0.15~Nm & parking-spring saturation \\
+--- & \texttt{HOMING\_FADE\_S} & 1.0~s & parking fade-in \\
+--- & \texttt{HOMING\_TOL\_LIN/ANG} & 0.02~m, 0.10~rad & parking settle tolerance \\
+--- & \texttt{HOMING\_SETTLE\_TICKS} & 30 & parking settle window \\
+--- & \texttt{HOMING\_TIMEOUT\_S} & 5.0~s & parking timeout \\
+\bottomrule
+\end{tabularx}
+
+\section{Guidance force}
+\begin{tabularx}{\linewidth}{@{}lllX@{}}
+\toprule
+Symbol & Name & Value & Meaning \\
+\midrule
+$c_{\text{lo}}, c_{\text{hi}}$ & \texttt{GUIDE\_CONF\_LO/HI} & 0.30 / 0.90 & confidence gate \eqref{eq:guidegate} \\
+$d_{\text{near}}, d_{\text{far}}$ & \texttt{GUIDE\_PROX\_NEAR/FAR} & 0.10 / 0.60~m & proximity gate \eqref{eq:guidegate} \\
+$M_F, M_\tau$ & \texttt{MAX\_GUIDE\_FORCE/TORQUE} & $\approx$3.28~N, $\approx$0.27~Nm & guidance saturation, clutch \eqref{eq:fguide} \\
+$D_F, D_\tau$ & \texttt{D\_guide\_lin/ang} & $\approx$26.2, $\approx$1.47 & guidance shaping, clutch \eqref{eq:fguide} \\
+$\kappa$ & \texttt{GUIDE\_K} & 0.55 & deadzone-exit fraction \eqref{eq:kappacal} \\
+$M_F, M_\tau$ & \texttt{MAX\_GUIDE\_FORCE/TORQUE} & $\approx$0.82~N, $\approx$0.081~Nm & guidance saturation, joystick \eqref{eq:kappacal} \\
+$D_F, D_\tau$ & \texttt{D\_guide\_lin/ang} & 288, 18 & guidance shaping, joystick \eqref{eq:fguide} \\
+--- & \texttt{alpha\_guide} & 0.15 & guidance LPF \\
+\bottomrule
+\end{tabularx}
+
+\section{Offline analysis of the study}
+The thresholds that enter the measures of Section~\ref{sec:results} live in the analysis module \texttt{study\_\allowbreak config.py}; the stillness gate is the controller's own (above).
+
+\noindent\begin{tabularx}{\linewidth}{@{}lllX@{}}
+\toprule
+Symbol & Name & Value & Meaning \\
+\midrule
+$v_{\text{still}}$ & \texttt{STILL\_LIN\_MPS} & 0.005~m/s & bounds the active-driving set $\mathcal{T}_a$ \eqref{eq:Ta} \\
+$\omega_{\text{still}}$ & \texttt{STILL\_ANG\_RADPS} & 0.05~rad/s & admits the angular channel to $\mathcal{C}_{\mathrm{act}}$ \eqref{eq:mrho} \\
+$\omega_c^{\max}$ & \texttt{SPARC\_FC\_HZ} & $20\pi$~rad/s & upper bound on the spectral arc length cutoff \eqref{eq:mPhi} \\
+$\bar{V}$ & \texttt{SPARC\_AMP\_TH} & 0.05 & amplitude threshold that sets $\omega_c$ \eqref{eq:mPhi} \\
+$\tau_{\min}$ & \texttt{SPARC\_MIN\_SEGMENT\_S} & 0.5~s & shortest driving segment scored \eqref{eq:mPhi} \\
+$\epsilon$ & \texttt{CBF\_ACTIVE\_LAMBDA} & $10^{-3}$ & dual feasibility tolerance \eqref{eq:mTlam} \\
+\bottomrule
+\end{tabularx}
+
+\endgroup
+
+Robot-side parameters live in the safety/shared-autonomy package's centralised configuration; device-side parameters live in the companion teleoperation package's, with the cross-package condition selector (Section~\ref{sec:study}) defined once on the robot side and imported by every operator-side node --- the same centralisation rule throughout.
+
+%───────────────────────────────────────────────────────────────────────────────

@@ -1,0 +1,137 @@
+% UNINA MSc thesis template (extbook, 14pt, oneside) carrying this thesis's own
+% figure, algorithm and notation setup.
+\documentclass[a4paper, 14pt, oneside]{extbook}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{lmodern}
+\usepackage{courier}
+
+\usepackage{geometry}
+\newgeometry{
+left=   1.5 in,
+bottom= 1.5 in,
+right=  1 in,
+top=    1 in
+}
+
+% Running header: faculty logo left, abbreviated thesis title right.
+\newcommand{\shorttitle}{Adaptive Shared Autonomy for Bimanual Teleoperation}
+\usepackage{fancyhdr}
+\setlength\headheight{53pt}
+\pagestyle{fancy}
+\fancyhf{}
+\lhead{\includegraphics[scale=0.3]{img/logo/hlogo.png}}
+\rhead{\footnotesize\shorttitle}
+\cfoot{\thepage}
+\renewcommand{\headrulewidth}{0.4pt}
+
+\usepackage{setspace}
+\singlespacing
+
+% Grafica
+\usepackage{graphicx}
+\graphicspath{{figures/}{img/}}
+\usepackage{microtype}
+
+% Package usati per il frontespizio
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,fit,backgrounds,shapes.geometric,calc}
+
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{subcaption}
+\captionsetup[subfigure]{font=scriptsize,labelfont=bf,skip=1.5pt}
+\usepackage[section]{placeins}
+\usepackage{tabularx}
+\newcolumntype{L}{>{\raggedright\arraybackslash}X}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage[ruled,vlined]{algorithm2e}
+\SetKwComment{Comment}{$\triangleright$\ }{}
+\usepackage{cite}
+
+\titlespacing*{\section}{0pt}{1.2ex plus 0.3ex minus 0.2ex}{0.6ex plus 0.1ex}
+\titlespacing*{\subsection}{0pt}{0.8ex plus 0.2ex minus 0.1ex}{0.4ex plus 0.1ex}
+
+\setlength{\parskip}{0pt}
+
+% Long inline formulas give TeX few break points in a 14pt narrow measure;
+% this lets it stretch a line rather than bleed into the margin.
+\setlength{\emergencystretch}{3em}
+
+\newcommand{\qdot}{\dot{q}}
+\newcommand{\todocite}[1]{\textcolor{red}{[REF NEEDED: #1]}}
+
+% Same R/L and per-joint colours as the MATLAB hardware-trial panels (fig_thesis_hw.m).
+\definecolor{hwred}{rgb}{0.753,0.224,0.169}
+\definecolor{hwblue}{rgb}{0.133,0.333,0.643}
+\definecolor{hwj1}{rgb}{0.000,0.447,0.698}
+\definecolor{hwj2}{rgb}{0.835,0.369,0.000}
+\definecolor{hwj3}{rgb}{0.000,0.620,0.451}
+\definecolor{hwj4}{rgb}{0.800,0.475,0.655}
+\definecolor{hwj5}{rgb}{0.902,0.624,0.000}
+\definecolor{hwj6}{rgb}{0.337,0.706,0.914}
+\definecolor{hwj7}{rgb}{0.000,0.000,0.000}
+\definecolor{hwshade}{rgb}{0.995,0.968,0.829}
+% One shared R/L legend, set once ahead of a multi-panel hardware figure
+% instead of repeating it in every panel.
+\newcommand{\hwrllegend}{%
+  \centering
+  {\footnotesize\textcolor{hwred}{\rule[0.25em]{0.9em}{1.1pt}}~Right \quad \textcolor{hwblue}{\rule[0.25em]{0.9em}{1.1pt}}~Left}\par\vspace{0.3em}%
+}
+% One shared J1..J7 legend for a joint-space figure.
+\newcommand{\hwjointlegend}{%
+  \centering
+  {\footnotesize
+   \textcolor{hwj1}{\rule[0.25em]{0.9em}{1.1pt}}~J1 \quad
+   \textcolor{hwj2}{\rule[0.25em]{0.9em}{1.1pt}}~J2 \quad
+   \textcolor{hwj3}{\rule[0.25em]{0.9em}{1.1pt}}~J3 \quad
+   \textcolor{hwj4}{\rule[0.25em]{0.9em}{1.1pt}}~J4 \quad
+   \textcolor{hwj5}{\rule[0.25em]{0.9em}{1.1pt}}~J5 \quad
+   \textcolor{hwj6}{\rule[0.25em]{0.9em}{1.1pt}}~J6 \quad
+   \textcolor{hwj7}{\rule[0.25em]{0.9em}{1.1pt}}~J7}\par\vspace{0.3em}%
+}
+\newcommand{\hwxyzlegend}{%
+  \centering
+  {\footnotesize
+   \textcolor{hwj1}{\rule[0.25em]{0.9em}{1.1pt}}~$x$ \quad
+   \textcolor{hwj2}{\rule[0.25em]{0.9em}{1.1pt}}~$y$ \quad
+   \textcolor{hwj3}{\rule[0.25em]{0.9em}{1.1pt}}~$z$ \qquad
+   \textcolor{hwshade}{\rule[0.05em]{1.4em}{0.9em}}~operator in control}\par\vspace{0.3em}%
+}
+
+\usepackage[bookmarks]{hyperref}
+\hypersetup{colorlinks=true,linkcolor=black,citecolor=black,urlcolor=blue,
+  pdftitle={Adaptive Human-Robot Shared Autonomy Based on Safety-Aware Control: A Validation Case in Bimanual Manipulation With the TRIAGo Robotic Platform},
+  pdfauthor={Roberto Rocco}}
+
+\begin{document}
+
+\input{0_frontespizio.tex}
+\frontmatter
+
+\input{abstract.tex}
+
+{\setstretch{1.5}
+\tableofcontents
+}
+\listoffigures
+\listoftables
+
+\mainmatter
+
+\include{chapters/1_introduction}
+\include{chapters/2_state_of_the_art}
+\include{chapters/3_methodology}
+\include{chapters/4_experiments_and_results}
+\include{chapters/5_discussion}
+\include{chapters/6_conclusions}
+
+\appendix
+\include{chapters/appendix_a_configuration}
+
+\bibliographystyle{IEEEtran}
+\bibliography{references}
+
+\end{document}

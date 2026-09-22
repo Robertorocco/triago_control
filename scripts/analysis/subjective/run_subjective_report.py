@@ -20,7 +20,8 @@ import subjdata  # noqa: E402
 # .../scripts/analysis/subjective -> repo root -> the figures the thesis includes
 _REPO = os.path.dirname(os.path.dirname(os.path.dirname(
     os.path.dirname(os.path.abspath(__file__)))))
-DEFAULT_THESIS_DIR = os.path.join(_REPO, 'thesis', 'figures', 'results')
+DEFAULT_THESIS_DIR = os.path.join(
+    _REPO, 'thesis', 'roberto_rocco_master_thesis', 'figures', 'results')
 
 
 def main():

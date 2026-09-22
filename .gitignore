@@ -2,7 +2,7 @@ __pycache__/
 *.pyc
 .claude/
 
-# LaTeX build byproducts (technical_report.tex source is tracked, these aren't).
+# LaTeX build byproducts (the .tex sources are tracked, these aren't).
 *.aux
 *.log
 *.out
@@ -13,7 +13,9 @@ __pycache__/
 *.toc
 *.fls
 *.fdb_latexmk
-technical_report.pdf
+*.synctex.gz
+thesis/roberto_rocco_master_thesis/main.pdf
+thesis/roberto_rocco_master_thesis.pdf
 
 # User-study data (rosbags, per-trial timeseries, figures) must stay local,
 # never committed. See scripts/analysis/study_config.py (DATA_ROOT). Guard in

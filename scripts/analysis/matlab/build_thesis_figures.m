@@ -1,7 +1,7 @@
 function build_thesis_figures(results_dir, opts)
 %BUILD_THESIS_FIGURES Draw every objective results figure the thesis includes.
 %   BUILD_THESIS_FIGURES() runs against the most recent results folder and writes
-%   thesis/figures/results/*.pdf -- the panels of Figures "resmain" and "resextra"
+%   thesis/roberto_rocco_master_thesis/figures/results/*.pdf -- the panels of Figures "resmain" and "resextra"
 %   plus the practice-and-order panel. The questionnaire panels of the same folder
 %   come from scripts/analysis/subjective/run_subjective_report.py instead.
 %   BUILD_THESIS_FIGURES(RESULTS_DIR) uses a specific results folder.
@@ -32,7 +32,7 @@ end
 
 if strlength(opts.out_dir) == 0
     repo = fileparts(fileparts(fileparts(here)));   % .../scripts/analysis/matlab -> repo
-    out_dir = fullfile(repo, 'thesis', 'figures', 'results');
+    out_dir = fullfile(repo, 'thesis', 'roberto_rocco_master_thesis', 'figures', 'results');
 else
     out_dir = char(opts.out_dir);
 end
