@@ -30,8 +30,12 @@ $W_{\text{task}}$ & \texttt{TASK\_WEIGHTS\_6D} & $\mathrm{diag}(10,10,10,0.5,0.5
 $W_{\text{task}}^{\text{grasp}}$ & \texttt{TASK\_WEIGHTS\_6D\_GRASP} & $\mathrm{diag}(10,10,10,2,2,2)$ & task weights, precision \\
 $w_{\delta}^{\text{base}}, w_{\delta}^{\max}$ & \texttt{BASE/MAX\_WEIGHT\_SLACK} & 150.75 / 250 & slack-weight range \eqref{eq:slacksched} \\
 $\beta$ & \texttt{BETA} & 0.2 & schedule sensitivity \eqref{eq:slacksched} \\
-$\tau_{\lambda}$ & \texttt{SLACK\_FILTER\_TAU} & 0.15~s & shadow-price LPF \\
+$\tau_{\lambda}$ & \texttt{SLACK\_FILTER\_TAU} & 0.15~s & shadow-price LPF \eqref{eq:lpf} \\
 $\tau_{w}$ & \texttt{WEIGHT\_SLACK\_FILTER\_TAU} & 0.2~s & slack-weight LPF \eqref{eq:slacksched} \\
+$\gamma_{\min}$ & \texttt{GAMMA\_MIN} & 0.7 & scheduled CLF rate floor \\
+$\nu_{\min}$ & \texttt{sigma\_min} & 0.20 & time-scale floor \eqref{eq:timescale} \\
+$k_{\nu}$ & \texttt{k\_lambda} & 3.0 & time-scale sensitivity \eqref{eq:timescale} \\
+$\tau_{\nu}$ & \texttt{filter\_alpha} & 0.19~s & time-scale LPF (0.95 at 100~Hz) \eqref{eq:timescale} \\
 \bottomrule
 \end{tabularx}
 
@@ -105,8 +109,17 @@ $B_{\text{obj}}^{\text{ent}}, B_{\text{obj}}^{\text{stay}}$ & \texttt{BELIEF\_EN
 $\alpha_{\min},\alpha_{\max}$ & \texttt{ALIGN\_ALPHA\_MIN/MAX} & 0.2 / 0.8 & authority ramp \eqref{eq:alpha} \\
 $v_{\text{still}},\omega_{\text{still}}$ & --- & 0.005~m/s, 0.05~rad/s & stillness gate; also bounds $\mathcal{T}_a$ \eqref{eq:Ta} and $\mathcal{C}_{\mathrm{act}}$ \eqref{eq:mrho} \\
 --- & \texttt{ALIGN\_ALPHA\_LPF\_COEFF} & 0.1 & authority LPF \\
-$\tau_{\text{dir}}$ & \texttt{GOAL\_DIRECTION\_FILTER\_TAU} & 4.0~s & goal free-direction filter \\
---- & \texttt{SIDE\_STANDOFF\_FROM\_CENTER} & 0.03~m & side-grasp standoff \\
+$\tau_{\text{dir}}$ & \texttt{GOAL\_DIRECTION\_FILTER\_TAU} & 4.0~s & goal free-direction filter \eqref{eq:dirfilter} \\
+$r_s$ & \texttt{SIDE\_STANDOFF\_FROM\_CENTER} & 0.03~m & side-grasp standoff \eqref{eq:sidegoal} \\
+$d_{\text{app}}$ & \texttt{approach\_offset} & 0.05~m & top/placement standoff \eqref{eq:topgoal}, \eqref{eq:placegoal} \\
+$m_{\text{cyl}}$ & --- & 0.02~m & side-grasp height clamp \eqref{eq:sidegoal} \\
+$\epsilon_{\text{top}}$ & --- & 0.05 & top-roll degeneracy \eqref{eq:toproll} \\
+$\rho_{\text{lo}}, \rho_{\text{hi}}$ & --- & 0.008 / 0.030~m & position-azimuth confidence \eqref{eq:sideaz} \\
+$\eta_{\text{lo}}, \eta_{\text{hi}}$ & --- & 0.15 / 0.45 & heading-azimuth confidence \eqref{eq:sideaz} \\
+$\epsilon_{\text{mix}}$ & --- & 0.15 & azimuth hold threshold \\
+$\chi_0, \chi_{\text{lock}}$ & --- & 0.05 / 10~rad & finger-choice hysteresis \eqref{eq:sidehyst} \\
+$s_{\text{lo}}, s_{\text{hi}}$ & --- & 0.12 / 0.30~m & hysteresis lock distances \eqref{eq:sidehyst} \\
+$m_P$ & \texttt{PLATFORM\_PLACE\_MARGIN} & 0.03~m & placement rim margin \eqref{eq:placegoal} \\
 --- & \texttt{ORIENT\_LOCK\_NEAR/FAR} & 0.12 / 0.30~m & finger-orientation hysteresis \\
 \bottomrule
 \end{tabularx}
@@ -151,7 +164,7 @@ $T_w$ & \texttt{WORLD\_CONVERGE\_WINDOW\_S} & 1.0~s & amplitude-lock window \\
 --- & \texttt{ACTIVE\_VISION\_TIME\_BUDGET\_S} & 45~s & active-vision time budget \\
 --- & \texttt{ACTIVE\_VISION\_PLATEAU\_EPS} & 0.01 & coverage plateau threshold \\
 --- & \texttt{ACTIVE\_VISION\_REFINE\_OFFSET} & 0.06~m & refine fixation offset \\
---- & \texttt{CYL\_RADIUS\_INFLATION} & 0~m & optional radius inflation, unused in all reported experiments \\
+--- & \texttt{CYL\_RADIUS\_INFLATION} & 0~m & optional radius inflation, unused in all reported trials \\
 \bottomrule
 \end{tabularx}
 

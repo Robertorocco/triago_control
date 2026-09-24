@@ -15,14 +15,14 @@ right=  1 in,
 top=    1 in
 }
 
-% Running header: faculty logo left, abbreviated thesis title right.
-\newcommand{\shorttitle}{Adaptive Shared Autonomy for Bimanual Teleoperation}
+% Running header: current chapter left, current section right.
 \usepackage{fancyhdr}
-\setlength\headheight{53pt}
+\setlength\headheight{14pt}
 \pagestyle{fancy}
 \fancyhf{}
-\lhead{\includegraphics[scale=0.3]{img/logo/hlogo.png}}
-\rhead{\footnotesize\shorttitle}
+\lhead{\footnotesize\nouppercase{\leftmark}}
+\rhead{}
+\renewcommand{\sectionmark}[1]{\markright{\thesection\quad #1}}
 \cfoot{\thepage}
 \renewcommand{\headrulewidth}{0.4pt}
 
@@ -118,6 +118,7 @@ top=    1 in
 \listoftables
 
 \mainmatter
+\rhead{\footnotesize\nouppercase{\rightmark}}
 
 \include{chapters/1_introduction}
 \include{chapters/2_state_of_the_art}
@@ -130,6 +131,7 @@ top=    1 in
 \include{chapters/appendix_a_configuration}
 
 \bibliographystyle{IEEEtran}
+\rhead{}
 \bibliography{references}
 
 \end{document}
