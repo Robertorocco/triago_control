@@ -180,16 +180,16 @@ ros2 run triago_control study_recorder.py
 # 6. Haption device server (150 Hz)
 ros2 run haption_teleoperation virtuose_server_node
 
-# 7. Clutch-indexing teleop. With ASSIST_BLENDING on it publishes the operator twist to
+# 7. Teleop for the active mode (JOYSTICK here; teleop_triago_clutch.py for CLUTCH). With ASSIST_BLENDING on it publishes the operator twist to
 #    /arm_*/user_cartesian_reference, and main_shared_autonomy.py becomes the sole
 #    writer of /arm_*/cartesian_reference; with blending off, this node owns that topic.
-ros2 run haption_teleoperation teleop_triago_clutch.py
+ros2 run haption_teleoperation teleop_triago_joystick.py
 
 # 8. Force feedback for the active cell -- must match config.py's condition triple
-ros2 run haption_teleoperation haptic_force_manager_CFB.py
+ros2 run haption_teleoperation haptic_force_manager_JFB.py
 ```
 
-> **The active cell is set in `config.py` (§1b), not here.** It is currently `CONTROL_MODE=CLUTCH`, `ASSIST_FEEDBACK=True`, `ASSIST_BLENDING=True` — cell **CFB** (full guidance), hence `haptic_force_manager_CFB.py` above. Change the flags and step 8 must change with them: every teleop and force-manager node calls `cfg.validate_condition(...)` at startup and hard-errors on a mismatch, so a mis-launched pair fails loudly rather than silently recording the wrong condition. The force manager consumes `/shared_autonomy/{goal_names, goal_probabilities, user_policy, active_goal_pose, grasp_active}` published by `main_shared_autonomy.py` to compute the guidance wrench sent to the Haption device.
+> **The active cell is set in `config.py` (§1b), not here.** It is currently `CONTROL_MODE=JOYSTICK`, `ASSIST_FEEDBACK=True`, `ASSIST_BLENDING=True` — cell **JFB** (full guidance), hence `haptic_force_manager_JFB.py` above. Change the flags and step 8 must change with them: every teleop and force-manager node calls `cfg.validate_condition(...)` at startup and hard-errors on a mismatch, so a mis-launched pair fails loudly rather than silently recording the wrong condition. The force manager consumes `/shared_autonomy/{goal_names, goal_probabilities, user_policy, active_goal_pose, grasp_active}` published by `main_shared_autonomy.py` to compute the guidance wrench sent to the Haption device.
 >
 > **Force-manager naming convention.** Every force manager is `haptic_force_manager_<CELL>`, where `<CELL>` encodes the active study condition as letters: **C** = CLUTCH or **J** = JOYSTICK (the control mode, always first), then **F** if `ASSIST_FEEDBACK` is on, then **B** if `ASSIST_BLENDING` is on. The study itself is a 2×3 design (2 control modes × 3 assistance combinations `{F, B, FB}` = 6 cells); the no-assist baseline (`C`/`J`, just the mode letter) still works end-to-end in code but is excluded from the study:
 >
