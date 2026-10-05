@@ -9,8 +9,24 @@ The system comprises three independent control subsystems running concurrently:
 
 ## Branches
 
-- **`real-hw`** — frozen checkpoint of every gain/parameter as tuned on the physical robot. Full commit history back to project start is preserved here; never developed on directly. Diff against it to see exactly what a sim retune has changed: `git diff real-hw -- triago_control/qp_controller/config.py`.
-- **`main`** / **`feature/sim-user-study`** — active development, simulation-only, prioritizing safety/robustness over tracking performance. Both point to the same commit as `real-hw`'s tip and diverge from here forward.
+Two official branches, one per platform setup:
+
+- **`feature/sim-user-study`** (mirrored by **`main`**) — the final version of the thesis. It holds the parameters used in the human-subject study, the user-study tooling (`scripts/analysis/`), and the thesis itself (`thesis/`). It targets the Gazebo simulation with the **Haption Desktop 6D Compact**.
+- **`real-hw`** — the code, values, and logic that ran on the **physical TRIAGo** (with the full-size Haption Virtuose 6D). Frozen: only documentation changes. To see what the study retune changed: `git diff real-hw -- triago_control/qp_controller/config.py`.
+
+The matching teleoperation branches of [`haption_teleoperation`](https://github.com/Robertorocco/haption_teleoperation) have the same names; check out the same branch in both repositories.
+
+## Thesis
+
+The MSc thesis lives in `thesis/roberto_rocco_master_thesis/` (LaTeX sources, figures, bibliography). The compiled PDF is [`thesis/roberto_rocco_master_thesis.pdf`](thesis/roberto_rocco_master_thesis.pdf). To rebuild it:
+
+```bash
+cd thesis/roberto_rocco_master_thesis
+latexmk -pdf -interaction=nonstopmode main.tex
+cp main.pdf ../roberto_rocco_master_thesis.pdf
+```
+
+Raw trial data, bags, and videos are not in git.
 
 ## Architecture
 
