@@ -1,0 +1,101 @@
+\documentclass[border=4pt]{standalone}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+\usepackage{amsmath,amssymb,graphicx}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,fit,backgrounds,shapes.geometric,calc}
+\newcommand{\qdot}{\dot{q}}
+\graphicspath{{figures/}{img/}}
+\begin{document}
+\begin{tikzpicture}[
+  font=\footnotesize,
+  >=Latex,
+  blk/.style={draw=black, line width=0.5pt, rounded corners=2pt, align=center,
+              fill=white, inner sep=2pt, minimum height=8mm, minimum width=#1},
+  blk/.default=20mm,
+  hum/.style={draw=black, line width=0.5pt, ellipse, align=center, fill=white, inner sep=2pt},
+  core/.style={->, draw=black, line width=0.5pt},
+  optB/.style={->, draw=orange!85!black, densely dashed, line width=0.7pt},
+  optF/.style={->, draw=orange!85!black, densely dotted, line width=0.8pt},
+  selArr/.style={->, draw=black!60, densely dashed, line width=0.5pt},
+  lab/.style={fill=white, inner sep=1pt},
+  tagl/.style={font=\footnotesize\bfseries, orange!85!black},
+  grp/.style={line width=0.7pt, rounded corners=4pt, inner sep=3.4mm},
+  gtitle/.style={font=\footnotesize\itshape, anchor=south},
+]
+
+% ---------------- operator side ----------------
+\node[hum, minimum width=18mm, minimum height=8mm] (operator) at (0.6,15.0) {Operator};
+\node (device) at (0.6,12.2) {\includegraphics[width=22mm]{desktop-6D-compact-force-feedback-device-white.png}};
+\node[lab, below=0mm of device] {Haptic device};
+\draw[core] (0.95,14.6) -- node[right, lab]{$p_h, R_h$} (0.95,13.25);
+\draw[core] (0.25,13.25) -- node[left, lab]{$w_h$} (0.25,14.6);
+
+\node[blk=23mm] (fr)  at (4.4,13.3) {Force\\rendering};
+\node[blk=23mm] (map) at (4.4,11.5) {Teleoperation\\mapping};
+\begin{pgfonlayer}{background}
+\node[grp, fit=(map)(fr), fill=black!3, draw=black!45] (tgrp) {};
+\end{pgfonlayer}
+\node[gtitle, black!60] at (tgrp.north) {Teleoperation};
+\draw[core] (1.75,11.5) -- node[above, lab, align=center]{$p_h, R_h$\\$v_h,\omega_h$} (map.west);
+\draw[core] (fr.west) -- node[above, lab]{$w_h$} (1.75,13.3);
+
+% ---------------- shared autonomy ----------------
+\node[blk] (intent) at (8.5,13.3) {Intent\\estimation};
+\node[blk] (pol)    at (11.8,13.3) {Goal\\policies};
+\node[blk] (arb)    at (10.15,11.5) {Arbitration};
+\begin{pgfonlayer}{background}
+\node[grp, fit=(intent)(pol)(arb), fill=orange!7, draw=orange!55!black] (sagrp) {};
+\end{pgfonlayer}
+\node[gtitle, orange!55!black] at (sagrp.north) {Shared autonomy};
+
+\draw[core] (pol.west) -- node[above, lab]{$\pi_k^{\text{user}}$} (intent.east);
+\draw[core] (map.east) -- node[below, lab, pos=0.3]{$v_{\text{user}}$} (arb.west);
+\draw[core] (7.95,11.5) -- (7.95,12.9);
+\draw[optB] (9.0,12.9) -- node[left, lab, pos=0.4]{$b_k$} (9.65,11.9);
+\draw[optB] (11.3,12.9) -- node[right, lab, pos=0.4]{$\pi_k$} (10.65,11.9);
+\node[tagl] at (10.15,12.65) {B};
+\draw[optF] (intent.west) -- node[above, lab]{$b_k,\pi_k^{\text{user}}$} node[below=1pt, tagl]{F} (fr.east);
+
+% ---------------- safety controller ----------------
+\node[blk] (gov)   at (14.6,9.0) {Reference\\limiter};
+\node[blk] (qp)    at (14.6,7.3) {\mbox{CLF--CBF QP}};
+\node[blk] (col)   at (14.6,5.6) {Collision\\manager};
+\node[blk] (sched) at (11.0,9.0) {Slack\\schedule};
+\begin{pgfonlayer}{background}
+\node[grp, fit=(gov)(qp)(col)(sched), fill=blue!6, draw=blue!45!black] (sfgrp) {};
+\end{pgfonlayer}
+\node[gtitle, blue!45!black] at (sfgrp.north) {Safety controller};
+
+\draw[core] (arb.east) -- node[above, lab, pos=0.5]{$x_{\text{ref}}, \dot{x}_{\text{ref}}$} (14.6,11.5) -- (gov.north);
+\draw[core] (gov) -- node[right, lab]{$x_g, v_g$} (qp);
+\draw[core] (col) -- node[left, lab]{$J_{\text{soft}}, h_{\text{soft}}, d_{\text{safe}}$} (qp);
+\draw[core] ($(qp.west)+(0,0.2)$) coordinate (qlam) -- node[above, lab, pos=0.4]{$\lambda_{\text{cbf}}, \lambda_{\text{jl}}$} (qlam -| {$(sched.south)+(-0.4,0)$}) -- ($(sched.south)+(-0.4,0)$);
+\draw[core] ($(sched.south east)+(-0.2,0)$) -- node[above right, lab, inner sep=0.5pt, pos=0.55]{$w_{\delta}$} ($(qp.north west)+(0.3,0)$);
+
+% ---------------- robot ----------------
+\node (robot) at (5.2,6.9) {\includegraphics[width=20mm]{triago.png}};
+\node[lab, left=0mm of robot] {TRIAGo};
+\draw[core] ($(qp.west)+(0,-0.2)$) coordinate (qdot) -- node[below, lab, pos=0.9]{$\qdot^{\star}$} (qdot -| 6.2,0);
+\draw[core] (col.west -| 6.2,0) -- node[below, lab, pos=0.25]{$q,\ \qdot^{\text{meas}}$} (col.west);
+
+% ---------------- perception and world ----------------
+\node[blk] (head)  at (5.2,2.6) {Head\\perception};
+\node[blk] (perc)  at (9.0,2.6) {Perceived\\world};
+\node[blk] (decl)  at (12.6,2.6) {Declared\\world};
+\begin{pgfonlayer}{background}
+\node[grp, fit=(head)(perc)(decl), fill=black!4, draw=black!45] (pwgrp) {};
+\end{pgfonlayer}
+\node[gtitle, black!60, anchor=north] at (pwgrp.south) {Perception and world};
+\draw[core] (robot.south) -- node[right, lab]{RGB-D image} (head.north);
+\draw[core] (head.east) -- node[above, lab]{$\hat{\mathcal{O}}$} (perc.west);
+\coordinate (wsel) at (10.8,3.9);
+\draw[selArr] (perc.north) |- (wsel);
+\draw[selArr] (decl.north) |- (wsel);
+\fill[black!60] (wsel) circle (0.6mm);
+\draw[core] (wsel) -- (10.8,4.5) -- (18.1,4.5) -- node[right, lab, pos=0.5]{$\mathcal{G}$} (18.1,14.4) -- (11.8,14.4) -- (pol.north);
+\draw[core] (14.6,4.5) -- node[right, lab]{$\mathcal{O}$} (col.south);
+\draw[core] (col.east) -- (16.4,5.6) -- node[right, lab, pos=0.5]{$J_{\text{safe}}, b_{\text{safe}}$} (16.4,13.3) -- (pol.east);
+
+\end{tikzpicture}
+\end{document}
