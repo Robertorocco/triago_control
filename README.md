@@ -7,6 +7,14 @@ The system comprises three independent control subsystems running concurrently:
 2. **Shared Autonomy** — Bayesian intent prediction + haptic guidance
 3. **Head Visual Servoing** — Independent vision-based head control to keep hands in camera FOV
 
+## Branches
+
+This is the **`real-hw`** branch: the code, values, and logic that ran on the **physical TRIAGo** (with the full-size Haption Virtuose 6D), including the async-CBF real-hardware controller. It is frozen; only documentation changes here.
+
+- **`feature/sim-user-study`** (mirrored by **`main`**) — the final thesis version: study parameters, user-study tooling, and the thesis itself, targeting simulation with the Haption Desktop 6D Compact. To see what the study retune changed: `git diff real-hw feature/sim-user-study -- triago_control/qp_controller/config.py`.
+
+The matching teleoperation branches of [`haption_teleoperation`](https://github.com/Robertorocco/haption_teleoperation) have the same names; check out the same branch in both repositories.
+
 ## Architecture
 
 ```
@@ -85,7 +93,7 @@ qp_head_visual_servo ──→  own Pinocchio instance (FK + Jacobians)
 ## Build
 
 ```bash
-cd ~/ros2-ws
+cd ~/exchange/ros2-ws
 colcon build --packages-select triago_control
 source install/setup.bash
 ```
@@ -96,9 +104,9 @@ Required for pick-and-place in simulation. Creates a fixed joint between gripper
 
 ```bash
 # Install (separate repo, not part of triago_control)
-cd ~/ros2-ws/src
+cd ~/exchange/ros2-ws/src
 git clone https://github.com/IFRA-Cranfield/IFRA_LinkAttacher.git
-cd ~/ros2-ws
+cd ~/exchange/ros2-ws
 colcon build --packages-up-to ros2_linkattacher
 source install/setup.bash
 ```
@@ -110,12 +118,34 @@ Add to your Gazebo world file:
 
 Before launching Gazebo:
 ```bash
-export GAZEBO_PLUGIN_PATH=$GAZEBO_PLUGIN_PATH:~/ros2-ws/install/ros2_linkattacher/lib
+export GAZEBO_PLUGIN_PATH=$GAZEBO_PLUGIN_PATH:~/exchange/ros2-ws/install/ros2_linkattacher/lib
 ```
 
 ## Run
 
-### Full Simulation Launch Sequence (typical session)
+### Real robot (this branch's target)
+
+Run on the robot's computer, workspace sourced, one command per terminal:
+
+```bash
+# 1. QP safety controller with async CBF (launch this file, not main_qp_controller.py).
+#    The perceived variant subclasses it and builds the collision world from the head camera.
+ros2 run triago_control main_qp_controller_perceived.py
+
+# 2. Head camera driver + RANSAC tabletop perception (publishes the perceived-world snapshot);
+#    starts its own RealSense driver, so do not run it together with step 4's camera
+ros2 launch triago_control head_real.launch.py
+
+# 3. Shared autonomy (no Gazebo, so the LinkAttacher grasp is disabled)
+ros2 run triago_control main_shared_autonomy.py --ros-args -p real_hardware:=true
+
+# 4. Head follows the active arm during teleoperation (leaves the camera driver untouched)
+ros2 launch triago_control head_active_arm_tracking_real.launch.py
+```
+
+Teleoperation side: steps 6–8 below, with the force manager matching the condition set in `config.py`. Use `main_qp_controller_real.py` instead of the perceived variant when the collision world is declared in a `config/worlds/*.yaml` rather than perceived. Diagnostics: `loop_timing_monitor.py` (control-loop jitter), `offline_plotter.py` (per-trial figures and bag).
+
+### Simulation launch sequence (reference)
 
 Each command runs in its own terminal (workspace sourced). Robot/control side first, then the teleoperation side.
 
@@ -158,7 +188,7 @@ ros2 run haption_teleoperation haptic_force_manager_CF.py
 
 > The active force-feedback node above is `haptic_force_manager_CF.py`. It consumes `/shared_autonomy/{goal_names, goal_probabilities, user_policy, active_goal_pose, grasp_active}` published by `main_shared_autonomy.py` to compute the guidance wrench sent to the Haption device.
 >
-> **Force-manager naming convention.** Every force manager is `haptic_force_manager_<CELL>`, where `<CELL>` encodes the active study condition as letters: **C** = CLUTCH or **J** = JOYSTICK (the control mode, always first), then **F** if `ASSIST_FEEDBACK` is on, then **B** if `ASSIST_BLENDING` is on. The no-assist baseline is just the mode letter. The full 2x2x2 factorial (8 study cells):
+> **Force-manager naming convention.** Every force manager is `haptic_force_manager_<CELL>`, where `<CELL>` encodes the active study condition as letters: **C** = CLUTCH or **J** = JOYSTICK (the control mode, always first), then **F** if `ASSIST_FEEDBACK` is on, then **B** if `ASSIST_BLENDING` is on. The no-assist baseline is just the mode letter. The full 2x2x2 factorial (8 conditions):
 >
 > | File | CONTROL_MODE | ASSIST_FEEDBACK | ASSIST_BLENDING | Condition |
 > |---|---|---|---|---|
