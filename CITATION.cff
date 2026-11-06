@@ -1,0 +1,26 @@
+cff-version: 1.2.0
+message: "If you use this software, please cite the thesis below."
+title: "triago_control"
+type: software
+authors:
+  - family-names: "Rocco"
+    given-names: "Roberto"
+license: BSD-3-Clause
+repository-code: "https://github.com/Robertorocco/triago_control"
+keywords:
+  - shared autonomy
+  - teleoperation
+  - control barrier functions
+  - haptics
+  - bimanual manipulation
+  - ROS 2
+preferred-citation:
+  type: thesis
+  thesis-type: "Master's thesis"
+  title: "Adaptive Human-Robot Shared Autonomy Based on Safety-Aware Control: A Validation Case in Bimanual Manipulation With the TRIAGo Robotic Platform"
+  authors:
+    - family-names: "Rocco"
+      given-names: "Roberto"
+  institution:
+    name: "University of Naples Federico II"
+  year: 2026

@@ -219,7 +219,7 @@ Colcon workspace `~/exchange/ros2-ws/`; this repo at `~/exchange/ros2-ws/src/tri
 ## 14. Git Workflow
 
 - Branches as in §1. Commit messages: one line, imperative, <72 chars. Stage only the task's files.
-- Videos and raw trial data are gitignored and never published.
+- Videos and raw trial data are gitignored and never published. `docs/media/` holds the short README GIFs and images; `docs/REFERENCE.md` holds the launch and interface reference.
 - **After every push**, give the user this sync block:
 
 ```bash

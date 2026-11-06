@@ -1,305 +1,144 @@
-# triago_control
+<p align="center">
+  <img src="docs/media/banner.png" alt="Safety-aware shared autonomy for bimanual teleoperation on the TRIAGo robot" width="100%">
+</p>
 
-A modular, safety-certified motion control framework for the PAL Robotics TRIAGo bimanual platform. The architecture guarantees constraint satisfaction (collision avoidance, joint limits) regardless of the command source — teleoperation, trajectory planning, or autonomous policy.
+<h1 align="center">triago_control</h1>
 
-The system comprises three independent control subsystems running concurrently:
-1. **Bimanual Arm QP Controller** — CLF-CBF safety-critical loop for both arms
-2. **Shared Autonomy** — Bayesian intent prediction + haptic guidance
-3. **Head Visual Servoing** — Independent vision-based head control to keep hands in camera FOV
+<p align="center">
+  <b>Drive a two-armed robot through one haptic handle.</b><br>
+  The robot infers your goal and helps you reach it. A safety filter checks every command before it reaches the arms.
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/ROS_2-Humble-22314E?logo=ros&logoColor=white" alt="ROS 2 Humble">
+  <img src="https://img.shields.io/badge/Python-3.10-3776AB?logo=python&logoColor=white" alt="Python 3.10">
+  <img src="https://img.shields.io/badge/Gazebo-Classic-F58113" alt="Gazebo Classic">
+  <img src="https://img.shields.io/badge/user_study-24_participants-2E7D32" alt="User study with 24 participants">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-BSD--3--Clause-blue" alt="BSD-3-Clause license"></a>
+</p>
+
+<p align="center">
+  <a href="#see-it-work">Demo</a> ·
+  <a href="#how-it-works">How it works</a> ·
+  <a href="#user-study">User study</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#limitations">Limitations</a> ·
+  <a href="thesis/roberto_rocco_master_thesis.pdf">Thesis (PDF)</a>
+</p>
+
+---
+
+**triago_control** is the robot side of a shared-autonomy teleoperation stack for bimanual manipulation on the PAL Robotics TRIAGo, built on ROS 2. It combines a QP-CLF-CBF safety filter (quadratic program, control Lyapunov and control barrier functions), online goal inference, reference-level policy blending, and haptic guidance. The operator-side half, with the device driver and force rendering, is [`haption_teleoperation`](https://github.com/Robertorocco/haption_teleoperation).
+
+## See it work
+
+<p align="center">
+  <img src="docs/media/hardware_grasp.gif" alt="The physical TRIAGo grasping a cup under teleoperation, next to the live RViz view, goal belief and assistance authority" width="100%">
+  <br><sub>Physical robot, teleoperated with force guidance and blending, about 7× speed. Left: the robot. Right: the controller's world model, the goal belief, and the assistance authority α. The first grasp attempt times out, the operator takes over and retries from above.</sub>
+</p>
+
+<p align="center">
+  <img src="docs/media/simulation.gif" alt="Simulated TRIAGo in Gazebo reaching over a table for a battery in the user-study scene" width="100%">
+  <br><sub>The simulated study environment in Gazebo, about 5× speed.</sub>
+</p>
+
+## Why this exists
+
+A confidently wrong robot is worse than no assistance, and a robot that overrides you removes the judgement you were there to provide. So the work is split:
+
+| The operator decides | The robot takes care of |
+|---|---|
+| Which object to pick | The locally best motion toward each candidate goal |
+| Which side of an obstacle to pass | Collision avoidance and joint limits, at every control tick |
+| When to change plan or back out | Tracking precision, and the final autonomous grasp |
+
+Assistance is arbitrated on agreement: it grows while you move with it, and drops to zero when you move against it.
+
+## Highlights
+
+- **Safety filter after arbitration.** Every command, human or assisted, passes through one strictly convex QP at the joint-velocity level, with per-arm SoftMin collision barriers and joint-limit barriers.
+- **Self-tuning tracking.** The QP's own KKT shadow prices tell the robot how constrained it is: tracking tightens in free space and yields near obstacles.
+- **Goal inference on manifolds.** Grasps are sets of equivalent poses, not single targets, and a discounted score ranks them from the operator's twist.
+- **Two assistance channels.** Force guidance on the handle (F) and reference blending (B), which can run alone or together.
+- **Two teleoperation mappings.** Clutch (position control with indexing) and joystick (spring-centred rate control).
+- **Hybrid grasp lifecycle.** The autonomous phase moves the target out of the collision model and back, without force sensing.
+- **Runs on the real robot.** Simulation and hardware share the architecture, with a dedicated [`real-hw`](https://github.com/Robertorocco/triago_control/tree/real-hw) branch.
+
+## How it works
+
+```mermaid
+flowchart LR
+    H([Operator hand]) --> D[Haptic device<br/>clutch or joystick]
+    D -->|operator twist| G[Goal inference<br/>and local policies]
+    D -->|operator twist| B[Reference blending<br/>channel B]
+    G --> B
+    G -->|guidance force<br/>channel F| D
+    B --> S[QP-CLF-CBF<br/>safety filter]
+    S -->|safe joint velocity| R([TRIAGo arms])
+    S -->|shadow prices| S
+```
+
+The full architecture is in [`docs/REFERENCE.md`](docs/REFERENCE.md), and the mathematics is in chapter 3 of the [thesis](thesis/roberto_rocco_master_thesis.pdf).
+
+## User study
+
+A within-subject study with **24 participants** and **288 trials** crossed 2 mappings with 3 assistance strategies in 2 simulated scenes, one needing cooperation between the arms and one not. Each bar below is the mean over participants for one condition. C and J are the clutch and joystick mappings; F, B and FB are force guidance, blending, and both.
+
+<p align="center">
+  <img src="docs/media/results.png" alt="Bar charts of task time, path length, filter active time and trust for the six study conditions" width="100%">
+</p>
+
+| Finding | Evidence |
+|---|---|
+| Assistance moved task time far more than the mapping did | 306 s for JF, 196 s for JFB; no main effect of the mapping |
+| Blending shortened the paths | 8.5 m for CF, 5.1 m for JFB |
+| Force guidance alone was the weakest strategy | Slowest in both mappings, ranked last by 17/24 (clutch) and 21/24 (joystick) |
+| Minimum clearance did not depend on the condition | 1.9 to 2.0 cm in all six |
+| The safety filter had to intervene less | 83 s active in CF, 52 s in JFB |
+| Participants felt more in control with blending | Control 4.54 → 5.77, trust 4.42 → 5.81, on a 7-point scale |
+| Neither mapping won on preference | 13 preferred the clutch, 11 the joystick |
+
+There was no unassisted baseline, so these results compare the strategies with one another, not with plain teleoperation.
+
+## Quick start
+
+You need Ubuntu 22.04, ROS 2 Humble, Pinocchio with hppfcl, `quadprog`, the PAL TRIAGo packages, and [IFRA_LinkAttacher](https://github.com/IFRA-Cranfield/IFRA_LinkAttacher) for simulated grasping. A haptic device is needed for teleoperation.
+
+```bash
+cd ~/ros2_ws/src
+git clone https://github.com/Robertorocco/triago_control.git
+git clone https://github.com/Robertorocco/haption_teleoperation.git
+cd .. && colcon build --symlink-install && source install/setup.bash
+
+# One terminal each
+ros2 launch triago_control simulation_bringup.launch.py world:=rack_world
+ros2 run triago_control main_qp_controller.py --ros-args -p world_name:=rack_world
+ros2 run triago_control main_shared_autonomy.py --ros-args -p world_name:=rack_world -p plot:=false
+```
+
+The teleoperation nodes, the condition selector in `config.py`, and every parameter are covered in [`docs/REFERENCE.md`](docs/REFERENCE.md).
+
+## Limitations
+
+- **The barrier condition is nominal.** The QP enforces it on the sampled state. It is not a certified forward-invariance result for the sampled, actuator-lagged closed loop.
+- **One safety violation on hardware.** In the same trial as the clip above, after the point where the clip ends, a later left-arm grasp stalled. A timed retreat restored a suspended collision pair onto an unresolved overlap, and the operator stopped the robot. Chapter 6 of the thesis analyses the event.
+- **The belief is a heuristic score,** not a probability in the statistical sense.
+- **The user study ran in simulation.** The hardware runs used a larger Haption device and earlier parameters, so they support the mechanisms and do not replicate the study.
+- **Nothing here was tested by ablation.** No run compares the slack schedule or the arbitration law against a simpler alternative.
 
 ## Branches
 
-Two official branches, one per platform setup:
+| Branch | Contents |
+|---|---|
+| `feature/sim-user-study`, mirrored by `main` | Study parameters, analysis tooling, and the thesis, for simulation with the Haption Desktop 6D Compact |
+| `real-hw` | Code and values that ran on the physical robot with the Haption Virtuose 6D. Frozen |
 
-- **`feature/sim-user-study`** (mirrored by **`main`**) — the final version of the thesis. It holds the parameters used in the human-subject study, the user-study tooling (`scripts/analysis/`), and the thesis itself (`thesis/`). It targets the Gazebo simulation with the **Haption Desktop 6D Compact**.
-- **`real-hw`** — the code, values, and logic that ran on the **physical TRIAGo** (with the full-size Haption Virtuose 6D). Frozen: only documentation changes. To see what the study retune changed: `git diff real-hw -- triago_control/qp_controller/config.py`.
+Use the branch of the same name in both repositories. Raw trial data and bags are not in git.
 
-The matching teleoperation branches of [`haption_teleoperation`](https://github.com/Robertorocco/haption_teleoperation) have the same names; check out the same branch in both repositories.
+## Citation
 
-## Thesis
-
-The MSc thesis lives in `thesis/roberto_rocco_master_thesis/` (LaTeX sources, figures, bibliography). The compiled PDF is [`thesis/roberto_rocco_master_thesis.pdf`](thesis/roberto_rocco_master_thesis.pdf). To rebuild it:
-
-```bash
-cd thesis/roberto_rocco_master_thesis
-latexmk -pdf -interaction=nonstopmode main.tex
-cp main.pdf ../roberto_rocco_master_thesis.pdf
-```
-
-Raw trial data, bags, and videos are not in git.
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────────────────────────┐
-│                         EXECUTABLE NODES (scripts/)                               │
-├──────────────────────────┬────────────────────────────┬─────────────────────────┤
-│  qp_arm_teleop/          │  qp_arm_teleop/            │  head_controller/        │
-│  main_qp_controller.py   │  main_shared_autonomy.py   │  qp_head_visual_servo.py │
-│  (arm safety QP loop)    │  (intent + blending)       │  (head visual servoing)  │
-└────────────┬─────────────┴──────────────┬─────────────┴────────────┬────────────┘
-             │                            │                          │
-             ▼                            ▼                          │ (independent)
-┌──────────────────────────┐   ┌───────────────────────────┐        │
-│  triago_control/         │   │  triago_control/          │        │
-│  qp_controller/          │   │  shared_autonomy/         │        │
-│  ├── config.py           │   │  ├── belief_estimator.py  │        │
-│  ├── robot_kinematics.py │   │  ├── goal_set.py          │        │
-│  ├── collision_manager.py│   │  ├── grasp_state_machine.py│       │
-│  ├── qp_formulator.py    │   │  └── plot_manager.py      │        │
-│  ├── shared_autonomy_    │   └───────────────────────────┘        │
-│  │   handler.py          │                                         │
-│  └── visualization_      │         ┌──────────────────────────────┘
-│      engine.py           │         │  Own Pinocchio model + QP
-└──────────────────────────┘         │  Own velocity controller
-                                     │  No coupling to arm pipeline
-                                     ▼
-                              /joint_states → FK → pixel projection
-                              → QP solve → /arm_head_.../joint_velocity_cmd
-```
-
-**Dependency flow:**
-
-```
-main_qp_controller  ──→  qp_controller/*   (the math)
-                    ──→  shared_autonomy_handler  (grasp/CBF-bypass hooks)
-
-main_shared_autonomy ──→  shared_autonomy/*  (belief, goals, state machine)
-                     ──→  publishes references consumed by main_qp_controller
-
-qp_head_visual_servo ──→  own Pinocchio instance (FK + Jacobians)
-                     ──→  own quadprog QP (visual servoing)
-                     ──→  INDEPENDENT: no imports from qp_controller/ or shared_autonomy/
-```
-
-## Key Modules
-
-| Module | Responsibility |
-|--------|---------------|
-| `qp_controller/config.py` | Single source of truth for every flag, gain, buffer and obstacle |
-| `qp_controller/robot_kinematics.py` | Pinocchio model, FK, Jacobians, EMA velocity filter, digital twin |
-| `qp_controller/collision_manager.py` | hppfcl geometries, SoftMin CBF aggregation, dynamic safety margin |
-| `qp_controller/qp_formulator.py` | CLF-CBF-QP assembly and solving (quadprog), adaptive scheduling |
-| `qp_controller/shared_autonomy_handler.py` | Gripper commands, CBF-bypass, cylinder re-parenting |
-| `qp_controller/visualization_engine.py` | Thread-safe Meshcat + RViz markers |
-| `shared_autonomy/belief_estimator.py` | Bayesian intent inference over goal set |
-| `shared_autonomy/goal_set.py` | Dynamic goal pose computation |
-| `shared_autonomy/grasp_state_machine.py` | Pick state machine (approach → contact → close → attach) |
-
-### Head Controller (Independent Subsystem)
-
-| Module | Responsibility |
-|--------|---------------|
-| `scripts/head_controller/qp_head_visual_servo.py` | 2.5D visual servoing QP — keeps both hands centered in camera FOV |
-
-## Prerequisites
-
-- **ROS 2 Humble** (tested on Ubuntu 22.04)
-- **Pinocchio** (with hppfcl collision support)
-- **Python 3.10+**
-- **numpy**, **scipy**, **matplotlib**
-- **quadprog** (`pip install quadprog` or `apt install python3-quadprog`)
-- **PAL TRIAGo packages** (URDF, controller manager, gripper controllers)
-- **IFRA_LinkAttacher** (Gazebo grasp plugin — see below)
-- **Meshcat** (optional, for 3D visualization at `http://127.0.0.1:7000/static/`)
-
-## Build
-
-```bash
-cd ~/exchange/ros2-ws
-colcon build --symlink-install
-source /opt/ros/${ROS_DISTRO}/setup.bash
-source install/setup.bash
-```
-
-`--symlink-install` is load-bearing here: `config/`, `launch/` and the Python nodes are symlinked into `install/`, so plain edits take effect without a rebuild (a new file still needs one). Don't mix build modes in the same `install/` tree — switching requires `rm -rf build/<pkg> install/<pkg>` first.
-
-## Gazebo Grasp Plugin (IFRA_LinkAttacher)
-
-Required for pick-and-place in simulation. Creates a fixed joint between gripper and object.
-
-```bash
-# Install (separate repo, not part of triago_control)
-cd ~/exchange/ros2-ws/src
-git clone https://github.com/IFRA-Cranfield/IFRA_LinkAttacher.git
-cd ~/exchange/ros2-ws
-colcon build --packages-up-to ros2_linkattacher
-source install/setup.bash
-```
-
-Add to your Gazebo world file:
-```xml
-<plugin name="ros2_linkattacher" filename="libgazebo_link_attacher.so"/>
-```
-
-Before launching Gazebo:
-```bash
-export GAZEBO_PLUGIN_PATH=$GAZEBO_PLUGIN_PATH:~/exchange/ros2-ws/install/ros2_linkattacher/lib
-```
-
-## Run
-
-### Full Simulation Launch Sequence (typical session)
-
-Each command runs in its own terminal (workspace sourced). Robot/control side first, then the teleoperation side.
-
-**Robot / control side:**
-
-```bash
-cd ~/exchange/ros2-ws
-colcon build --symlink-install
-source /opt/ros/${ROS_DISTRO}/setup.bash
-source install/setup.bash
-export GAZEBO_MODEL_PATH=$GAZEBO_MODEL_PATH:~/exchange/ros2-ws/src/pal-packages/pal_gazebo_worlds
-
-# 1. Gazebo world + robot spawn + TSID controllers + mobile-base teleop + three RViz
-#    stations (operator: head camera + left-arm tracking; overview: wide scene;
-#    right-arm tracking) + the robot-model filter that dims non-arm links.
-ros2 launch triago_control simulation_bringup.launch.py world:=rack_world
-
-# 2. QP CLF-CBF safety controller
-#    world_name must match step 1 -- override BOTH this AND step 3 together if
-#    you launch a different world; see triago_control/qp_controller/world_loader.py
-ros2 run triago_control main_qp_controller.py --ros-args -p world_name:=rack_world
-
-# 3. Shared autonomy + belief evaluation (-p plot:=false suspends its live dashboard)
-ros2 run triago_control main_shared_autonomy.py --ros-args -p world_name:=rack_world -p plot:=false
-
-# 4. Head camera tracks the active teleop arm (-p plot:=false suspends its dashboard)
-ros2 run triago_control head_active_arm_tracking.py --ros-args -p plot:=false
-
-# 5. Trial recorder GUI (bag record + per-trial metadata; auto-analyzes on SAVE)
-ros2 run triago_control study_recorder.py
-```
-
-`world:=rack_world` is `simulation_bringup.launch.py`'s default; pass `world:=no_obstacle` (or any other `config/worlds/*.yaml` name) to launch a different scenario — see [Configuration](#configuration). Launch-file args: `end_effector_right`/`end_effector_left` (default `pal-pro-gripper`), `base_controller`, `rviz_stations` (both default `true`).
-
-**Teleoperation side (haption_teleoperation):**
-
-```bash
-# 6. Haption device server (150 Hz)
-ros2 run haption_teleoperation virtuose_server_node
-
-# 7. Teleop for the active mode (JOYSTICK here; teleop_triago_clutch.py for CLUTCH). With ASSIST_BLENDING on it publishes the operator twist to
-#    /arm_*/user_cartesian_reference, and main_shared_autonomy.py becomes the sole
-#    writer of /arm_*/cartesian_reference; with blending off, this node owns that topic.
-ros2 run haption_teleoperation teleop_triago_joystick.py
-
-# 8. Force feedback for the active cell -- must match config.py's condition triple
-ros2 run haption_teleoperation haptic_force_manager_JFB.py
-```
-
-> **The active cell is set in `config.py` (§1b), not here.** It is currently `CONTROL_MODE=JOYSTICK`, `ASSIST_FEEDBACK=True`, `ASSIST_BLENDING=True` — cell **JFB** (full guidance), hence `haptic_force_manager_JFB.py` above. Change the flags and step 8 must change with them: every teleop and force-manager node calls `cfg.validate_condition(...)` at startup and hard-errors on a mismatch, so a mis-launched pair fails loudly rather than silently recording the wrong condition. The force manager consumes `/shared_autonomy/{goal_names, goal_probabilities, user_policy, active_goal_pose, grasp_active}` published by `main_shared_autonomy.py` to compute the guidance wrench sent to the Haption device.
->
-> **Force-manager naming convention.** Every force manager is `haptic_force_manager_<CELL>`, where `<CELL>` encodes the active study condition as letters: **C** = CLUTCH or **J** = JOYSTICK (the control mode, always first), then **F** if `ASSIST_FEEDBACK` is on, then **B** if `ASSIST_BLENDING` is on. The study itself is a 2×3 design (2 control modes × 3 assistance combinations `{F, B, FB}` = 6 cells); the no-assist baseline (`C`/`J`, just the mode letter) still works end-to-end in code but is excluded from the study:
->
-> | File | CONTROL_MODE | ASSIST_FEEDBACK | ASSIST_BLENDING | Condition |
-> |---|---|---|---|---|
-> | `haptic_force_manager_C` | CLUTCH | False | False | Sync only (baseline, **not in the study**) |
-> | `haptic_force_manager_CF` | CLUTCH | True | False | Guided feedback (VF) |
-> | `haptic_force_manager_CB` | CLUTCH | False | True | Guided blending |
-> | `haptic_force_manager_CFB` | CLUTCH | True | True | Full guidance |
-> | `haptic_force_manager_J` | JOYSTICK | False | False | Sync only (baseline, **not in the study**) |
-> | `haptic_force_manager_JF` | JOYSTICK | True | False | Guided feedback |
-> | `haptic_force_manager_JB` | JOYSTICK | False | True | Guided blending |
-> | `haptic_force_manager_JFB` | JOYSTICK | True | True | Full guidance |
-
-### QP Safety Controller (bimanual arms)
-
-```bash
-ros2 run triago_control main_qp_controller.py
-```
-
-Subscribes to `/arm_right/cartesian_reference` and `/arm_left/cartesian_reference` (Float64MultiArray, 12+ floats: pos, rpy, vel, omega).
-
-### Shared Autonomy Node
-
-```bash
-ros2 run triago_control main_shared_autonomy.py
-```
-
-Publishes cartesian references for the QP controller based on predicted human intent and optimal policy blending.
-
-### Head Visual Servoing (Independent)
-
-```bash
-ros2 run triago_control qp_head_visual_servo.py
-```
-
-Independently controls the 7-DOF head arm to keep both hands in the camera field-of-view. Uses a QP with 2.5D interaction-matrix-based image servoing (IBVS) when hands are visible, and a 3D rotational look-at (PBVS) when hands are outside FOV. Runs concurrently with the arm QP — no coupling between the two.
-
-### Auxiliary Nodes
-
-```bash
-ros2 run triago_control plotter.py              # Live telemetry dashboard
-ros2 run triago_control keyboard_teleop.py      # Keyboard-based cartesian jog
-ros2 run triago_control base_controller.py      # Mobile base velocity control
-ros2 run triago_control drift_evaluator_node.py # Tracking error analysis
-```
-
-## Configuration
-
-All tunable parameters live in `triago_control/qp_controller/config.py`:
-
-- **Study condition** (§1b): `CONTROL_MODE`, `ASSIST_FEEDBACK`, `ASSIST_BLENDING` — the 2x3 study cell selector (plus the code-only C/J baseline), also read by `haption_teleoperation`
-- **Feature flags**: `DISABLE_CBF`, `DYNAMIC_SLACK_WEIGHT`, `COMPARISON_CLF`, etc.
-- **Safety gains**: `ALPHA_SOFTMIN`, `GAMMA_CBF`, `D_SAFE_BASE`, `K_V_SAFE`
-- **Control loop**: `CONTROL_FREQ_DEFAULT` (Hz), `PUBLISH_EVERY_N`
-- **Workspace geometry**: obstacle positions, capsule radius, wall dimensions
-- **Per-world posture overrides**: `POSTURE_TARGET_BY_WORLD`, `POSTURE_TARGET_WEIGHT_BY_WORLD`, `WRIST_BRANCH_MIN_BY_WORLD` — keyed by world name, they retarget the posture field and latch a virtual joint floor to keep `arm_*_6_joint` out of its unrecoverable IK branch
-
-Goal-manifold shaping lives with the geometry in `shared_autonomy/goal_set.py` (grasp standoffs, azimuth/roll confidence bands, `GOAL_DIRECTION_FILTER_TAU`), not in `config.py`.
-
-## Simulation vs. Real Hardware (Auto-Detection)
-
-The QP controller **automatically detects** whether it is running on real hardware or in Gazebo simulation. Two nodes still need a manual flag on the real robot: `main_shared_autonomy.py` (`-p real_hardware:=true`, else it tries the Gazebo LinkAttacher plugin) and `main_head.py` (`-p real_hardware_head:=true`, or launch it via `launch/head_real.launch.py`).
-
-**Detection method**: At startup, `main_qp_controller.py` fetches the URDF from `robot_state_publisher` and checks for the presence of `gripper_right_grasping_link` and `gripper_left_grasping_link`:
-
-| Condition | Environment | `REAL_HARDWARE` |
-|-----------|-------------|-----------------|
-| Both frames present in URDF | Gazebo simulation | `False` |
-| One or both frames missing | Real TRIAGo | `True` |
-
-**Behavioral differences when `REAL_HARDWARE = True`**:
-
-1. **Grasping frame injection**: The missing `gripper_*_grasping_link` frames are injected into the Pinocchio model at runtime (offset: `[0, 0, 0.157]`, Ry(-90°) from `gripper_*_base_link`) and broadcast as static TFs for RViz and other nodes.
-
-2. **Derived joint velocity everywhere**: On both sim and real hardware, joint velocity is reconstructed from position differences + EMA filtering rather than read from `/joint_states` `msg.velocity` — the raw sensor velocity is noisy and gets amplified by the QP's rate-damping term.
-
-A colored startup banner in the console announces the detected environment:
-```
-[ENV] REAL HARDWARE detected (URDF lacks grasping frames). Using direct joint velocities + injecting TCP frames.
-[ENV] SIMULATION detected (URDF contains grasping frames). Using EMA-filtered velocity from position differentiation.
-```
-
-## ROS 2 Interface
-
-### Subscribed Topics
-
-| Topic | Type | Description |
-|-------|------|-------------|
-| `/joint_states` | `sensor_msgs/JointState` | Hardware joint positions |
-| `/arm_right/cartesian_reference` | `std_msgs/Float64MultiArray` | Right arm reference (12+ floats) |
-| `/arm_left/cartesian_reference` | `std_msgs/Float64MultiArray` | Left arm reference (12+ floats) |
-| `/shared_autonomy/gripper_cmd` | `std_msgs/String` | CLOSE/ORANGE/ATTACH commands |
-| `/shared_autonomy/target_ignore` | `std_msgs/String` | +/- CBF bypass protocol |
-| `/shared_autonomy/grasp_margin` | `std_msgs/String` | Per-pair negative margins |
-
-### Published Topics
-
-| Topic | Type | Description |
-|-------|------|-------------|
-| `/{controller}/joint_velocity_cmd` | `std_msgs/Float64MultiArray` | Safe joint velocities |
-| `/qp_debug/safety_margin` | `std_msgs/Float64` | h_soft - d_safe |
-| `/qp_debug/min_distance` | `std_msgs/Float64` | Absolute closest distance |
-| `/qp_debug/lambda_cbf` | `std_msgs/Float64` | Collision constraint shadow price |
-| `/qp_debug/slacks` | `std_msgs/Float64MultiArray` | CLF slack [right, left] |
-| `/collision_constraints` | `std_msgs/Float64MultiArray` | Cartesian CBF projection (13 floats) |
-| `/qp_debug/head_cartesian_cmd` | `geometry_msgs/TwistStamped` | Head camera velocity command (debug) |
-| `/qp_debug/camera_ray` | `visualization_msgs/Marker` | Camera optical axis (RViz) |
-| `/qp_debug/target_centroid` | `visualization_msgs/Marker` | Hands centroid sphere (RViz) |
+GitHub's **Cite this repository** button gives the reference, from [`CITATION.cff`](CITATION.cff).
 
 ## License
 
-BSD-3-Clause — see [LICENSE](LICENSE).
+BSD-3-Clause, see [LICENSE](LICENSE).
